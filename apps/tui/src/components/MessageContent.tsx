@@ -1,23 +1,33 @@
 import React from "react";
-import { Text } from "ink";
+import { Text, useStdout } from "ink";
+import { StreamMarkdown } from "ink-stream-markdown";
 
 export function MessageContent({
   role,
   text,
-  streaming = false,
 }: {
   role: "user" | "assistant";
   text: string;
-  streaming?: boolean;
 }) {
-  if (!text && streaming) {
+  const { stdout } = useStdout();
+  const width = stdout.columns ?? 80;
+
+  if (!text) {
     return null;
   }
 
+  if (role === "user") {
+    return (
+      <Text wrap="wrap" color="cyan">
+        {"> "}
+        {text}
+      </Text>
+    );
+  }
+
   return (
-    <Text wrap="wrap" color={role === "user" ? "cyan" : undefined}>
-      {role === "user" ? "> " : ""}
+    <StreamMarkdown theme={{ width: Math.max(width, 40) }}>
       {text}
-    </Text>
+    </StreamMarkdown>
   );
 }

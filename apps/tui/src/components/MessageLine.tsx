@@ -21,7 +21,7 @@ export function MessageLine({
 
   return (
     <Box marginBottom={gapAfter ? 1 : 0}>
-      <MessageContent role={line.role} text={line.text} streaming={streaming} />
+      <MessageContent role={line.role} text={line.text} />
     </Box>
   );
 }
