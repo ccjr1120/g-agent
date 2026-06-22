@@ -7,6 +7,8 @@ export type ServerMessage =
   | { type: "ready" }
   | { type: "start" }
   | { type: "delta"; text: string }
+  | { type: "tool_call"; name: string; args: string }
+  | { type: "tool_result"; name: string; output: string }
   | { type: "done" }
   | { type: "error"; message: string };
 

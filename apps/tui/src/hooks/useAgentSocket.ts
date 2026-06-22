@@ -16,6 +16,38 @@ function createLineId(): string {
   return crypto.randomUUID();
 }
 
+function formatToolCall(name: string, args: string): string {
+  try {
+    const parsed = JSON.parse(args) as Record<string, unknown>;
+    if (name === "bash" && typeof parsed.command === "string") {
+      return `bash(${parsed.command})`;
+    }
+    if (name === "read" && typeof parsed.path === "string") {
+      return `read(${parsed.path})`;
+    }
+    if (name === "write" && typeof parsed.path === "string") {
+      return `write(${parsed.path})`;
+    }
+    if (name === "glob" && typeof parsed.pattern === "string") {
+      return `glob(${parsed.pattern})`;
+    }
+    if (name === "grep" && typeof parsed.pattern === "string") {
+      return `grep(${parsed.pattern})`;
+    }
+  } catch {
+    // fall through
+  }
+  return `${name}(…)`;
+}
+
+function formatToolResult(output: string): string {
+  const line = output.split("\n")[0] ?? "";
+  if (line.length > 80) {
+    return `${line.slice(0, 77)}…`;
+  }
+  return line || "(empty)";
+}
+
 export function useAgentSocket(serverUrl: string) {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [staticLines, setStaticLines] = useState<ChatLine[]>([]);
@@ -78,6 +110,30 @@ export function useAgentSocket(serverUrl: string) {
               };
             }
             return { ...current, text: current.text + message.text };
+          });
+          break;
+        case "tool_call":
+          setStreamingLine((current) => {
+            const base =
+              current ??
+              ({
+                id: createLineId(),
+                role: "assistant",
+                text: "",
+              } as ChatLine);
+            return {
+              ...base,
+              text: `${base.text}\n⏺ ${formatToolCall(message.name, message.args)}\n`,
+            };
+          });
+          break;
+        case "tool_result":
+          setStreamingLine((current) => {
+            if (!current) return current;
+            return {
+              ...current,
+              text: `${current.text}  ${formatToolResult(message.output)}\n`,
+            };
           });
           break;
         case "done":

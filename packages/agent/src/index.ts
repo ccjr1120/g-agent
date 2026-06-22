@@ -1,5 +1,17 @@
+import { formatSkillsPrompt, type Skill } from "./skills/index.js";
+import {
+  builtinTools,
+  executeTool,
+  toOpenAITools,
+} from "./tools/index.js";
+
+export { loadSkills, resolveSkillsDir, type LoadedSkills, type Skill } from "./skills/index.js";
+export { builtinTools, type ToolDefinition } from "./tools/index.js";
+
 export type AgentStreamEvent =
   | { type: "delta"; text: string }
+  | { type: "tool_call"; name: string; args: string }
+  | { type: "tool_result"; name: string; output: string }
   | { type: "done" }
   | { type: "error"; message: string };
 
@@ -11,16 +23,35 @@ export type ResolvedProvider = {
   apiKey: string;
 };
 
+type ToolCallMessage = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+type ChatMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string }
+  | {
+      role: "assistant";
+      content: string | null;
+      tool_calls?: ToolCallMessage[];
+    }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+const MAX_TOOL_ROUNDS = 25;
+
 export async function runAgent(
   prompt: string,
   onEvent: (event: AgentStreamEvent) => void,
   provider?: ResolvedProvider | null,
+  skills: Skill[] = [],
 ): Promise<void> {
   const resolved = provider ?? resolveProviderFromEnv();
 
   try {
     if (resolved) {
-      await streamOpenAI(prompt, onEvent, resolved);
+      await runOpenAI(resolved, prompt, skills, onEvent);
     } else {
       await streamEcho(prompt, onEvent);
     }
@@ -63,60 +94,111 @@ async function streamEcho(
   }
 }
 
-async function streamOpenAI(
+function buildInitialMessages(
   prompt: string,
-  onEvent: (event: AgentStreamEvent) => void,
+  skills: Skill[],
+): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  const systemPrompt = formatSkillsPrompt(skills, prompt);
+  if (systemPrompt) {
+    messages.push({ role: "system", content: systemPrompt });
+  }
+  messages.push({ role: "user", content: prompt });
+  return messages;
+}
+
+async function runOpenAI(
   provider: ResolvedProvider,
+  prompt: string,
+  skills: Skill[],
+  onEvent: (event: AgentStreamEvent) => void,
 ): Promise<void> {
-  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${provider.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: provider.modelName ?? provider.model,
-      stream: true,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
+  const messages = buildInitialMessages(prompt, skills);
+  const tools = toOpenAITools(builtinTools);
+  const model = provider.modelName ?? provider.model;
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`LLM request failed (${response.status}): ${body}`);
-  }
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${provider.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        messages,
+        tools,
+        tool_choice: "auto",
+      }),
+    });
 
-  if (!response.body) {
-    throw new Error("LLM response has no body");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-
-      const payload = trimmed.slice(5).trim();
-      if (payload === "[DONE]") return;
-
-      const chunk = JSON.parse(payload) as {
-        choices?: Array<{ delta?: { content?: string } }>;
-      };
-      const text = chunk.choices?.[0]?.delta?.content;
-      if (text) {
-        onEvent({ type: "delta", text });
-      }
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`LLM request failed (${response.status}): ${body}`);
     }
+
+    const data = (await response.json()) as {
+      choices?: Array<{
+        message?: {
+          content?: string | null;
+          tool_calls?: ToolCallMessage[];
+        };
+      }>;
+    };
+
+    const message = data.choices?.[0]?.message;
+    if (!message) {
+      throw new Error("LLM response has no message");
+    }
+
+    if (message.tool_calls?.length) {
+      messages.push({
+        role: "assistant",
+        content: message.content ?? null,
+        tool_calls: message.tool_calls,
+      });
+
+      for (const call of message.tool_calls) {
+        const name = call.function.name;
+        const argsText = call.function.arguments;
+        onEvent({ type: "tool_call", name, args: argsText });
+
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(argsText) as Record<string, unknown>;
+        } catch {
+          const output = "Error: tool arguments must be valid JSON";
+          onEvent({ type: "tool_result", name, output });
+          messages.push({ role: "tool", tool_call_id: call.id, content: output });
+          continue;
+        }
+
+        const output = await executeTool(name, args);
+        onEvent({ type: "tool_result", name, output });
+        messages.push({ role: "tool", tool_call_id: call.id, content: output });
+      }
+
+      continue;
+    }
+
+    const text = message.content?.trim();
+    if (text) {
+      await streamText(text, onEvent);
+    }
+    return;
+  }
+
+  throw new Error(`Too many tool call rounds (max ${MAX_TOOL_ROUNDS})`);
+}
+
+async function streamText(
+  text: string,
+  onEvent: (event: AgentStreamEvent) => void,
+): Promise<void> {
+  for (const char of text) {
+    onEvent({ type: "delta", text: char });
+    await sleep(4);
   }
 }
 

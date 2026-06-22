@@ -1,5 +1,5 @@
 import type { ServerWebSocket } from "bun";
-import { runAgent } from "@g-agent/agent";
+import { builtinTools, loadSkills, runAgent } from "@g-agent/agent";
 import {
   formatProviderRef,
   getActiveProvider,
@@ -10,6 +10,7 @@ import {
 import { parseClientMessage, type ServerMessage } from "@g-agent/shared";
 
 const { config, path: configPath } = await loadConfig();
+const { skills, path: skillsPath } = await loadSkills();
 const provider = getActiveProvider(config);
 const host = getServerHost();
 const port = getServerPort();
@@ -59,6 +60,24 @@ Bun.serve({
             return;
           }
 
+          if (event.type === "tool_call") {
+            send(ws, {
+              type: "tool_call",
+              name: event.name,
+              args: event.args,
+            });
+            return;
+          }
+
+          if (event.type === "tool_result") {
+            send(ws, {
+              type: "tool_result",
+              name: event.name,
+              output: event.output,
+            });
+            return;
+          }
+
           if (event.type === "error") {
             send(ws, { type: "error", message: event.message });
             return;
@@ -67,6 +86,7 @@ Bun.serve({
           send(ws, { type: "done" });
         },
         provider,
+        skills,
       );
     },
   },
@@ -74,6 +94,12 @@ Bun.serve({
 
 const providerLabel = provider ? formatProviderRef(provider) : "echo";
 const configLabel = configPath ?? "none";
+const skillsLabel =
+  skills.length > 0
+    ? `${skills.length} (${skillsPath})`
+    : skillsPath
+      ? `0 (${skillsPath})`
+      : "none";
 console.log(
-  `G-Agent server ws://${host}:${port} · provider=${providerLabel} · config=${configLabel}`,
+  `G-Agent server ws://${host}:${port} · provider=${providerLabel} · config=${configLabel} · skills=${skillsLabel} · tools=${builtinTools.length}`,
 );
