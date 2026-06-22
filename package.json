@@ -1,0 +1,15 @@
+{
+  "name": "g-agent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A simple terminal agent monorepo",
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "dev": "pnpm --filter @g-agent/tui dev",
+    "start": "pnpm --filter @g-agent/tui start"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

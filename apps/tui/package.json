@@ -1,0 +1,22 @@
+{
+  "name": "@g-agent/tui",
+  "version": "0.1.0",
+  "description": "G-Agent terminal UI",
+  "type": "module",
+  "bin": {
+    "g-agent": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "bun build ./src/cli.tsx --outfile ./dist/cli.js --target bun --format esm --packages external --banner \"#!/usr/bin/env bun\"",
+    "dev": "bun ./src/cli.tsx",
+    "start": "bun ./dist/cli.js"
+  },
+  "dependencies": {
+    "ink": "^5.2.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "typescript": "^5.7.2"
+  }
+}
