@@ -1,0 +1,34 @@
+export type ClientMessage = {
+  type: "chat";
+  message: string;
+};
+
+export type ServerMessage =
+  | { type: "ready" }
+  | { type: "start" }
+  | { type: "delta"; text: string }
+  | { type: "done" }
+  | { type: "error"; message: string };
+
+export const DEFAULT_SERVER_PORT = 3847;
+export const DEFAULT_SERVER_URL = `ws://127.0.0.1:${DEFAULT_SERVER_PORT}`;
+
+export function parseServerMessage(raw: string): ServerMessage | null {
+  try {
+    return JSON.parse(raw) as ServerMessage;
+  } catch {
+    return null;
+  }
+}
+
+export function parseClientMessage(raw: string): ClientMessage | null {
+  try {
+    const data = JSON.parse(raw) as ClientMessage;
+    if (data.type === "chat" && typeof data.message === "string") {
+      return data;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

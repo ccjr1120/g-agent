@@ -6,8 +6,10 @@
   "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "pnpm -r run build",
-    "dev": "pnpm --filter @g-agent/tui dev",
-    "start": "pnpm --filter @g-agent/tui start"
+    "dev": "bash scripts/dev.sh",
+    "dev:server": "pnpm --filter @g-agent/server dev",
+    "dev:tui": "pnpm --filter @g-agent/tui dev",
+    "start": "pnpm --parallel --filter @g-agent/server --filter @g-agent/tui start"
   },
   "engines": {
     "node": ">=18"
