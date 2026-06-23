@@ -1,4 +1,4 @@
-import { formatSkillsPrompt, type Skill } from "./skills/index.js";
+import { buildSystemPrompt, type LoadedSkills } from "./skills/index.js";
 import {
   builtinTools,
   executeTool,
@@ -45,13 +45,13 @@ export async function runAgent(
   prompt: string,
   onEvent: (event: AgentStreamEvent) => void,
   provider?: ResolvedProvider | null,
-  skills: Skill[] = [],
+  loadedSkills: LoadedSkills = { skills: [], builtinPath: "", userPath: null },
 ): Promise<void> {
   const resolved = provider ?? resolveProviderFromEnv();
 
   try {
     if (resolved) {
-      await runOpenAI(resolved, prompt, skills, onEvent);
+      await runOpenAI(resolved, prompt, loadedSkills, onEvent);
     } else {
       await streamEcho(prompt, onEvent);
     }
@@ -96,13 +96,11 @@ async function streamEcho(
 
 function buildInitialMessages(
   prompt: string,
-  skills: Skill[],
+  loadedSkills: LoadedSkills,
 ): ChatMessage[] {
   const messages: ChatMessage[] = [];
-  const systemPrompt = formatSkillsPrompt(skills, prompt);
-  if (systemPrompt) {
-    messages.push({ role: "system", content: systemPrompt });
-  }
+  const systemPrompt = buildSystemPrompt(loadedSkills.skills, loadedSkills.userPath);
+  messages.push({ role: "system", content: systemPrompt });
   messages.push({ role: "user", content: prompt });
   return messages;
 }
@@ -110,10 +108,10 @@ function buildInitialMessages(
 async function runOpenAI(
   provider: ResolvedProvider,
   prompt: string,
-  skills: Skill[],
+  loadedSkills: LoadedSkills,
   onEvent: (event: AgentStreamEvent) => void,
 ): Promise<void> {
-  const messages = buildInitialMessages(prompt, skills);
+  const messages = buildInitialMessages(prompt, loadedSkills);
   const tools = toOpenAITools(builtinTools);
   const model = provider.modelName ?? provider.model;
 

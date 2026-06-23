@@ -10,7 +10,7 @@ import {
 import { parseClientMessage, type ServerMessage } from "@g-agent/shared";
 
 const { config, path: configPath } = await loadConfig();
-const { skills, path: skillsPath } = await loadSkills();
+const { skills, builtinPath, userPath: skillsPath } = await loadSkills();
 const provider = getActiveProvider(config);
 const host = getServerHost();
 const port = getServerPort();
@@ -34,6 +34,10 @@ Bun.serve({
   websocket: {
     open(ws) {
       send(ws, { type: "ready" });
+      send(ws, {
+        type: "skills",
+        skills: skills.map((s) => ({ name: s.name, description: s.description })),
+      });
     },
     async message(ws, raw) {
       const text = typeof raw === "string" ? raw : raw.toString();
@@ -41,6 +45,10 @@ Bun.serve({
 
       if (!message) {
         send(ws, { type: "error", message: "Invalid message" });
+        return;
+      }
+
+      if (message.type === "reset") {
         return;
       }
 
@@ -86,7 +94,7 @@ Bun.serve({
           send(ws, { type: "done" });
         },
         provider,
-        skills,
+        { skills, builtinPath, userPath: skillsPath },
       );
     },
   },
@@ -94,12 +102,9 @@ Bun.serve({
 
 const providerLabel = provider ? formatProviderRef(provider) : "echo";
 const configLabel = configPath ?? "none";
-const skillsLabel =
-  skills.length > 0
-    ? `${skills.length} (${skillsPath})`
-    : skillsPath
-      ? `0 (${skillsPath})`
-      : "none";
+const builtinCount = skills.filter((s) => s.source === "builtin").length;
+const userCount = skills.filter((s) => s.source === "user").length;
+const skillsLabel = `builtin=${builtinCount} user=${userCount}${skillsPath ? ` (${skillsPath})` : ""}`;
 console.log(
   `G-Agent server ws://${host}:${port} · provider=${providerLabel} · config=${configLabel} · skills=${skillsLabel} · tools=${builtinTools.length}`,
 );

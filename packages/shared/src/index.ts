@@ -1,10 +1,10 @@
-export type ClientMessage = {
-  type: "chat";
-  message: string;
-};
+export type ClientMessage =
+  | { type: "chat"; message: string }
+  | { type: "reset" };
 
 export type ServerMessage =
   | { type: "ready" }
+  | { type: "skills"; skills: Array<{ name: string; description: string }> }
   | { type: "start" }
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; args: string }
@@ -27,6 +27,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
   try {
     const data = JSON.parse(raw) as ClientMessage;
     if (data.type === "chat" && typeof data.message === "string") {
+      return data;
+    }
+    if (data.type === "reset") {
       return data;
     }
     return null;
