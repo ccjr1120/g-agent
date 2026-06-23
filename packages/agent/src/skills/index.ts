@@ -128,9 +128,6 @@ export function buildSystemPrompt(
   const builtinSkills = skills.filter((s) => s.source === "builtin");
   const userSkills = skills.filter((s) => s.source === "user");
 
-  const memorySkill = builtinSkills.find((s) => s.name === "memory");
-  const otherBuiltin = builtinSkills.filter((s) => s.name !== "memory");
-
   const lines: string[] = [
     "You are g-agent, a personal daily assistant running in the terminal.",
     "You are capable, direct, and efficient. Prefer concise responses.",
@@ -147,18 +144,13 @@ export function buildSystemPrompt(
     "Use tools proactively when they help you give accurate, grounded answers.",
   ];
 
-  if (memorySkill) {
-    lines.push("", "## Memory", "");
-    lines.push(memorySkill.body);
-  }
-
-  if (otherBuiltin.length > 0) {
+  if (builtinSkills.length > 0) {
     lines.push("", "## Built-in skills", "");
     lines.push(
       "When a skill is relevant, use the `read` tool to load its SKILL.md before following its instructions.",
       "",
     );
-    for (const skill of otherBuiltin) {
+    for (const skill of builtinSkills) {
       lines.push(
         `- **${skill.name}** — ${skill.description ? skill.description + " " : ""}(instructions: \`${skill.path}\`)`,
       );

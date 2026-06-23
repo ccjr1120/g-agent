@@ -1,5 +1,10 @@
 import type { ServerWebSocket } from "bun";
-import { builtinTools, loadSkills, runAgent } from "@g-agent/agent";
+import {
+  buildSessionSystemPrompt,
+  builtinTools,
+  loadSkills,
+  runAgent,
+} from "@g-agent/agent";
 import {
   formatProviderRef,
   getActiveProvider,
@@ -10,7 +15,9 @@ import {
 import { parseClientMessage, type ServerMessage } from "@g-agent/shared";
 
 const { config, path: configPath } = await loadConfig();
-const { skills, builtinPath, userPath: skillsPath } = await loadSkills();
+const loadedSkills = await loadSkills();
+const { skills, builtinPath, userPath: skillsPath } = loadedSkills;
+const sessionSystemPrompt = buildSessionSystemPrompt(loadedSkills);
 const provider = getActiveProvider(config);
 const host = getServerHost();
 const port = getServerPort();
@@ -38,6 +45,7 @@ Bun.serve({
         type: "skills",
         skills: skills.map((s) => ({ name: s.name, description: s.description })),
       });
+      send(ws, { type: "system_prompt", text: sessionSystemPrompt });
     },
     async message(ws, raw) {
       const text = typeof raw === "string" ? raw : raw.toString();
@@ -49,6 +57,7 @@ Bun.serve({
       }
 
       if (message.type === "reset") {
+        send(ws, { type: "system_prompt", text: sessionSystemPrompt });
         return;
       }
 
@@ -63,6 +72,11 @@ Bun.serve({
       await runAgent(
         prompt,
         (event) => {
+          if (event.type === "system_prompt") {
+            send(ws, { type: "system_prompt", text: event.text });
+            return;
+          }
+
           if (event.type === "delta") {
             send(ws, { type: "delta", text: event.text });
             return;
@@ -94,7 +108,7 @@ Bun.serve({
           send(ws, { type: "done" });
         },
         provider,
-        { skills, builtinPath, userPath: skillsPath },
+        loadedSkills,
       );
     },
   },

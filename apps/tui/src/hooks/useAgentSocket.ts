@@ -20,6 +20,7 @@ export type SkillInfo = {
 
 type LogEntry =
   | { type: "user"; text: string; ts: number }
+  | { type: "system_prompt"; text: string; ts: number }
   | { type: "start"; ts: number }
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; args: string }
@@ -112,6 +113,9 @@ export function useAgentSocket(serverUrl: string) {
           break;
         case "skills":
           setSkills(message.skills);
+          break;
+        case "system_prompt":
+          setLog((prev) => [...prev, { type: "system_prompt", text: message.text, ts: Date.now() }]);
           break;
         case "start":
           setPending(false);
@@ -234,20 +238,35 @@ export function useAgentSocket(serverUrl: string) {
 
   const dumpLog = useCallback(async (): Promise<string> => {
     const startedAt = log.find((e) => e.type === "user")?.ts ?? Date.now();
+    const systemPrompt = [...log]
+      .reverse()
+      .find((e): e is Extract<LogEntry, { type: "system_prompt" }> => e.type === "system_prompt")
+      ?.text;
     const lines: string[] = [
       `# Conversation Log`,
       ``,
       `${new Date(startedAt).toLocaleString()}`,
       ``,
-      `---`,
-      ``,
     ];
+
+    if (systemPrompt) {
+      lines.push(`## ⚙️ System Prompt`);
+      lines.push(``);
+      lines.push("```");
+      lines.push(systemPrompt);
+      lines.push("```");
+      lines.push(``);
+    }
+
+    lines.push(`---`, ``);
 
     let assistantText = "";
     let turnStartTs = 0;
 
     for (const entry of log) {
       switch (entry.type) {
+        case "system_prompt":
+          break;
         case "user":
           lines.push(`## 🧑 User  <sub>${new Date(entry.ts).toLocaleTimeString()}</sub>`);
           lines.push(``);

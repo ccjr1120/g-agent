@@ -5,10 +5,17 @@ import {
   toOpenAITools,
 } from "./tools/index.js";
 
-export { loadSkills, resolveSkillsDir, type LoadedSkills, type Skill } from "./skills/index.js";
+export {
+  buildSystemPrompt,
+  loadSkills,
+  resolveSkillsDir,
+  type LoadedSkills,
+  type Skill,
+} from "./skills/index.js";
 export { builtinTools, type ToolDefinition } from "./tools/index.js";
 
 export type AgentStreamEvent =
+  | { type: "system_prompt"; text: string }
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "tool_result"; name: string; output: string }
@@ -53,7 +60,7 @@ export async function runAgent(
     if (resolved) {
       await runOpenAI(resolved, prompt, loadedSkills, onEvent);
     } else {
-      await streamEcho(prompt, onEvent);
+      await streamEcho(prompt, loadedSkills, onEvent);
     }
     onEvent({ type: "done" });
   } catch (error) {
@@ -83,8 +90,12 @@ function resolveProviderFromEnv(): ResolvedProvider | null {
 
 async function streamEcho(
   prompt: string,
+  loadedSkills: LoadedSkills,
   onEvent: (event: AgentStreamEvent) => void,
 ): Promise<void> {
+  const systemPrompt = buildSessionSystemPrompt(loadedSkills);
+  onEvent({ type: "system_prompt", text: systemPrompt });
+
   const reply =
     "[echo mode — add providers in config.json or set OPENAI_API_KEY]\n" +
     `You said: ${prompt}`;
@@ -94,15 +105,19 @@ async function streamEcho(
   }
 }
 
-function buildInitialMessages(
+export function buildSessionSystemPrompt(loadedSkills: LoadedSkills): string {
+  return buildSystemPrompt(loadedSkills.skills, loadedSkills.userPath);
+}
+
+async function buildInitialMessages(
   prompt: string,
   loadedSkills: LoadedSkills,
-): ChatMessage[] {
-  const messages: ChatMessage[] = [];
-  const systemPrompt = buildSystemPrompt(loadedSkills.skills, loadedSkills.userPath);
-  messages.push({ role: "system", content: systemPrompt });
-  messages.push({ role: "user", content: prompt });
-  return messages;
+): Promise<ChatMessage[]> {
+  const systemPrompt = buildSessionSystemPrompt(loadedSkills);
+  return [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: prompt },
+  ];
 }
 
 async function runOpenAI(
@@ -111,7 +126,11 @@ async function runOpenAI(
   loadedSkills: LoadedSkills,
   onEvent: (event: AgentStreamEvent) => void,
 ): Promise<void> {
-  const messages = buildInitialMessages(prompt, loadedSkills);
+  const messages = await buildInitialMessages(prompt, loadedSkills);
+  const systemPrompt = messages.find((m) => m.role === "system")?.content;
+  if (systemPrompt) {
+    onEvent({ type: "system_prompt", text: systemPrompt });
+  }
   const tools = toOpenAITools(builtinTools);
   const model = provider.modelName ?? provider.model;
 

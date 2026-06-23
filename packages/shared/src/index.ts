@@ -6,6 +6,7 @@ export type ServerMessage =
   | { type: "ready" }
   | { type: "skills"; skills: Array<{ name: string; description: string }> }
   | { type: "start" }
+  | { type: "system_prompt"; text: string }
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "tool_result"; name: string; output: string }
