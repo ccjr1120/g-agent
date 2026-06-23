@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { BlinkingCursor } from "./BlinkingCursor.js";
 
@@ -10,16 +10,31 @@ export type SlashCommand = {
 export function ChatInput({
   disabled,
   commands = [],
+  restoreText,
+  onRestoreConsumed,
   onSubmit,
+  onUndo,
 }: {
   disabled: boolean;
   commands?: SlashCommand[];
+  restoreText?: string | null;
+  onRestoreConsumed?: () => void;
   onSubmit: (text: string) => void;
+  onUndo?: () => void;
 }) {
   const [value, setValue] = useState("");
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [menuIndex, setMenuIndex] = useState(0);
+
+  useEffect(() => {
+    if (restoreText === undefined || restoreText === null) {
+      return;
+    }
+    setValue(restoreText);
+    setHistoryIndex(-1);
+    onRestoreConsumed?.();
+  }, [restoreText, onRestoreConsumed]);
 
   const isMenuOpen = value.startsWith("/") && !value.includes(" ");
 
@@ -78,6 +93,11 @@ export function ChatInput({
           setMenuIndex(0);
           return;
         }
+      }
+
+      if (!isMenuOpen && key.escape) {
+        onUndo?.();
+        return;
       }
 
       if (!isMenuOpen) {
@@ -140,10 +160,6 @@ export function ChatInput({
   );
 
   const inputElement = (() => {
-    if (disabled) {
-      return <Text dimColor>{"> Waiting…"}</Text>;
-    }
-
     if (!value) {
       return (
         <Text color="cyan">

@@ -6,21 +6,17 @@ import type { ChatLine } from "../hooks/useAgentSocket.js";
 
 export function MessageLine({
   line,
-  streaming = false,
   showThinking = false,
 }: {
   line: ChatLine;
-  streaming?: boolean;
   showThinking?: boolean;
 }) {
   if (showThinking) {
     return <LoadingSpinner label="Thinking…" />;
   }
 
-  const gapAfter = !streaming;
-
   return (
-    <Box marginBottom={gapAfter ? 1 : 0}>
+    <Box marginBottom={1}>
       <MessageContent role={line.role} text={line.text} />
     </Box>
   );

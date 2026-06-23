@@ -1,22 +1,24 @@
-import React, { useCallback, useMemo } from "react";
-import { Box, Static, Text, useApp } from "ink";import { ChatInput, type SlashCommand } from "./components/ChatInput.js";
+import React, { useCallback, useMemo, useState } from "react";
+import { Box, Static, Text, useApp } from "ink";
+import { ChatInput, type SlashCommand } from "./components/ChatInput.js";
 import { LoadingSpinner } from "./components/LoadingSpinner.js";
 import { MessageLine } from "./components/MessageLine.js";
 import { useAgentSocket } from "./hooks/useAgentSocket.js";
 
 export function App({ serverUrl }: { serverUrl: string }) {
   const { exit } = useApp();
+  const [restoreText, setRestoreText] = useState<string | null>(null);
   const {
     connection,
     staticLines,
     streamingLine,
-    streaming,
-    pending,
     waitingForReply,
+    queueSize,
     error,
     skills,
     sendMessage,
     addLocalLine,
+    undoLastTurn,
     resetConversation,
     dumpLog,
   } = useAgentSocket(serverUrl);
@@ -65,7 +67,14 @@ export function App({ serverUrl }: { serverUrl: string }) {
     [exit, resetConversation, skills, sendMessage, addLocalLine, dumpLog, staticLines, streamingLine],
   );
 
-  const inputDisabled = connection !== "connected" || streaming || pending;
+  const handleUndo = useCallback(() => {
+    const text = undoLastTurn();
+    if (text !== null) {
+      setRestoreText(text);
+    }
+  }, [undoLastTurn]);
+
+  const inputDisabled = connection !== "connected";
   const hasMessages = staticLines.length > 0 || streamingLine !== null;
 
   return (
@@ -74,7 +83,7 @@ export function App({ serverUrl }: { serverUrl: string }) {
         {!hasMessages && connection === "connecting" ? (
           <LoadingSpinner label="Connecting…" />
         ) : !hasMessages ? (
-          <Text dimColor>Type a message and press Enter. Type / to see commands.</Text>
+          <Text dimColor>Type a message and press Enter. Type / to see commands. Esc to undo.</Text>
         ) : (
           <>
             <Static items={staticLines}>
@@ -83,7 +92,6 @@ export function App({ serverUrl }: { serverUrl: string }) {
             {streamingLine ? (
               <MessageLine
                 line={streamingLine}
-                streaming={streaming}
                 showThinking={waitingForReply && !streamingLine.text}
               />
             ) : null}
@@ -92,8 +100,18 @@ export function App({ serverUrl }: { serverUrl: string }) {
       </Box>
 
       {error ? <Text color="red">{error}</Text> : null}
+      {queueSize > 0 ? (
+        <Text dimColor>{queueSize} message{queueSize > 1 ? "s" : ""} queued</Text>
+      ) : null}
 
-      <ChatInput disabled={inputDisabled} commands={commands} onSubmit={handleSubmit} />
+      <ChatInput
+        disabled={inputDisabled}
+        commands={commands}
+        restoreText={restoreText}
+        onRestoreConsumed={() => setRestoreText(null)}
+        onSubmit={handleSubmit}
+        onUndo={handleUndo}
+      />
     </Box>
   );
 }
