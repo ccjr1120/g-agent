@@ -29,6 +29,9 @@ importers:
 
   apps/tui:
     dependencies:
+      '@g-agent/agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
       '@g-agent/config':
         specifier: workspace:*
         version: link:../../packages/config

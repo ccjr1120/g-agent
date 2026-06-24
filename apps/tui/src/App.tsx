@@ -5,7 +5,13 @@ import { LoadingSpinner } from "./components/LoadingSpinner.js";
 import { MessageLine } from "./components/MessageLine.js";
 import { useAgentSocket } from "./hooks/useAgentSocket.js";
 
-export function App({ serverUrl }: { serverUrl: string }) {
+export function App({
+  serverUrl,
+  banner,
+}: {
+  serverUrl: string;
+  banner: string[];
+}) {
   const { exit } = useApp();
   const [restoreText, setRestoreText] = useState<string | null>(null);
   const {
@@ -13,7 +19,8 @@ export function App({ serverUrl }: { serverUrl: string }) {
     staticLines,
     streamingLine,
     waitingForReply,
-    queueSize,
+    pending,
+    queuedMessages,
     error,
     skills,
     sendMessage,
@@ -79,6 +86,13 @@ export function App({ serverUrl }: { serverUrl: string }) {
 
   return (
     <Box flexDirection="column" paddingX={1}>
+      {!hasMessages && banner.length > 0 && (
+        <Box flexDirection="column" marginBottom={1}>
+          {banner.map((line, i) => (
+            <Text key={i} color="cyan" bold>{line}</Text>
+          ))}
+        </Box>
+      )}
       <Box flexDirection="column" marginBottom={1}>
         {!hasMessages && connection === "connecting" ? (
           <LoadingSpinner label="Connecting…" />
@@ -94,14 +108,23 @@ export function App({ serverUrl }: { serverUrl: string }) {
                 line={streamingLine}
                 showThinking={waitingForReply && !streamingLine.text}
               />
+            ) : pending ? (
+              <LoadingSpinner label="Thinking…" />
             ) : null}
           </>
         )}
       </Box>
 
       {error ? <Text color="red">{error}</Text> : null}
-      {queueSize > 0 ? (
-        <Text dimColor>{queueSize} message{queueSize > 1 ? "s" : ""} queued</Text>
+      {queuedMessages.length > 0 ? (
+        <Box flexDirection="column" marginBottom={1}>
+          {queuedMessages.map((msg) => (
+            <Text key={msg.id} dimColor wrap="truncate-end">
+              {"· "}
+              {msg.text}
+            </Text>
+          ))}
+        </Box>
       ) : null}
 
       <ChatInput

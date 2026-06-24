@@ -12,6 +12,7 @@
     "start": "bun ./dist/cli.js"
   },
   "dependencies": {
+    "@g-agent/agent": "workspace:*",
     "@g-agent/config": "workspace:*",
     "@g-agent/shared": "workspace:*",
     "ink": "^5.2.0",

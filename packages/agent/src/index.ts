@@ -1,4 +1,9 @@
-import { buildSystemPrompt, type LoadedSkills } from "./skills/index.js";
+import {
+  buildSystemPrompt,
+  loadPrompts,
+  type LoadedPrompts,
+} from "./prompts/index.js";
+import { type LoadedSkills } from "./skills/index.js";
 import {
   builtinTools,
   executeTool,
@@ -7,6 +12,21 @@ import {
 
 export {
   buildSystemPrompt,
+  getPrompt,
+  loadPrompts,
+  resolveBuiltinPromptsDir,
+  resolvePromptsDir,
+  type LoadedPrompts,
+  type Prompt,
+} from "./prompts/index.js";
+export {
+  getBannerLines,
+  loadBanner,
+  resolveBannersDir,
+  resolveBuiltinBannersDir,
+  type LoadedBanner,
+} from "./banners/index.js";
+export {
   loadSkills,
   resolveSkillsDir,
   type LoadedSkills,
@@ -53,14 +73,19 @@ export async function runAgent(
   onEvent: (event: AgentStreamEvent) => void,
   provider?: ResolvedProvider | null,
   loadedSkills: LoadedSkills = { skills: [], builtinPath: "", userPath: null },
+  loadedPrompts: LoadedPrompts = {
+    prompts: new Map(),
+    builtinPath: "",
+    userPath: null,
+  },
 ): Promise<void> {
   const resolved = provider ?? resolveProviderFromEnv();
 
   try {
     if (resolved) {
-      await runOpenAI(resolved, prompt, loadedSkills, onEvent);
+      await runOpenAI(resolved, prompt, loadedSkills, loadedPrompts, onEvent);
     } else {
-      await streamEcho(prompt, loadedSkills, onEvent);
+      await streamEcho(prompt, loadedSkills, loadedPrompts, onEvent);
     }
     onEvent({ type: "done" });
   } catch (error) {
@@ -91,9 +116,10 @@ function resolveProviderFromEnv(): ResolvedProvider | null {
 async function streamEcho(
   prompt: string,
   loadedSkills: LoadedSkills,
+  loadedPrompts: LoadedPrompts,
   onEvent: (event: AgentStreamEvent) => void,
 ): Promise<void> {
-  const systemPrompt = buildSessionSystemPrompt(loadedSkills);
+  const systemPrompt = buildSessionSystemPrompt(loadedSkills, loadedPrompts);
   onEvent({ type: "system_prompt", text: systemPrompt });
 
   const reply =
@@ -105,15 +131,19 @@ async function streamEcho(
   }
 }
 
-export function buildSessionSystemPrompt(loadedSkills: LoadedSkills): string {
-  return buildSystemPrompt(loadedSkills.skills, loadedSkills.userPath);
+export function buildSessionSystemPrompt(
+  loadedSkills: LoadedSkills,
+  loadedPrompts: LoadedPrompts,
+): string {
+  return buildSystemPrompt(loadedSkills, loadedPrompts);
 }
 
 async function buildInitialMessages(
   prompt: string,
   loadedSkills: LoadedSkills,
+  loadedPrompts: LoadedPrompts,
 ): Promise<ChatMessage[]> {
-  const systemPrompt = buildSessionSystemPrompt(loadedSkills);
+  const systemPrompt = buildSessionSystemPrompt(loadedSkills, loadedPrompts);
   return [
     { role: "system", content: systemPrompt },
     { role: "user", content: prompt },
@@ -124,9 +154,10 @@ async function runOpenAI(
   provider: ResolvedProvider,
   prompt: string,
   loadedSkills: LoadedSkills,
+  loadedPrompts: LoadedPrompts,
   onEvent: (event: AgentStreamEvent) => void,
 ): Promise<void> {
-  const messages = await buildInitialMessages(prompt, loadedSkills);
+  const messages = await buildInitialMessages(prompt, loadedSkills, loadedPrompts);
   const systemPrompt = messages.find((m) => m.role === "system")?.content;
   if (systemPrompt) {
     onEvent({ type: "system_prompt", text: systemPrompt });
