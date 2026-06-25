@@ -6,6 +6,7 @@ export type ClientMessage =
 export type ServerMessage =
   | { type: "ready" }
   | { type: "agents"; agents: Array<{ name: string; description: string; active: boolean }>; active: string }
+  | { type: "agent_fallback"; requested: string; active: string }
   | { type: "skills"; skills: Array<{ name: string; description: string }> }
   | { type: "start" }
   | { type: "system_prompt"; text: string }

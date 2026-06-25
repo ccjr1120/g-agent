@@ -10,6 +10,7 @@ export {
   resolveActiveAgent,
   type AgentConfig,
   type LoadedAgents,
+  type ResolvedAgent,
 } from "./agents/index.js";
 export {
   getBannerLines,

@@ -216,28 +216,45 @@ export async function loadAgents(): Promise<LoadedAgents> {
   };
 }
 
+export type ResolvedAgent = {
+  agent: AgentConfig;
+  /** Present when the requested agent didn't exist and we fell back to the
+   * built-in `default`. `requested` is the name that was asked for. */
+  fallback?: { requested: string };
+};
+
 export function resolveActiveAgent(
   name: string | undefined,
   loaded: LoadedAgents,
-): AgentConfig {
-  const explicit =
-    process.env.G_AGENT_AGENT?.trim() || name?.trim() || undefined;
-  const resolved = explicit || loaded.defaultName;
+): ResolvedAgent {
+  const explicit = name?.trim() || undefined;
 
-  const agent = loaded.agents.get(resolved);
-  if (agent) {
-    return agent;
+  // An explicit agent name (from config.agent) takes precedence. If it names
+  // an agent that doesn't exist, fall back to the built-in default rather than
+  // aborting startup — `default` is the last-resort fallback, not something we
+  // want to hard-fail on. Runtime switches via the TUI still validate strictly.
+  if (explicit) {
+    const agent = loaded.agents.get(explicit);
+    if (agent) {
+      return { agent };
+    }
+    console.warn(
+      `Unknown agent "${explicit}", falling back to "${loaded.defaultName}"`,
+    );
   }
 
-  if (explicit) {
-    throw new Error(`Unknown agent "${resolved}"`);
+  const fallbackAgent = loaded.agents.get(loaded.defaultName);
+  if (fallbackAgent) {
+    return explicit
+      ? { agent: fallbackAgent, fallback: { requested: explicit } }
+      : { agent: fallbackAgent };
   }
 
   const first = loaded.list[0];
   if (!first) {
     throw new Error("No agents configured");
   }
-  return first;
+  return { agent: first };
 }
 
 export function buildAgentSystemPrompt(

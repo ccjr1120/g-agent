@@ -27,6 +27,7 @@ export function App({
     skills,
     agents,
     activeAgent,
+    agentFallback,
     sendMessage,
     addLocalLine,
     undoLastTurn,
@@ -123,7 +124,16 @@ export function App({
         {!hasMessages && connection === "connecting" ? (
           <LoadingSpinner label="Connecting…" />
         ) : !hasMessages ? (
-          <Text dimColor>Active agent: {activeAgent || "—"}. Type a message and press Enter. Type / to see commands. Esc to undo.</Text>
+          <Box flexDirection="column">
+            <Text dimColor>
+              Active agent: <Text color="cyan">{activeAgent || "—"}</Text>. Type a message and press Enter. Type / to see commands. Esc to undo.
+            </Text>
+            {agentFallback ? (
+              <Text color="yellow">
+                {`Configured agent "${agentFallback.requested}" not found, using built-in "${agentFallback.active}".`}
+              </Text>
+            ) : null}
+          </Box>
         ) : (
           <>
             <Static items={staticLines}>

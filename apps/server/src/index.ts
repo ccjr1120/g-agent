@@ -7,6 +7,7 @@ import {
   runAgent,
   type AgentConfig,
   type LoadedAgents,
+  type ResolvedAgent,
 } from "@g-agent/agent";
 import {
   formatProviderRef,
@@ -19,7 +20,10 @@ import { parseClientMessage, type ServerMessage } from "@g-agent/shared";
 
 const { config, path: configPath } = await loadConfig();
 const loadedAgents = await loadAgents();
-const initialAgent = resolveActiveAgent(config.agent, loadedAgents);
+const { agent: initialAgent, fallback } = resolveActiveAgent(
+  config.agent,
+  loadedAgents,
+);
 const provider = getActiveProvider(config);
 const host = getServerHost();
 const port = getServerPort();
@@ -29,6 +33,9 @@ type WsData = {
   draining: boolean;
   activeAgent: AgentConfig;
   systemPrompt: string;
+  /** Set once per connection from the startup fallback; surfaced to the
+   * client as an `agent_fallback` hint on socket open. */
+  startupFallback?: { requested: string };
 };
 
 function send(ws: ServerWebSocket<WsData>, message: ServerMessage): void {
@@ -124,6 +131,7 @@ Bun.serve({
           draining: false,
           activeAgent: initialAgent,
           systemPrompt: buildAgentSystemPrompt(initialAgent, loadedAgents),
+          startupFallback: fallback,
         } satisfies WsData,
       })
     ) {
@@ -137,6 +145,13 @@ Bun.serve({
   websocket: {
     open(ws) {
       send(ws, { type: "ready" });
+      if (ws.data.startupFallback) {
+        send(ws, {
+          type: "agent_fallback",
+          requested: ws.data.startupFallback.requested,
+          active: ws.data.activeAgent.name,
+        });
+      }
       send(ws, {
         type: "agents",
         agents: agentCatalog(loadedAgents, ws.data.activeAgent),

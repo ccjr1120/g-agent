@@ -137,6 +137,7 @@ export function useAgentSocket(serverUrl: string) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [activeAgent, setActiveAgent] = useState<string>("");
+  const [agentFallback, setAgentFallback] = useState<string | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<{ id: string; text: string }[]>([]);
 
@@ -300,11 +301,20 @@ export function useAgentSocket(serverUrl: string) {
             setError(null);
             setLog([]);
             resetTurnTiming();
+            setAgentFallback(null);
           }
           prevActiveAgentRef.current = newActive;
           setActiveAgent(newActive);
           break;
         }
+        case "agent_fallback":
+          // Startup-only hint: the configured agent didn't exist and the server
+          // fell back to the built-in default. Cleared on any runtime switch.
+          setAgentFallback({
+            requested: message.requested,
+            active: message.active,
+          });
+          break;
         case "skills":
           setSkills(message.skills);
           break;
@@ -638,6 +648,7 @@ export function useAgentSocket(serverUrl: string) {
     skills,
     agents,
     activeAgent,
+    agentFallback,
     sendMessage,
     addLocalLine,
     undoLastTurn,

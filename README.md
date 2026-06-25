@@ -47,9 +47,9 @@ g-agent
 
 - `provider` — 默认 provider，形如 `openai/gpt-4o-mini`
 - `providers` — provider 清单（baseUrl / apiKeyEnv / models）
-- `agent` — 默认 agent 名，决定启动时加载哪个 agent（见下）
+- `agent` — 可选；指定启动时加载哪个 agent。未设置或指向不存在的 agent 时回退到内置 `default`（见下）
 
-`G_AGENT_PROVIDER` / `G_AGENT_AGENT` 环境变量可临时覆盖 `provider` / `agent`。
+`G_AGENT_PROVIDER` 环境变量可临时覆盖 `provider`。
 
 ### Agent
 
@@ -78,7 +78,7 @@ TUI 内：
 - `/agent` — 列出所有 agent（`*` 标记当前）
 - `/agent <name>` — 切换到指定 agent（清空当前对话、重载技能与 system prompt）
 
-`config.json` 的 `agent` 字段决定首次打开加载哪个 agent。
+`config.json` 的可选 `agent` 字段决定首次打开加载哪个 agent；未设置或指向不存在的 agent 时回退到内置 `default`。
 
 ## 开发
 
