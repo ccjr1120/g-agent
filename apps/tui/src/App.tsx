@@ -19,6 +19,8 @@ export function App({
     staticLines,
     streamingLine,
     waitingForReply,
+    streaming,
+    turnStartMs,
     pending,
     queuedMessages,
     error,
@@ -126,7 +128,7 @@ export function App({
           <>
             <Static items={staticLines}>
               {(line) => (
-                <Box key={line.id} paddingX={1}>
+                <Box key={line.id}>
                   <MessageLine line={line} />
                 </Box>
               )}
@@ -135,9 +137,11 @@ export function App({
               <MessageLine
                 line={streamingLine}
                 showThinking={waitingForReply}
+                streaming={streaming && !waitingForReply}
+                turnStartMs={turnStartMs}
               />
             ) : waitingForReply ? (
-              <LoadingSpinner label="Thinking…" />
+              <LoadingSpinner label="Thinking…" startMs={turnStartMs ?? undefined} />
             ) : null}
           </>
         )}

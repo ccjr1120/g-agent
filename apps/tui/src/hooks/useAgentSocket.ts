@@ -17,6 +17,9 @@ export type ChatLine = {
   role: "user" | "assistant";
   text: string;
   tools?: ToolCallDisplay[];
+  /** Elapsed wall-clock time of the assistant turn, in ms. Populated once
+   * the turn completes; undefined while still streaming. */
+  durationMs?: number;
 };
 
 function lineHasText(line: ChatLine): boolean {
@@ -128,6 +131,7 @@ export function useAgentSocket(serverUrl: string) {
   const [streamingLine, setStreamingLine] = useState<ChatLine | null>(null);
   const [streaming, setIsStreaming] = useState(false);
   const [pending, setPending] = useState(false);
+  const [turnStartMs, setTurnStartMs] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -143,6 +147,26 @@ export function useAgentSocket(serverUrl: string) {
   const socketRef = useRef<WebSocket | null>(null);
   const streamingRef = useRef<ChatLine | null>(null);
   const prevActiveAgentRef = useRef<string>("");
+  const turnStartMsRef = useRef<number | null>(null);
+
+  const resetTurnTiming = useCallback(() => {
+    turnStartMsRef.current = null;
+    setTurnStartMs(null);
+  }, []);
+
+  const stopTurnTiming = useCallback(() => {
+    if (turnStartMsRef.current !== null) {
+      const durationMs = Date.now() - turnStartMsRef.current;
+      const current = streamingRef.current;
+      if (current) {
+        const stamped = { ...current, durationMs };
+        streamingRef.current = stamped;
+        setStreamingLine(stamped);
+      }
+    }
+    turnStartMsRef.current = null;
+    setTurnStartMs(null);
+  }, []);
 
   const syncQueue = useCallback(() => {
     const waiting = queueRef.current
@@ -165,6 +189,7 @@ export function useAgentSocket(serverUrl: string) {
   }, [updateStreamingLine]);
 
   const finishTurn = useCallback(() => {
+    stopTurnTiming();
     commitTurn();
     processingRef.current = false;
     setIsStreaming(false);
@@ -172,7 +197,7 @@ export function useAgentSocket(serverUrl: string) {
     queueMicrotask(() => {
       tryProcessQueueRef.current();
     });
-  }, [commitTurn]);
+  }, [commitTurn, stopTurnTiming]);
 
   const tryProcessQueueRef = useRef<() => void>(() => {});
 
@@ -192,6 +217,9 @@ export function useAgentSocket(serverUrl: string) {
     processingRef.current = true;
     setPending(true);
     setError(null);
+    const start = Date.now();
+    turnStartMsRef.current = start;
+    setTurnStartMs(start);
     syncQueue();
 
     setStaticLines((prev) => [
@@ -223,6 +251,7 @@ export function useAgentSocket(serverUrl: string) {
       queueRef.current = [];
       undoStackRef.current = [];
       syncQueue();
+      resetTurnTiming();
       commitTurn();
     };
 
@@ -231,6 +260,7 @@ export function useAgentSocket(serverUrl: string) {
       setConnection("disconnected");
       processingRef.current = false;
       setPending(false);
+      resetTurnTiming();
     };
 
     ws.onmessage = (event) => {
@@ -269,6 +299,7 @@ export function useAgentSocket(serverUrl: string) {
             setPending(false);
             setError(null);
             setLog([]);
+            resetTurnTiming();
           }
           prevActiveAgentRef.current = newActive;
           setActiveAgent(newActive);
@@ -357,7 +388,7 @@ export function useAgentSocket(serverUrl: string) {
       ws.close();
       socketRef.current = null;
     };
-  }, [serverUrl, finishTurn, syncQueue, commitTurn, updateStreamingLine]);
+  }, [serverUrl, finishTurn, syncQueue, commitTurn, updateStreamingLine, resetTurnTiming]);
 
   const sendMessage = useCallback(
     (text: string) => {
@@ -433,6 +464,7 @@ export function useAgentSocket(serverUrl: string) {
       processingRef.current = false;
       setIsStreaming(false);
       setPending(false);
+      resetTurnTiming();
       updateStreamingLine(null);
       removeUserLine();
       tryProcessQueue();
@@ -452,7 +484,7 @@ export function useAgentSocket(serverUrl: string) {
     });
     updateStreamingLine(null);
     return action.text;
-  }, [syncQueue, tryProcessQueue, updateStreamingLine]);
+  }, [syncQueue, tryProcessQueue, updateStreamingLine, resetTurnTiming]);
 
   const resetConversation = useCallback(() => {
     const ws = socketRef.current;
@@ -469,7 +501,8 @@ export function useAgentSocket(serverUrl: string) {
     setPending(false);
     setError(null);
     setLog([]);
-  }, [syncQueue, updateStreamingLine]);
+    resetTurnTiming();
+  }, [syncQueue, updateStreamingLine, resetTurnTiming]);
 
   const switchAgent = useCallback((name?: string) => {
     const ws = socketRef.current;
@@ -585,6 +618,9 @@ export function useAgentSocket(serverUrl: string) {
     return logPath;
   }, [log]);
 
+  // True while the model is working but has not yet emitted any visible
+  // content (pending or streaming with an empty line). The UI renders a
+  // "Thinking…" spinner in this state.
   const waitingForReply =
     (pending || streaming) &&
     (streamingLine === null || !lineHasContent(streamingLine));
@@ -596,6 +632,7 @@ export function useAgentSocket(serverUrl: string) {
     streaming,
     pending,
     waitingForReply,
+    turnStartMs,
     queuedMessages,
     error,
     skills,
