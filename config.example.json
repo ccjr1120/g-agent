@@ -1,5 +1,6 @@
 {
   "provider": "openai/gpt-4o-mini",
+  "agent": "default",
   "providers": {
     "openai": {
       "baseUrl": "https://api.openai.com/v1",

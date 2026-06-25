@@ -32,6 +32,12 @@ export type SkillInfo = {
   description: string;
 };
 
+export type AgentInfo = {
+  name: string;
+  description: string;
+  active: boolean;
+};
+
 type LogEntry =
   | { type: "user"; text: string; ts: number }
   | { type: "system_prompt"; text: string; ts: number }
@@ -125,6 +131,8 @@ export function useAgentSocket(serverUrl: string) {
   const [error, setError] = useState<string | null>(null);
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [activeAgent, setActiveAgent] = useState<string>("");
   const [log, setLog] = useState<LogEntry[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<{ id: string; text: string }[]>([]);
 
@@ -134,6 +142,7 @@ export function useAgentSocket(serverUrl: string) {
   const ignoreResponseRef = useRef(false);
   const socketRef = useRef<WebSocket | null>(null);
   const streamingRef = useRef<ChatLine | null>(null);
+  const prevActiveAgentRef = useRef<string>("");
 
   const syncQueue = useCallback(() => {
     const waiting = queueRef.current
@@ -241,6 +250,30 @@ export function useAgentSocket(serverUrl: string) {
         case "ready":
           setConnection("connected");
           break;
+        case "agents": {
+          setAgents(message.agents);
+          const newActive = message.active;
+          // The "agents" message arrives both on socket open and after a
+          // server-side switch. Only clear the local conversation when the
+          // active agent actually changes AND we have seen one before
+          // (prevActive !== "" means not the initial open).
+          if (prevActiveAgentRef.current !== "" && prevActiveAgentRef.current !== newActive) {
+            queueRef.current = [];
+            undoStackRef.current = [];
+            processingRef.current = false;
+            ignoreResponseRef.current = false;
+            syncQueue();
+            setStaticLines([]);
+            updateStreamingLine(null);
+            setIsStreaming(false);
+            setPending(false);
+            setError(null);
+            setLog([]);
+          }
+          prevActiveAgentRef.current = newActive;
+          setActiveAgent(newActive);
+          break;
+        }
         case "skills":
           setSkills(message.skills);
           break;
@@ -438,6 +471,14 @@ export function useAgentSocket(serverUrl: string) {
     setLog([]);
   }, [syncQueue, updateStreamingLine]);
 
+  const switchAgent = useCallback((name?: string) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(
+      JSON.stringify({ type: "agent", ...(name ? { name } : {}) } satisfies ClientMessage),
+    );
+  }, []);
+
   const dumpLog = useCallback(async (): Promise<string> => {
     const startedAt = log.find((e) => e.type === "user")?.ts ?? Date.now();
     const systemPrompt = [...log]
@@ -558,10 +599,13 @@ export function useAgentSocket(serverUrl: string) {
     queuedMessages,
     error,
     skills,
+    agents,
+    activeAgent,
     sendMessage,
     addLocalLine,
     undoLastTurn,
     resetConversation,
+    switchAgent,
     dumpLog,
   };
 }

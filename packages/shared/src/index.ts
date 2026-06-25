@@ -1,9 +1,11 @@
 export type ClientMessage =
   | { type: "chat"; message: string }
-  | { type: "reset" };
+  | { type: "reset" }
+  | { type: "agent"; name?: string };
 
 export type ServerMessage =
   | { type: "ready" }
+  | { type: "agents"; agents: Array<{ name: string; description: string; active: boolean }>; active: string }
   | { type: "skills"; skills: Array<{ name: string; description: string }> }
   | { type: "start" }
   | { type: "system_prompt"; text: string }
@@ -31,6 +33,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       return data;
     }
     if (data.type === "reset") {
+      return data;
+    }
+    if (data.type === "agent") {
       return data;
     }
     return null;

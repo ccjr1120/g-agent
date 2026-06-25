@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export type Skill = {
@@ -12,63 +11,7 @@ export type Skill = {
   source: "builtin" | "user";
 };
 
-export type LoadedSkills = {
-  skills: Skill[];
-  builtinPath: string;
-  userPath: string | null;
-};
-
-function userSkillsDirCandidates(): string[] {
-  const home = homedir();
-  const candidates: string[] = [];
-
-  if (process.env.G_AGENT_SKILLS_DIR) {
-    candidates.push(process.env.G_AGENT_SKILLS_DIR);
-  }
-  if (process.env.G_AGENT_HOME) {
-    candidates.push(join(process.env.G_AGENT_HOME, "skills"));
-  }
-  candidates.push(join(home, ".config", "g-agent", "skills"));
-  candidates.push(join(home, ".local", "share", "g-agent", "skills"));
-
-  return [...new Set(candidates)];
-}
-
-function builtinSkillsDirCandidates(): string[] {
-  const home = homedir();
-  const candidates: string[] = [];
-
-  if (process.env.G_AGENT_BUILTIN_SKILLS_DIR) {
-    candidates.push(process.env.G_AGENT_BUILTIN_SKILLS_DIR);
-  }
-  if (process.env.G_AGENT_HOME) {
-    candidates.push(join(process.env.G_AGENT_HOME, "builtin-skills"));
-  }
-  candidates.push(join(home, ".config", "g-agent", "builtin-skills"));
-  candidates.push(join(home, ".local", "share", "g-agent", "builtin-skills"));
-
-  return [...new Set(candidates)];
-}
-
-export function resolveSkillsDir(): string | null {
-  for (const path of userSkillsDirCandidates()) {
-    if (existsSync(path)) {
-      return path;
-    }
-  }
-  return null;
-}
-
-export function resolveBuiltinSkillsDir(): string {
-  for (const path of builtinSkillsDirCandidates()) {
-    if (existsSync(path)) {
-      return path;
-    }
-  }
-  return join(import.meta.dir, "builtin");
-}
-
-function parseSkillFile(content: string): {
+export function parseSkillFile(content: string): {
   meta: Record<string, unknown>;
   body: string;
 } {
@@ -81,7 +24,10 @@ function parseSkillFile(content: string): {
   return { meta, body: match[2].trim() };
 }
 
-async function loadSkillsFromDir(dir: string, source: "builtin" | "user"): Promise<Skill[]> {
+export async function loadSkillsFromDir(
+  dir: string,
+  source: "builtin" | "user",
+): Promise<Skill[]> {
   if (!existsSync(dir)) return [];
 
   const entries = await readdir(dir, { withFileTypes: true });
@@ -109,20 +55,4 @@ async function loadSkillsFromDir(dir: string, source: "builtin" | "user"): Promi
 
   skills.sort((a, b) => a.name.localeCompare(b.name));
   return skills;
-}
-
-export async function loadSkills(): Promise<LoadedSkills> {
-  const builtinPath = resolveBuiltinSkillsDir();
-  const userPath = resolveSkillsDir();
-
-  const [builtinSkills, userSkills] = await Promise.all([
-    loadSkillsFromDir(builtinPath, "builtin"),
-    userPath ? loadSkillsFromDir(userPath, "user") : Promise.resolve([]),
-  ]);
-
-  return {
-    skills: [...builtinSkills, ...userSkills],
-    builtinPath,
-    userPath,
-  };
 }

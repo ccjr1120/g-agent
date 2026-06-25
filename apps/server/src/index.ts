@@ -1,10 +1,12 @@
 import type { ServerWebSocket } from "bun";
 import {
-  buildSessionSystemPrompt,
+  buildAgentSystemPrompt,
   builtinTools,
-  loadPrompts,
-  loadSkills,
+  loadAgents,
+  resolveActiveAgent,
   runAgent,
+  type AgentConfig,
+  type LoadedAgents,
 } from "@g-agent/agent";
 import {
   formatProviderRef,
@@ -16,13 +18,8 @@ import {
 import { parseClientMessage, type ServerMessage } from "@g-agent/shared";
 
 const { config, path: configPath } = await loadConfig();
-const loadedSkills = await loadSkills();
-const loadedPrompts = await loadPrompts();
-const { skills, userPath: skillsPath } = loadedSkills;
-const sessionSystemPrompt = buildSessionSystemPrompt(
-  loadedSkills,
-  loadedPrompts,
-);
+const loadedAgents = await loadAgents();
+const initialAgent = resolveActiveAgent(config.agent, loadedAgents);
 const provider = getActiveProvider(config);
 const host = getServerHost();
 const port = getServerPort();
@@ -30,10 +27,24 @@ const port = getServerPort();
 type WsData = {
   promptQueue: string[];
   draining: boolean;
+  activeAgent: AgentConfig;
+  systemPrompt: string;
 };
 
 function send(ws: ServerWebSocket<WsData>, message: ServerMessage): void {
   ws.send(JSON.stringify(message));
+}
+
+function agentCatalog(loaded: LoadedAgents, active: AgentConfig) {
+  return loaded.list.map((a) => ({
+    name: a.name,
+    description: a.description,
+    active: a.name === active.name,
+  }));
+}
+
+function skillsCatalog(active: AgentConfig) {
+  return active.skills.map((s) => ({ name: s.name, description: s.description }));
 }
 
 async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<void> {
@@ -78,8 +89,7 @@ async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<v
       send(ws, { type: "done" });
     },
     provider,
-    loadedSkills,
-    loadedPrompts,
+    ws.data.systemPrompt,
   );
 }
 
@@ -109,7 +119,12 @@ Bun.serve({
   fetch(req, server) {
     if (
       server.upgrade(req, {
-        data: { promptQueue: [], draining: false } satisfies WsData,
+        data: {
+          promptQueue: [],
+          draining: false,
+          activeAgent: initialAgent,
+          systemPrompt: buildAgentSystemPrompt(initialAgent, loadedAgents),
+        } satisfies WsData,
       })
     ) {
       return undefined;
@@ -123,10 +138,15 @@ Bun.serve({
     open(ws) {
       send(ws, { type: "ready" });
       send(ws, {
-        type: "skills",
-        skills: skills.map((s) => ({ name: s.name, description: s.description })),
+        type: "agents",
+        agents: agentCatalog(loadedAgents, ws.data.activeAgent),
+        active: ws.data.activeAgent.name,
       });
-      send(ws, { type: "system_prompt", text: sessionSystemPrompt });
+      send(ws, {
+        type: "skills",
+        skills: skillsCatalog(ws.data.activeAgent),
+      });
+      send(ws, { type: "system_prompt", text: ws.data.systemPrompt });
     },
     message(ws, raw) {
       const text = typeof raw === "string" ? raw : raw.toString();
@@ -139,7 +159,49 @@ Bun.serve({
 
       if (message.type === "reset") {
         ws.data.promptQueue.length = 0;
-        send(ws, { type: "system_prompt", text: sessionSystemPrompt });
+        send(ws, { type: "system_prompt", text: ws.data.systemPrompt });
+        return;
+      }
+
+      if (message.type === "agent") {
+        if (!message.name) {
+          send(ws, {
+            type: "agents",
+            agents: agentCatalog(loadedAgents, ws.data.activeAgent),
+            active: ws.data.activeAgent.name,
+          });
+          return;
+        }
+
+        const targetName = message.name.trim();
+        const target = loadedAgents.agents.get(targetName);
+        if (!target) {
+          send(ws, { type: "error", message: `Unknown agent "${targetName}"` });
+          return;
+        }
+
+        // Switching to the currently active agent is a no-op apart from
+        // re-sending the catalog so the client stays in sync.
+        if (target.name === ws.data.activeAgent.name) {
+          send(ws, {
+            type: "agents",
+            agents: agentCatalog(loadedAgents, ws.data.activeAgent),
+            active: ws.data.activeAgent.name,
+          });
+          return;
+        }
+
+        ws.data.activeAgent = target;
+        ws.data.systemPrompt = buildAgentSystemPrompt(target, loadedAgents);
+        ws.data.promptQueue.length = 0;
+
+        send(ws, {
+          type: "agents",
+          agents: agentCatalog(loadedAgents, target),
+          active: target.name,
+        });
+        send(ws, { type: "skills", skills: skillsCatalog(target) });
+        send(ws, { type: "system_prompt", text: ws.data.systemPrompt });
         return;
       }
 
@@ -157,9 +219,10 @@ Bun.serve({
 
 const providerLabel = provider ? formatProviderRef(provider) : "echo";
 const configLabel = configPath ?? "none";
-const builtinCount = skills.filter((s) => s.source === "builtin").length;
-const userCount = skills.filter((s) => s.source === "user").length;
-const skillsLabel = `builtin=${builtinCount} user=${userCount}${skillsPath ? ` (${skillsPath})` : ""}`;
+const agentsLabel = `${loadedAgents.list.length}${loadedAgents.userPath ? ` (user: ${loadedAgents.userPath})` : ""}`;
+const builtinCount = initialAgent.skills.filter((s) => s.source === "builtin").length;
+const userCount = initialAgent.skills.filter((s) => s.source === "user").length;
+const skillsLabel = `builtin=${builtinCount} user=${userCount}`;
 console.log(
-  `G-Agent server ws://${host}:${port} · provider=${providerLabel} · config=${configLabel} · skills=${skillsLabel} · tools=${builtinTools.length}`,
+  `G-Agent server ws://${host}:${port} · agent=${initialAgent.name} · provider=${providerLabel} · config=${configLabel} · agents=${agentsLabel} · skills=${skillsLabel} · tools=${builtinTools.length}`,
 );

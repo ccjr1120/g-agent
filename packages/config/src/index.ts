@@ -23,6 +23,8 @@ export type GAgentConfig = {
   /** Active provider in "provider-name/model-name" form. */
   provider?: string;
   providers?: Record<string, ProviderConfig>;
+  /** Active agent name. Selects which agent (skills + system prompt) loads at startup. */
+  agent?: string;
 };
 
 type RawGAgentConfig = Omit<GAgentConfig, "providers"> & {
@@ -177,9 +179,15 @@ function normalizeConfig(raw: RawGAgentConfig): GAgentConfig {
     }
   }
 
+  // Agent name is stored raw; validation happens in @g-agent/agent
+  // (resolveActiveAgent), which owns the agent catalog. This keeps the
+  // config package free of a dependency on the agent package.
+  const agentRef = raw.agent?.trim() || undefined;
+
   return {
     provider: providerRef,
     providers,
+    agent: agentRef,
   };
 }
 

@@ -23,15 +23,19 @@ export function App({
     queuedMessages,
     error,
     skills,
+    agents,
+    activeAgent,
     sendMessage,
     addLocalLine,
     undoLastTurn,
     resetConversation,
+    switchAgent,
     dumpLog,
   } = useAgentSocket(serverUrl);
 
   const commands = useMemo<SlashCommand[]>(() => [
     { value: "/skills", description: "列出已加载的技能" },
+    { value: "/agent", description: "列出或切换 agent" },
     { value: "/new", description: "开启新对话" },
     { value: "/log", description: "导出完整对话记录到文件" },
   ], []);
@@ -57,6 +61,26 @@ export function App({
         }
         return;
       }
+      if (text === "/agent") {
+        if (agents.length === 0) {
+          addLocalLine("No agents loaded.");
+        } else {
+          const lines = agents
+            .map((a) => `${a.active ? "* " : "  "}${a.name}${a.description ? ` — ${a.description}` : ""}`)
+            .join("\n");
+          addLocalLine(lines);
+        }
+        return;
+      }
+      if (text.startsWith("/agent ")) {
+        const name = text.slice("/agent ".length).trim();
+        if (!name) {
+          addLocalLine("Usage: /agent <name>");
+          return;
+        }
+        switchAgent(name);
+        return;
+      }
       if (text === "/log") {
         if (staticLines.length === 0 && !streamingLine) {
           addLocalLine("No conversation to log yet.");
@@ -71,7 +95,7 @@ export function App({
       }
       sendMessage(text);
     },
-    [exit, resetConversation, skills, sendMessage, addLocalLine, dumpLog, staticLines, streamingLine],
+    [exit, resetConversation, switchAgent, skills, agents, sendMessage, addLocalLine, dumpLog, staticLines, streamingLine],
   );
 
   const handleUndo = useCallback(() => {
@@ -97,7 +121,7 @@ export function App({
         {!hasMessages && connection === "connecting" ? (
           <LoadingSpinner label="Connecting…" />
         ) : !hasMessages ? (
-          <Text dimColor>Type a message and press Enter. Type / to see commands. Esc to undo.</Text>
+          <Text dimColor>Active agent: {activeAgent || "—"}. Type a message and press Enter. Type / to see commands. Esc to undo.</Text>
         ) : (
           <>
             <Static items={staticLines}>
