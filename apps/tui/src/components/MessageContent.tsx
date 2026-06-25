@@ -1,6 +1,5 @@
 import React from "react";
-import { Text, useStdout } from "ink";
-import { StreamMarkdown } from "ink-stream-markdown";
+import { Text } from "ink";
 
 export function MessageContent({
   role,
@@ -9,9 +8,6 @@ export function MessageContent({
   role: "user" | "assistant";
   text: string;
 }) {
-  const { stdout } = useStdout();
-  const width = stdout.columns ?? 80;
-
   if (!text) {
     return null;
   }
@@ -25,9 +21,5 @@ export function MessageContent({
     );
   }
 
-  return (
-    <StreamMarkdown theme={{ width: Math.max(width, 40) }}>
-      {text}
-    </StreamMarkdown>
-  );
+  return <Text wrap="wrap">{text}</Text>;
 }

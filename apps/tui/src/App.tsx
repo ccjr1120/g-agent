@@ -101,14 +101,18 @@ export function App({
         ) : (
           <>
             <Static items={staticLines}>
-              {(line) => <MessageLine key={line.id} line={line} />}
+              {(line) => (
+                <Box key={line.id} paddingX={1}>
+                  <MessageLine line={line} />
+                </Box>
+              )}
             </Static>
             {streamingLine ? (
               <MessageLine
                 line={streamingLine}
-                showThinking={waitingForReply && !streamingLine.text}
+                showThinking={waitingForReply}
               />
-            ) : pending ? (
+            ) : waitingForReply ? (
               <LoadingSpinner label="Thinking…" />
             ) : null}
           </>

@@ -7,11 +7,25 @@ import {
   type ClientMessage,
 } from "@g-agent/shared";
 
+export type ToolCallDisplay = {
+  name: string;
+  label: string;
+};
+
 export type ChatLine = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  tools?: ToolCallDisplay[];
 };
+
+function lineHasText(line: ChatLine): boolean {
+  return line.text.trim().length > 0;
+}
+
+function lineHasContent(line: ChatLine): boolean {
+  return lineHasText(line) || (line.tools?.length ?? 0) > 0;
+}
 
 export type SkillInfo = {
   name: string;
@@ -45,36 +59,61 @@ function createLineId(): string {
   return crypto.randomUUID();
 }
 
+const HOME = homedir();
+
+function shortenPath(path: string): string {
+  if (path.startsWith(HOME)) {
+    return `~${path.slice(HOME.length)}`;
+  }
+  return path;
+}
+
+function compactPath(path: string, maxLen = 48): string {
+  const short = shortenPath(path);
+  if (short.length <= maxLen) {
+    return short;
+  }
+  const parts = short.split("/");
+  if (parts.length <= 2) {
+    return short.length > maxLen ? `…${short.slice(-(maxLen - 1))}` : short;
+  }
+  const tail = parts.slice(-2).join("/");
+  return tail.length >= maxLen - 1 ? `…/${tail.slice(-(maxLen - 2))}` : `…/${tail}`;
+}
+
+function truncate(text: string, maxLen: number): string {
+  if (text.length <= maxLen) {
+    return text;
+  }
+  return `${text.slice(0, maxLen - 1)}…`;
+}
+
+function shortenHomeInText(text: string): string {
+  return text.split(HOME).join("~");
+}
+
 function formatToolCall(name: string, args: string): string {
   try {
     const parsed = JSON.parse(args) as Record<string, unknown>;
     if (name === "bash" && typeof parsed.command === "string") {
-      return `bash(${parsed.command})`;
+      return truncate(shortenHomeInText(parsed.command), 64);
     }
-    if (name === "read" && typeof parsed.path === "string") {
-      return `read(${parsed.path})`;
-    }
-    if (name === "write" && typeof parsed.path === "string") {
-      return `write(${parsed.path})`;
+    if (
+      (name === "read" || name === "write") &&
+      typeof parsed.path === "string"
+    ) {
+      return compactPath(parsed.path);
     }
     if (name === "glob" && typeof parsed.pattern === "string") {
-      return `glob(${parsed.pattern})`;
+      return truncate(parsed.pattern, 48);
     }
     if (name === "grep" && typeof parsed.pattern === "string") {
-      return `grep(${parsed.pattern})`;
+      return truncate(parsed.pattern, 48);
     }
   } catch {
     // fall through
   }
-  return `${name}(…)`;
-}
-
-function formatToolResult(output: string): string {
-  const line = output.split("\n")[0] ?? "";
-  if (line.length > 80) {
-    return `${line.slice(0, 77)}…`;
-  }
-  return line || "(empty)";
+  return "…";
 }
 
 export function useAgentSocket(serverUrl: string) {
@@ -108,23 +147,23 @@ export function useAgentSocket(serverUrl: string) {
     setStreamingLine(line);
   }, []);
 
-  const commitStreamingLine = useCallback(() => {
+  const commitTurn = useCallback(() => {
     const line = streamingRef.current;
-    if (line?.text.trim()) {
+    if (line && lineHasContent(line)) {
       setStaticLines((prev) => [...prev, line]);
     }
     updateStreamingLine(null);
   }, [updateStreamingLine]);
 
   const finishTurn = useCallback(() => {
-    commitStreamingLine();
+    commitTurn();
     processingRef.current = false;
     setIsStreaming(false);
     setPending(false);
     queueMicrotask(() => {
       tryProcessQueueRef.current();
     });
-  }, [commitStreamingLine]);
+  }, [commitTurn]);
 
   const tryProcessQueueRef = useRef<() => void>(() => {});
 
@@ -175,7 +214,7 @@ export function useAgentSocket(serverUrl: string) {
       queueRef.current = [];
       undoStackRef.current = [];
       syncQueue();
-      commitStreamingLine();
+      commitTurn();
     };
 
     ws.onerror = () => {
@@ -216,6 +255,7 @@ export function useAgentSocket(serverUrl: string) {
             id: createLineId(),
             role: "assistant",
             text: "",
+            tools: [],
           });
           setLog((prev) => [...prev, { type: "start", ts: Date.now() }]);
           break;
@@ -228,6 +268,7 @@ export function useAgentSocket(serverUrl: string) {
                 id: createLineId(),
                 role: "assistant",
                 text: message.text,
+                tools: [],
               } as ChatLine);
             const next =
               current == null
@@ -247,10 +288,12 @@ export function useAgentSocket(serverUrl: string) {
                 id: createLineId(),
                 role: "assistant",
                 text: "",
+                tools: [],
               } as ChatLine);
+            const label = formatToolCall(message.name, message.args);
             const next = {
               ...base,
-              text: `${base.text}\n⏺ ${formatToolCall(message.name, message.args)}\n`,
+              tools: [...(base.tools ?? []), { name: message.name, label }],
             };
             streamingRef.current = next;
             return next;
@@ -259,15 +302,6 @@ export function useAgentSocket(serverUrl: string) {
           break;
         case "tool_result":
           if (!processingRef.current) return;
-          setStreamingLine((current) => {
-            if (!current) return current;
-            const next = {
-              ...current,
-              text: `${current.text}  ${formatToolResult(message.output)}\n`,
-            };
-            streamingRef.current = next;
-            return next;
-          });
           setLog((prev) => [...prev, { type: "tool_result", name: message.name, output: message.output }]);
           break;
         case "done":
@@ -290,7 +324,7 @@ export function useAgentSocket(serverUrl: string) {
       ws.close();
       socketRef.current = null;
     };
-  }, [serverUrl, finishTurn, syncQueue, commitStreamingLine, updateStreamingLine]);
+  }, [serverUrl, finishTurn, syncQueue, commitTurn, updateStreamingLine]);
 
   const sendMessage = useCallback(
     (text: string) => {
@@ -324,12 +358,12 @@ export function useAgentSocket(serverUrl: string) {
   const addLocalLine = useCallback((text: string) => {
     const lineId = createLineId();
     undoStackRef.current.push({ kind: "local", lineId });
-    commitStreamingLine();
+    commitTurn();
     setStaticLines((prev) => [
       ...prev,
       { id: lineId, role: "assistant", text },
     ]);
-  }, [commitStreamingLine]);
+  }, [commitTurn]);
 
   const undoLastTurn = useCallback((): string | null => {
     const action = undoStackRef.current.pop();
@@ -377,11 +411,11 @@ export function useAgentSocket(serverUrl: string) {
       if (userIndex === -1) {
         return prev;
       }
-      const next = prev[userIndex + 1];
-      if (next?.role === "assistant") {
-        return [...prev.slice(0, userIndex), ...prev.slice(userIndex + 2)];
+      let endIndex = userIndex + 1;
+      while (endIndex < prev.length && prev[endIndex]?.role === "assistant") {
+        endIndex += 1;
       }
-      return [...prev.slice(0, userIndex), ...prev.slice(userIndex + 1)];
+      return [...prev.slice(0, userIndex), ...prev.slice(endIndex)];
     });
     updateStreamingLine(null);
     return action.text;
@@ -511,7 +545,8 @@ export function useAgentSocket(serverUrl: string) {
   }, [log]);
 
   const waitingForReply =
-    pending || (streaming && streamingLine !== null && !streamingLine.text);
+    (pending || streaming) &&
+    (streamingLine === null || !lineHasContent(streamingLine));
 
   return {
     connection,
