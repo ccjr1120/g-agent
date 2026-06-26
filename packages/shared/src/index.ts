@@ -1,7 +1,8 @@
 export type ClientMessage =
   | { type: "chat"; message: string }
   | { type: "reset" }
-  | { type: "agent"; name?: string };
+  | { type: "agent"; name?: string }
+  | { type: "skill"; name: string };
 
 export type ServerMessage =
   | { type: "ready" }
@@ -37,6 +38,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       return data;
     }
     if (data.type === "agent") {
+      return data;
+    }
+    if (data.type === "skill" && typeof data.name === "string") {
       return data;
     }
     return null;

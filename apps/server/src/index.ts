@@ -15,7 +15,10 @@ import {
   getServerHost,
   getServerPort,
   loadConfig,
+  mergeAgentProviderOverrides,
+  type ResolvedProvider,
 } from "@g-agent/config";
+import type { Skill } from "@g-agent/agent";
 import { parseClientMessage, type ServerMessage } from "@g-agent/shared";
 
 const { config, path: configPath } = await loadConfig();
@@ -24,15 +27,29 @@ const { agent: initialAgent, fallback } = resolveActiveAgent(
   config.agent,
   loadedAgents,
 );
-const provider = getActiveProvider(config);
 const host = getServerHost();
 const port = getServerPort();
+
+function resolveProvider(agent: AgentConfig): ResolvedProvider | null {
+  try {
+    return getActiveProvider(
+      mergeAgentProviderOverrides(config, {
+        provider: agent.provider,
+        providers: agent.providers,
+      }),
+    );
+  } catch {
+    return null;
+  }
+}
 
 type WsData = {
   promptQueue: string[];
   draining: boolean;
   activeAgent: AgentConfig;
   systemPrompt: string;
+  /** Effective provider after merging agent-level overrides. */
+  effectiveProvider: ResolvedProvider | null;
   /** Set once per connection from the startup fallback; surfaced to the
    * client as an `agent_fallback` hint on socket open. */
   startupFallback?: { requested: string };
@@ -52,6 +69,28 @@ function agentCatalog(loaded: LoadedAgents, active: AgentConfig) {
 
 function skillsCatalog(active: AgentConfig) {
   return active.skills.map((s) => ({ name: s.name, description: s.description }));
+}
+
+/**
+ * Build the prompt that injects a skill's SKILL.md body into a conversation
+ * turn, so the model follows the skill's instructions on demand. `body` is
+ * already loaded and `{{skill_dir}}`-templated by `loadSkillsFromDir`.
+ */
+function buildSkillPrompt(skill: Skill): string {
+  const header = skill.description
+    ? `技能：${skill.name}\n说明：${skill.description}\n`
+    : `技能：${skill.name}\n`;
+  return [
+    "请按以下技能指令执行。",
+    "",
+    header,
+    "指令正文：",
+    "---",
+    skill.body,
+    "---",
+    "",
+    "请立即开始执行该技能。需要用户输入时主动询问用户。",
+  ].join("\n");
 }
 
 async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<void> {
@@ -95,7 +134,7 @@ async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<v
 
       send(ws, { type: "done" });
     },
-    provider,
+    ws.data.effectiveProvider,
     ws.data.systemPrompt,
   );
 }
@@ -131,6 +170,7 @@ Bun.serve({
           draining: false,
           activeAgent: initialAgent,
           systemPrompt: buildAgentSystemPrompt(initialAgent, loadedAgents),
+          effectiveProvider: resolveProvider(initialAgent),
           startupFallback: fallback,
         } satisfies WsData,
       })
@@ -208,6 +248,7 @@ Bun.serve({
 
         ws.data.activeAgent = target;
         ws.data.systemPrompt = buildAgentSystemPrompt(target, loadedAgents);
+        ws.data.effectiveProvider = resolveProvider(target);
         ws.data.promptQueue.length = 0;
 
         send(ws, {
@@ -217,6 +258,26 @@ Bun.serve({
         });
         send(ws, { type: "skills", skills: skillsCatalog(target) });
         send(ws, { type: "system_prompt", text: ws.data.systemPrompt });
+        return;
+      }
+
+      if (message.type === "skill") {
+        const skillName = message.name.trim();
+        if (!skillName) {
+          send(ws, { type: "error", message: "Empty skill name" });
+          return;
+        }
+
+        const skill = ws.data.activeAgent.skills.find(
+          (s) => s.name === skillName,
+        );
+        if (!skill) {
+          send(ws, { type: "error", message: `Unknown skill "${skillName}"` });
+          return;
+        }
+
+        ws.data.promptQueue.push(buildSkillPrompt(skill));
+        void drainPromptQueue(ws);
         return;
       }
 
@@ -232,7 +293,8 @@ Bun.serve({
   },
 });
 
-const providerLabel = provider ? formatProviderRef(provider) : "echo";
+const startupProvider = resolveProvider(initialAgent);
+const providerLabel = startupProvider ? formatProviderRef(startupProvider) : "echo";
 const configLabel = configPath ?? "none";
 const agentsLabel = `${loadedAgents.list.length}${loadedAgents.userPath ? ` (user: ${loadedAgents.userPath})` : ""}`;
 const builtinCount = initialAgent.skills.filter((s) => s.source === "builtin").length;

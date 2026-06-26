@@ -522,6 +522,12 @@ export function useAgentSocket(serverUrl: string) {
     );
   }, []);
 
+  const runSkill = useCallback((name: string) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "skill", name } satisfies ClientMessage));
+  }, []);
+
   const dumpLog = useCallback(async (): Promise<string> => {
     const startedAt = log.find((e) => e.type === "user")?.ts ?? Date.now();
     const systemPrompt = [...log]
@@ -654,6 +660,7 @@ export function useAgentSocket(serverUrl: string) {
     undoLastTurn,
     resetConversation,
     switchAgent,
+    runSkill,
     dumpLog,
   };
 }

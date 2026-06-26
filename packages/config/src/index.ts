@@ -218,6 +218,41 @@ export function formatProviderRef(provider: ResolvedProvider): string {
   return `${provider.name}/${provider.model}`;
 }
 
+export type AgentProviderOverrides = {
+  provider?: string;
+  providers?: Record<string, unknown>;
+};
+
+/**
+ * Merge agent-level provider overrides into the global config.
+ *
+ * - If the agent specifies a `provider`, it replaces the global one.
+ * - If the agent specifies `providers`, they are deep-merged on top of
+ *   the global providers: same-name providers are overridden (shallow),
+ *   and new providers are added.
+ */
+export function mergeAgentProviderOverrides(
+  config: GAgentConfig,
+  overrides?: AgentProviderOverrides,
+): GAgentConfig {
+  if (!overrides) return config;
+
+  const mergedProviders = { ...config.providers };
+
+  if (overrides.providers) {
+    for (const [name, raw] of Object.entries(overrides.providers)) {
+      if (typeof raw !== "object" || raw === null) continue;
+      mergedProviders[name] = raw as ProviderConfig;
+    }
+  }
+
+  return {
+    ...config,
+    provider: overrides.provider ?? config.provider,
+    providers: mergedProviders,
+  };
+}
+
 export function getActiveProvider(config: GAgentConfig): ResolvedProvider | null {
   const providers = config.providers;
   if (!providers || Object.keys(providers).length === 0) {

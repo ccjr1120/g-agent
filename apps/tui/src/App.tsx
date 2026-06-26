@@ -33,10 +33,12 @@ export function App({
     undoLastTurn,
     resetConversation,
     switchAgent,
+    runSkill,
     dumpLog,
   } = useAgentSocket(serverUrl);
 
   const commands = useMemo<SlashCommand[]>(() => [
+    { value: "/skill", description: "列出或运行一个技能" },
     { value: "/skills", description: "列出已加载的技能" },
     { value: "/agent", description: "列出或切换 agent" },
     { value: "/new", description: "开启新对话" },
@@ -62,6 +64,26 @@ export function App({
             .join("\n");
           addLocalLine(lines);
         }
+        return;
+      }
+      if (text === "/skill") {
+        if (skills.length === 0) {
+          addLocalLine("No skills loaded.");
+        } else {
+          const lines = skills
+            .map((s) => `• ${s.name}${s.description ? ` — ${s.description}` : ""}`)
+            .join("\n");
+          addLocalLine(lines);
+        }
+        return;
+      }
+      if (text.startsWith("/skill ")) {
+        const name = text.slice("/skill ".length).trim();
+        if (!name) {
+          addLocalLine("Usage: /skill <name>");
+          return;
+        }
+        runSkill(name);
         return;
       }
       if (text === "/agent") {
@@ -98,7 +120,7 @@ export function App({
       }
       sendMessage(text);
     },
-    [exit, resetConversation, switchAgent, skills, agents, sendMessage, addLocalLine, dumpLog, staticLines, streamingLine],
+    [exit, resetConversation, switchAgent, runSkill, skills, agents, sendMessage, addLocalLine, dumpLog, staticLines, streamingLine],
   );
 
   const handleUndo = useCallback(() => {

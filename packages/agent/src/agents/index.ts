@@ -19,6 +19,13 @@ export type AgentConfig = {
   builtinSkillsPath: string;
   userSkillsPath: string | null;
   source: "builtin" | "user";
+  /** Override the global provider/model reference for this agent.
+   *  Format: "provider-name/model-key", e.g. "openai/gpt-4o". */
+  provider?: string;
+  /** Additional or override provider configurations for this agent,
+   *  merged on top of the global providers. Same shape as config.json
+   *  providers. */
+  providers?: Record<string, unknown>;
 };
 
 export type LoadedAgents = {
@@ -103,7 +110,13 @@ export function mergeSkills(builtin: Skill[], user: Skill[]): Skill[] {
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function readAgentMeta(dir: string): Promise<{ description: string }> {
+type AgentMeta = {
+  description: string;
+  provider?: string;
+  providers?: Record<string, unknown>;
+};
+
+async function readAgentMeta(dir: string): Promise<AgentMeta> {
   const metaPath = join(dir, AGENT_JSON);
   if (!existsSync(metaPath)) {
     return { description: "" };
@@ -112,8 +125,20 @@ async function readAgentMeta(dir: string): Promise<{ description: string }> {
   try {
     const raw = JSON.parse(await readFile(metaPath, "utf8")) as {
       description?: unknown;
+      provider?: unknown;
+      providers?: unknown;
     };
-    return { description: typeof raw.description === "string" ? raw.description : "" };
+    return {
+      description: typeof raw.description === "string" ? raw.description : "",
+      provider:
+        typeof raw.provider === "string" && raw.provider.trim()
+          ? raw.provider.trim()
+          : undefined,
+      providers:
+        typeof raw.providers === "object" && raw.providers !== null && !Array.isArray(raw.providers)
+          ? (raw.providers as Record<string, unknown>)
+          : undefined,
+    };
   } catch {
     return { description: "" };
   }
@@ -138,7 +163,7 @@ async function loadAgentDir(
   name: string,
   source: "builtin" | "user",
 ): Promise<AgentConfig> {
-  const [{ description }, { body, path: systemPromptPath }] = await Promise.all([
+  const [meta, { body, path: systemPromptPath }] = await Promise.all([
     readAgentMeta(dir),
     readSystemPrompt(dir),
   ]);
@@ -154,13 +179,15 @@ async function loadAgentDir(
 
   return {
     name,
-    description,
+    description: meta.description,
     systemPromptBody: body,
     systemPromptPath,
     skills: mergeSkills(builtinSkills, userSkills),
     builtinSkillsPath,
     userSkillsPath: hasUserSkills ? userSkillsPath : null,
     source,
+    provider: meta.provider,
+    providers: meta.providers,
   };
 }
 
