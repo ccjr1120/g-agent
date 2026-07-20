@@ -1,0 +1,1 @@
+- [2026-07-09] 用户的开发目录 ~/development 包含以下子目录：company（公司项目）、forks（fork 的仓库）、self（个人项目）、temp（临时文件）

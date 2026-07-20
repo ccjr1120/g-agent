@@ -39,7 +39,7 @@ export function MessageLine({
   }
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" flexShrink={0} marginBottom={1}>
       {hasTools ? (
         <Box flexDirection="column" marginBottom={hasText ? 1 : 0}>
           {line.tools?.map((tool, index) => (

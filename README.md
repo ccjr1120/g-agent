@@ -24,6 +24,12 @@ curl -fsSL https://raw.githubusercontent.com/ccjr1120/g-agent/main/install.sh | 
 g-agent
 ```
 
+重启后台 server：
+
+```bash
+g-agent server restart
+```
+
 可选环境变量：
 
 | 变量 | 说明 | 默认值 |
@@ -65,9 +71,15 @@ g-agent
     <skill>/SKILL.md
 ```
 
-agent 目录从以下路径查找：`$G_AGENT_AGENTS_DIR` → `$G_AGENT_HOME/agents` → `~/.config/g-agent/agents` → `~/.local/share/g-agent/agents`。同名时用户目录下的 agent 覆盖内置同名 agent；agent 内 `skills/` 的同名技能覆盖 `builtin-skills/`。
+agent 目录从以下路径查找：`$G_AGENT_AGENTS_DIR` → `$G_AGENT_HOME/agents` → `~/.config/g-agent/agents` → `~/.local/share/g-agent/agents`。同名时用户目录下的 agent 覆盖内置同名 agent。
 
-激活某 agent 时**只加载它自己的技能**（完全替换，不再读全局 `~/.config/g-agent/skills`）。
+每个 agent 会加载三类技能：
+
+- built-in skills：`<agent>/builtin-skills/<skill>/SKILL.md`
+- global skills：`$G_AGENT_GLOBAL_SKILLS_DIR` → `$G_AGENT_HOME/skills` → `~/.agents/skills` → `~/.config/g-agent/skills` → `~/.local/share/g-agent/skills`
+- self skills：`<agent>/skills/<skill>/SKILL.md`
+
+同名技能按 `self > global > built-in` 的优先级覆盖。启动时如果发现同名冲突，会在 server 日志中输出被选中的来源和所有候选路径。
 
 内置 `default` agent 已含 `memory` 技能与基础 system prompt，无需配置即可用。
 

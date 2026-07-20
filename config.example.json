@@ -1,12 +1,18 @@
 {
   "provider": "openai/gpt-4o-mini",
+  "mcpServers": {
+    "example-stdio": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"]
+    }
+  },
   "providers": {
     "openai": {
       "baseUrl": "https://api.openai.com/v1",
       "apiKeyEnv": "OPENAI_API_KEY",
       "models": {
-        "gpt-4o-mini": {},
-        "gpt-4o": { "name": "gpt-4o" }
+        "gpt-4o-mini": { "contextWindow": 128000 },
+        "gpt-4o": { "name": "gpt-4o", "contextWindow": 128000 }
       }
     },
     "deepseek": {
@@ -21,7 +27,11 @@
       "baseUrl": "https://apihub.agnes-ai.com/v1",
       "apiKeyEnv": "AGNES_API_KEY",
       "models": {
-        "agnes-2.0-flash": {}
+        "agnes-2.0-flash": {
+          "requestBody": {
+            "enable_thinking": false
+          }
+        }
       }
     }
   }

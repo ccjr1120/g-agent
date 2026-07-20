@@ -39,16 +39,17 @@ export function formatBuiltinSkillsSection(skills: Skill[]): string {
   return lines.join("\n");
 }
 
-export function formatUserSkillsSection(
+export function formatSkillsSection(
   skills: Skill[],
-  userSkillsPath: string | null,
+  title: string,
+  skillsPath: string | null,
 ): string {
   if (skills.length === 0) return "";
 
-  const lines = ["## User skills", ""];
+  const lines = [`## ${title}`, ""];
 
-  if (userSkillsPath) {
-    lines.push(`User-installed skills are loaded from: ${userSkillsPath}`, "");
+  if (skillsPath) {
+    lines.push(`Skills are loaded from: ${skillsPath}`, "");
   }
 
   lines.push(

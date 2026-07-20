@@ -8,7 +8,7 @@ export type Skill = {
   path: string;
   body: string;
   disableModelInvocation: boolean;
-  source: "builtin" | "user";
+  source: "builtin" | "self" | "global";
 };
 
 export function parseSkillFile(content: string): {
@@ -26,7 +26,7 @@ export function parseSkillFile(content: string): {
 
 export async function loadSkillsFromDir(
   dir: string,
-  source: "builtin" | "user",
+  source: Skill["source"],
 ): Promise<Skill[]> {
   if (!existsSync(dir)) return [];
 

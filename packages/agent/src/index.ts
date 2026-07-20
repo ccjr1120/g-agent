@@ -1,8 +1,10 @@
+import type { ResolvedProvider } from "@g-agent/config";
 import {
   builtinTools,
   executeTool,
   toOpenAITools,
 } from "./tools/index.js";
+import { McpManager } from "./mcp/index.js";
 
 export {
   buildAgentSystemPrompt,
@@ -20,7 +22,13 @@ export {
   type LoadedBanner,
 } from "./banners/index.js";
 export { type Skill } from "./skills/index.js";
+export { McpManager, type McpConnectionResult } from "./mcp/index.js";
 export { builtinTools, type ToolDefinition } from "./tools/index.js";
+export type { ResolvedProvider } from "@g-agent/config";
+
+export type AgentRunOptions = {
+  mcpManager?: McpManager | null;
+};
 
 export type AgentStreamEvent =
   | { type: "system_prompt"; text: string }
@@ -29,14 +37,6 @@ export type AgentStreamEvent =
   | { type: "tool_result"; name: string; output: string }
   | { type: "done" }
   | { type: "error"; message: string };
-
-export type ResolvedProvider = {
-  name: string;
-  baseUrl: string;
-  model: string;
-  modelName?: string;
-  apiKey: string;
-};
 
 type ToolCallMessage = {
   id: string;
@@ -56,20 +56,27 @@ type ChatMessage =
 
 const MAX_TOOL_ROUNDS = 25;
 
+export type ConversationMessage = Extract<
+  ChatMessage,
+  { role: "user" | "assistant" }
+>;
+
 export async function runAgent(
   prompt: string,
   onEvent: (event: AgentStreamEvent) => void,
   provider?: ResolvedProvider | null,
   systemPrompt?: string,
+  history: ConversationMessage[] = [],
+  options: AgentRunOptions = {},
 ): Promise<void> {
   const resolved = provider ?? resolveProviderFromEnv();
   const sys = systemPrompt ?? "";
 
   try {
     if (resolved) {
-      await runOpenAI(resolved, prompt, sys, onEvent);
+      await runOpenAI(resolved, prompt, sys, onEvent, history, options);
     } else {
-      await streamEcho(prompt, sys, onEvent);
+      await streamEcho(prompt, sys, onEvent, history);
     }
     onEvent({ type: "done" });
   } catch (error) {
@@ -86,13 +93,15 @@ function resolveProviderFromEnv(): ResolvedProvider | null {
     return null;
   }
 
+  const model = process.env.G_AGENT_MODEL ?? "gpt-4o-mini";
   return {
     name: "env",
     baseUrl: (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(
       /\/+$/,
       "",
     ),
-    model: process.env.G_AGENT_MODEL ?? "gpt-4o-mini",
+    model,
+    modelName: model,
     apiKey,
   };
 }
@@ -101,11 +110,13 @@ async function streamEcho(
   prompt: string,
   systemPrompt: string,
   onEvent: (event: AgentStreamEvent) => void,
+  history: ConversationMessage[],
 ): Promise<void> {
   onEvent({ type: "system_prompt", text: systemPrompt });
 
   const reply =
     "[echo mode — add providers in config.json or set OPENAI_API_KEY]\n" +
+    (history.length > 0 ? `Context messages: ${history.length}\n` : "") +
     `You said: ${prompt}`;
   for (const char of reply) {
     onEvent({ type: "delta", text: char });
@@ -116,9 +127,11 @@ async function streamEcho(
 function buildInitialMessages(
   prompt: string,
   systemPrompt: string,
+  history: ConversationMessage[],
 ): ChatMessage[] {
   return [
     { role: "system", content: systemPrompt },
+    ...history,
     { role: "user", content: prompt },
   ];
 }
@@ -128,12 +141,15 @@ async function runOpenAI(
   prompt: string,
   systemPrompt: string,
   onEvent: (event: AgentStreamEvent) => void,
+  history: ConversationMessage[],
+  options: AgentRunOptions,
 ): Promise<void> {
-  const messages = buildInitialMessages(prompt, systemPrompt);
+  const messages = buildInitialMessages(prompt, systemPrompt, history);
   if (systemPrompt) {
     onEvent({ type: "system_prompt", text: systemPrompt });
   }
-  const tools = toOpenAITools(builtinTools);
+  const mcpTools = options.mcpManager?.getTools() ?? [];
+  const tools = toOpenAITools([...builtinTools, ...mcpTools]);
   const model = provider.modelName ?? provider.model;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -144,6 +160,7 @@ async function runOpenAI(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        ...provider.requestBody,
         model,
         stream: false,
         messages,
@@ -193,7 +210,7 @@ async function runOpenAI(
           continue;
         }
 
-        const output = await executeTool(name, args);
+        const output = await executeNamedTool(name, args, options.mcpManager);
         onEvent({ type: "tool_result", name, output });
         messages.push({ role: "tool", tool_call_id: call.id, content: output });
       }
@@ -209,6 +226,17 @@ async function runOpenAI(
   }
 
   throw new Error(`Too many tool call rounds (max ${MAX_TOOL_ROUNDS})`);
+}
+
+async function executeNamedTool(
+  name: string,
+  args: Record<string, unknown>,
+  mcpManager?: McpManager | null,
+): Promise<string> {
+  if (mcpManager?.hasTool(name)) {
+    return mcpManager.callTool(name, args);
+  }
+  return executeTool(name, args);
 }
 
 async function streamText(

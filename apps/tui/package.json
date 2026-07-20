@@ -7,7 +7,7 @@
     "g-agent": "./dist/cli.js"
   },
   "scripts": {
-    "build": "bun build ./src/cli.tsx --outfile ./dist/cli.js --target bun --format esm --packages external --banner \"#!/usr/bin/env bun\"",
+    "build": "bun build ./src/cli.tsx --outfile ./dist/cli.js --target bun --format esm --packages external",
     "dev": "bun ./src/cli.tsx",
     "start": "bun ./dist/cli.js"
   },
@@ -21,6 +21,7 @@
     "string-width": "^7.2.0"
   },
   "devDependencies": {
+    "@types/bun": "^1.3.14",
     "@types/node": "^22.10.2",
     "@types/react": "^19.2.17",
     "typescript": "^5.7.2"

@@ -5,7 +5,16 @@ import { join } from "node:path";
 import {
   parseServerMessage,
   type ClientMessage,
+  type ConversationTurn,
+  type McpServerCatalogEntry,
 } from "@g-agent/shared";
+import {
+  listSessions,
+  loadSession,
+  saveSession,
+  type SavedSession,
+  type SavedSessionSummary,
+} from "../lib/sessionStore.js";
 
 export type ToolCallDisplay = {
   name: string;
@@ -33,12 +42,26 @@ function lineHasContent(line: ChatLine): boolean {
 export type SkillInfo = {
   name: string;
   description: string;
+  source?: "builtin" | "self" | "global";
 };
 
 export type AgentInfo = {
   name: string;
   description: string;
   active: boolean;
+};
+
+export type McpServerInfo = McpServerCatalogEntry;
+
+export type AgentFallbackInfo = {
+  requested: string;
+  active: string;
+};
+
+export type ContextUsage = {
+  usedTokens: number;
+  maxTokens: number;
+  percent: number;
 };
 
 type LogEntry =
@@ -125,6 +148,49 @@ function formatToolCall(name: string, args: string): string {
   return "…";
 }
 
+function staticLinesToHistory(lines: ChatLine[]): ConversationTurn[] {
+  return lines
+    .filter((line) => line.role === "user" || line.role === "assistant")
+    .filter((line) => line.text.trim().length > 0)
+    .map((line) => ({ role: line.role, content: line.text }));
+}
+
+function historyToStaticLines(history: ConversationTurn[]): ChatLine[] {
+  return history.map((message) => ({
+    id: createLineId(),
+    role: message.role,
+    text: message.content,
+  }));
+}
+
+function historyToLog(history: ConversationTurn[], startedAt: number): LogEntry[] {
+  const entries: LogEntry[] = [];
+  let ts = startedAt;
+
+  for (const message of history) {
+    if (message.role === "user") {
+      entries.push({ type: "user", text: message.content, ts });
+      entries.push({ type: "start", ts });
+      ts += 1;
+      continue;
+    }
+
+    entries.push({ type: "delta", text: message.content });
+    entries.push({ type: "done", ts });
+    ts += 1;
+  }
+
+  return entries;
+}
+
+function buildSessionPreview(history: ConversationTurn[]): string {
+  const firstUser = history.find((message) => message.role === "user");
+  if (!firstUser) {
+    return "Untitled session";
+  }
+  return truncate(firstUser.content.replace(/\s+/g, " ").trim(), 60);
+}
+
 export function useAgentSocket(serverUrl: string) {
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [staticLines, setStaticLines] = useState<ChatLine[]>([]);
@@ -137,9 +203,18 @@ export function useAgentSocket(serverUrl: string) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [activeAgent, setActiveAgent] = useState<string>("");
-  const [agentFallback, setAgentFallback] = useState<string | null>(null);
+  const [model, setModel] = useState<string>("");
+  const [contextUsage, setContextUsage] = useState<ContextUsage>({
+    usedTokens: 0,
+    maxTokens: 0,
+    percent: 0,
+  });
+  const [agentFallback, setAgentFallback] = useState<AgentFallbackInfo | null>(null);
+  const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<{ id: string; text: string }[]>([]);
+  const [savedSessions, setSavedSessions] = useState<SavedSessionSummary[]>([]);
+  const [staticRenderKey, setStaticRenderKey] = useState(0);
 
   const queueRef = useRef<QueueItem[]>([]);
   const undoStackRef = useRef<UndoAction[]>([]);
@@ -149,6 +224,15 @@ export function useAgentSocket(serverUrl: string) {
   const streamingRef = useRef<ChatLine | null>(null);
   const prevActiveAgentRef = useRef<string>("");
   const turnStartMsRef = useRef<number | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const sessionStartedAtRef = useRef<number>(0);
+  const resumingRef = useRef(false);
+  const pendingResumeRef = useRef<SavedSession | null>(null);
+
+  const refreshSavedSessions = useCallback(async () => {
+    const sessions = await listSessions();
+    setSavedSessions(sessions);
+  }, []);
 
   const resetTurnTiming = useCallback(() => {
     turnStartMsRef.current = null;
@@ -235,6 +319,42 @@ export function useAgentSocket(serverUrl: string) {
   tryProcessQueueRef.current = tryProcessQueue;
 
   useEffect(() => {
+    void refreshSavedSessions();
+  }, [refreshSavedSessions]);
+
+  useEffect(() => {
+    if (pending || streaming) {
+      return;
+    }
+    if (staticLines.length === 0 || !activeAgent) {
+      return;
+    }
+
+    const history = staticLinesToHistory(staticLines);
+    if (history.length === 0) {
+      return;
+    }
+
+    if (!sessionIdRef.current) {
+      sessionIdRef.current = crypto.randomUUID();
+      sessionStartedAtRef.current = Date.now();
+    }
+
+    const session: SavedSession = {
+      id: sessionIdRef.current,
+      agent: activeAgent,
+      model,
+      startedAt: sessionStartedAtRef.current,
+      updatedAt: Date.now(),
+      preview: buildSessionPreview(history),
+      turnCount: history.length,
+      history,
+    };
+
+    void saveSession(session).then(() => refreshSavedSessions());
+  }, [staticLines, activeAgent, model, pending, streaming, refreshSavedSessions]);
+
+  useEffect(() => {
     const ws = new WebSocket(serverUrl);
     socketRef.current = ws;
 
@@ -288,7 +408,11 @@ export function useAgentSocket(serverUrl: string) {
           // server-side switch. Only clear the local conversation when the
           // active agent actually changes AND we have seen one before
           // (prevActive !== "" means not the initial open).
-          if (prevActiveAgentRef.current !== "" && prevActiveAgentRef.current !== newActive) {
+          if (
+            prevActiveAgentRef.current !== "" &&
+            prevActiveAgentRef.current !== newActive &&
+            !resumingRef.current
+          ) {
             queueRef.current = [];
             undoStackRef.current = [];
             processingRef.current = false;
@@ -300,11 +424,13 @@ export function useAgentSocket(serverUrl: string) {
             setPending(false);
             setError(null);
             setLog([]);
+            setContextUsage({ usedTokens: 0, maxTokens: 0, percent: 0 });
             resetTurnTiming();
             setAgentFallback(null);
           }
           prevActiveAgentRef.current = newActive;
           setActiveAgent(newActive);
+          setModel(message.model);
           break;
         }
         case "agent_fallback":
@@ -317,6 +443,16 @@ export function useAgentSocket(serverUrl: string) {
           break;
         case "skills":
           setSkills(message.skills);
+          break;
+        case "mcp":
+          setMcpServers(message.servers);
+          break;
+        case "context":
+          setContextUsage({
+            usedTokens: message.usedTokens,
+            maxTokens: message.maxTokens,
+            percent: message.percent,
+          });
           break;
         case "system_prompt":
           setLog((prev) => [...prev, { type: "system_prompt", text: message.text, ts: Date.now() }]);
@@ -384,11 +520,42 @@ export function useAgentSocket(serverUrl: string) {
           finishTurn();
           break;
         case "error":
+          if (resumingRef.current) {
+            resumingRef.current = false;
+            pendingResumeRef.current = null;
+            setError(message.message);
+            break;
+          }
           if (!processingRef.current) return;
           setError(message.message);
           setLog((prev) => [...prev, { type: "error", message: message.message, ts: Date.now() }]);
           finishTurn();
           break;
+        case "resumed": {
+          const session = pendingResumeRef.current;
+          pendingResumeRef.current = null;
+          resumingRef.current = false;
+
+          if (session) {
+            sessionIdRef.current = session.id;
+            sessionStartedAtRef.current = session.startedAt;
+            queueRef.current = [];
+            undoStackRef.current = [];
+            processingRef.current = false;
+            ignoreResponseRef.current = false;
+            syncQueue();
+            setStaticLines(historyToStaticLines(session.history));
+            setLog(historyToLog(session.history, session.startedAt));
+            updateStreamingLine(null);
+            setIsStreaming(false);
+            setPending(false);
+            setError(null);
+            resetTurnTiming();
+            setAgentFallback(null);
+            setStaticRenderKey((key) => key + 1);
+          }
+          break;
+        }
       }
     };
 
@@ -511,8 +678,38 @@ export function useAgentSocket(serverUrl: string) {
     setPending(false);
     setError(null);
     setLog([]);
+    setContextUsage({ usedTokens: 0, maxTokens: 0, percent: 0 });
     resetTurnTiming();
+    sessionIdRef.current = null;
+    sessionStartedAtRef.current = 0;
+    setStaticRenderKey((key) => key + 1);
   }, [syncQueue, updateStreamingLine, resetTurnTiming]);
+
+  const resumeSession = useCallback(async (idOrPrefix: string): Promise<boolean> => {
+    const session = await loadSession(idOrPrefix);
+    if (!session) {
+      return false;
+    }
+
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    resumingRef.current = true;
+    pendingResumeRef.current = session;
+    setError(null);
+
+    ws.send(
+      JSON.stringify({
+        type: "resume",
+        agent: session.agent,
+        history: session.history,
+      } satisfies ClientMessage),
+    );
+
+    return true;
+  }, []);
 
   const switchAgent = useCallback((name?: string) => {
     const ws = socketRef.current;
@@ -526,6 +723,12 @@ export function useAgentSocket(serverUrl: string) {
     const ws = socketRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: "skill", name } satisfies ClientMessage));
+  }, []);
+
+  const listMcp = useCallback(() => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "mcp" } satisfies ClientMessage));
   }, []);
 
   const dumpLog = useCallback(async (): Promise<string> => {
@@ -644,6 +847,7 @@ export function useAgentSocket(serverUrl: string) {
   return {
     connection,
     staticLines,
+    staticRenderKey,
     streamingLine,
     streaming,
     pending,
@@ -652,15 +856,22 @@ export function useAgentSocket(serverUrl: string) {
     queuedMessages,
     error,
     skills,
+    mcpServers,
     agents,
     activeAgent,
+    model,
+    contextUsage,
     agentFallback,
+    savedSessions,
     sendMessage,
     addLocalLine,
     undoLastTurn,
     resetConversation,
+    resumeSession,
+    refreshSavedSessions,
     switchAgent,
     runSkill,
+    listMcp,
     dumpLog,
   };
 }

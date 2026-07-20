@@ -1,15 +1,74 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { BlinkingCursor } from "./BlinkingCursor.js";
+
+const DEFAULT_MAX_MENU_ITEMS = 8;
+const MIN_MAX_MENU_ITEMS = 5;
+const MAX_MAX_MENU_ITEMS = 16;
 
 export type SlashCommand = {
   value: string;
   description: string;
+  category: string;
 };
+
+export type SlashCommandGroups = Record<string, SlashCommand[]>;
+
+const GROUP_TRIGGERS = ["/skills", "/agent", "/mcp", "/resume"] as const;
+
+function resolveMenuItems(
+  value: string,
+  commands: SlashCommand[],
+  groups: SlashCommandGroups,
+): SlashCommand[] {
+  if (!value.startsWith("/") || value.includes(" ")) {
+    return [];
+  }
+
+  for (const trigger of GROUP_TRIGGERS) {
+    if (value === trigger) {
+      const header = commands.find((cmd) => cmd.value === trigger);
+      const children = groups[trigger] ?? [];
+      return header ? [header, ...children] : children;
+    }
+  }
+
+  const topMatches = commands.filter((cmd) =>
+    cmd.value.toLowerCase().startsWith(value.toLowerCase()),
+  );
+
+  if (value.length <= 1) {
+    return topMatches;
+  }
+
+  const childMatches: SlashCommand[] = [];
+  for (const children of Object.values(groups)) {
+    for (const cmd of children) {
+      if (cmd.value.toLowerCase().startsWith(value.toLowerCase())) {
+        childMatches.push(cmd);
+      }
+    }
+  }
+
+  if (childMatches.length === 0) {
+    return topMatches;
+  }
+
+  const seen = new Set<string>();
+  const merged: SlashCommand[] = [];
+  for (const cmd of [...topMatches, ...childMatches]) {
+    if (seen.has(cmd.value)) continue;
+    seen.add(cmd.value);
+    merged.push(cmd);
+  }
+  return merged;
+}
 
 export function ChatInput({
   disabled,
   commands = [],
+  commandGroups = {},
+  maxMenuItems = DEFAULT_MAX_MENU_ITEMS,
   restoreText,
   onRestoreConsumed,
   onSubmit,
@@ -17,6 +76,8 @@ export function ChatInput({
 }: {
   disabled: boolean;
   commands?: SlashCommand[];
+  commandGroups?: SlashCommandGroups;
+  maxMenuItems?: number;
   restoreText?: string | null;
   onRestoreConsumed?: () => void;
   onSubmit: (text: string) => void;
@@ -36,17 +97,49 @@ export function ChatInput({
     onRestoreConsumed?.();
   }, [restoreText, onRestoreConsumed]);
 
+  const menuLimit = Math.max(
+    MIN_MAX_MENU_ITEMS,
+    Math.min(MAX_MAX_MENU_ITEMS, maxMenuItems),
+  );
+
   const isMenuOpen = value.startsWith("/") && !value.includes(" ");
 
-  const filteredCommands = isMenuOpen
-    ? commands.filter((cmd) =>
-        cmd.value.startsWith(value.toLowerCase()),
-      )
-    : [];
+  const matchedCommands = useMemo(
+    () => resolveMenuItems(value, commands, commandGroups),
+    [value, commands, commandGroups],
+  );
 
-  const clampedMenuIndex = filteredCommands.length > 0
-    ? Math.min(menuIndex, filteredCommands.length - 1)
+  const clampedMenuIndex = matchedCommands.length > 0
+    ? Math.min(menuIndex, matchedCommands.length - 1)
     : 0;
+  const windowStart = Math.max(
+    0,
+    Math.min(
+      clampedMenuIndex - menuLimit + 1,
+      Math.max(0, matchedCommands.length - menuLimit),
+    ),
+  );
+  const visibleCommands = matchedCommands.slice(
+    windowStart,
+    windowStart + menuLimit,
+  );
+  const hiddenAbove = windowStart;
+  const hiddenBelow = Math.max(0, matchedCommands.length - windowStart - visibleCommands.length);
+
+  useEffect(() => {
+    setMenuIndex(0);
+  }, [value]);
+
+  const menuRows = visibleCommands.flatMap((cmd, index) => {
+    const previous = visibleCommands[index - 1];
+    const commandIndex = windowStart + index;
+    return previous?.category === cmd.category
+      ? [{ type: "command" as const, command: cmd, index: commandIndex }]
+      : [
+          { type: "category" as const, label: cmd.category },
+          { type: "command" as const, command: cmd, index: commandIndex },
+        ];
+  });
 
   const submit = useCallback(
     (raw: string) => {
@@ -65,30 +158,52 @@ export function ChatInput({
     [disabled, onSubmit],
   );
 
+  const expandGroup = useCallback((trigger: string) => {
+    setValue(trigger);
+    setMenuIndex(0);
+  }, []);
+
   useInput(
     (input, key) => {
       if (disabled) return;
 
-      if (isMenuOpen && filteredCommands.length > 0) {
+      if (isMenuOpen && matchedCommands.length > 0) {
         if (key.upArrow) {
-          setMenuIndex((i) => (i <= 0 ? filteredCommands.length - 1 : i - 1));
+          setMenuIndex((i) => (i <= 0 ? matchedCommands.length - 1 : i - 1));
           return;
         }
 
         if (key.downArrow) {
-          setMenuIndex((i) => (i >= filteredCommands.length - 1 ? 0 : i + 1));
+          setMenuIndex((i) => (i >= matchedCommands.length - 1 ? 0 : i + 1));
           return;
         }
 
         if (key.return) {
-          const selected = filteredCommands[clampedMenuIndex];
-          if (selected) {
-            submit(selected.value);
+          const selected = matchedCommands[clampedMenuIndex];
+          if (!selected) {
+            return;
           }
+
+          const isGroupTrigger = GROUP_TRIGGERS.includes(
+            selected.value as (typeof GROUP_TRIGGERS)[number],
+          );
+          const hasGroupChildren = (commandGroups[selected.value]?.length ?? 0) > 0;
+
+          if (isGroupTrigger && hasGroupChildren && value !== selected.value) {
+            expandGroup(selected.value);
+            return;
+          }
+
+          submit(selected.value);
           return;
         }
 
         if (key.escape) {
+          if (GROUP_TRIGGERS.includes(value as (typeof GROUP_TRIGGERS)[number])) {
+            setValue("/");
+            setMenuIndex(0);
+            return;
+          }
           setValue("");
           setMenuIndex(0);
           return;
@@ -187,25 +302,62 @@ export function ChatInput({
   })();
 
   return (
-    <Box flexDirection="column">
-      {isMenuOpen && filteredCommands.length > 0 && (
-        <Box flexDirection="column" paddingX={1} marginBottom={1}>
-          {filteredCommands.map((cmd, i) => {
-            const selected = i === clampedMenuIndex;
+    <Box flexDirection="column" flexShrink={0}>
+      {isMenuOpen && visibleCommands.length > 0 && (
+        <Box flexDirection="column" paddingX={1}>
+          {hiddenAbove > 0 ? (
+            <Text color="gray" dimColor>
+              {`↑ ${hiddenAbove} more — use ↑↓ to scroll`}
+            </Text>
+          ) : null}
+          {menuRows.map((row) => {
+            if (row.type === "category") {
+              return (
+                <Box key={`category-${row.label}`}>
+                  <Text color="gray" bold>
+                    {row.label}
+                  </Text>
+                </Box>
+              );
+            }
+
+            const selected = row.index === clampedMenuIndex;
+            const cmd = row.command;
             return (
-              <Box key={cmd.value} marginBottom={1}>
-                <Text color={selected ? "cyan" : "white"} bold={selected}>
-                  {cmd.value}
-                </Text>
+              <Box key={`${cmd.category}-${cmd.value}-${cmd.description}`}>
+                <Box flexShrink={0} marginRight={2}>
+                  <Text color={selected ? "cyan" : "white"} bold={selected}>
+                    {cmd.value}
+                  </Text>
+                </Box>
                 {cmd.description ? (
-                  <Text color="gray">{"  "}{cmd.description}</Text>
+                  <Box flexGrow={1} minWidth={0}>
+                    <Text color="gray" wrap="truncate-end">
+                      {cmd.description}
+                    </Text>
+                  </Box>
                 ) : null}
               </Box>
             );
           })}
+          {hiddenBelow > 0 ? (
+            <Text color="gray" dimColor>
+              {`↓ ${hiddenBelow} more — use ↑↓ to scroll`}
+            </Text>
+          ) : null}
         </Box>
       )}
-      {inputElement}
+      <Box
+        flexDirection="column"
+        width="100%"
+        borderStyle="single"
+        borderLeft={false}
+        borderRight={false}
+        borderColor="gray"
+        paddingX={1}
+      >
+        {inputElement}
+      </Box>
     </Box>
   );
 }

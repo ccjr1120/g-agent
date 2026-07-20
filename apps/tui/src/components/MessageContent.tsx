@@ -1,5 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { StreamMarkdown } from "ink-stream-markdown";
 
 export function MessageContent({
   role,
@@ -25,11 +26,13 @@ export function MessageContent({
   // continuation lines align under the first line's content rather than
   // under the icon. flexGrow + minWidth=0 lets the content box take the
   // remaining width and wrap against it without overflowing on long tokens.
+  const markdownWidth = Math.max(20, (process.stdout.columns ?? 80) - 4);
+
   return (
     <Box>
       <Text>{"❯ "}</Text>
       <Box flexGrow={1} minWidth={0}>
-        <Text wrap="wrap">{text}</Text>
+        <StreamMarkdown theme={{ width: markdownWidth }}>{text}</StreamMarkdown>
       </Box>
     </Box>
   );

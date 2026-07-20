@@ -6,6 +6,10 @@ import { DEFAULT_SERVER_PORT } from "@g-agent/shared";
 
 export type ModelConfig = {
   name?: string;
+  /** Model context window size in tokens. Used for usage display and history trimming. */
+  contextWindow?: number;
+  /** Extra fields merged into the LLM /chat/completions request body. */
+  requestBody?: Record<string, unknown>;
 };
 
 export type ProviderConfig = {
@@ -13,6 +17,18 @@ export type ProviderConfig = {
   models: Record<string, ModelConfig>;
   apiKey?: string;
   apiKeyEnv?: string;
+};
+
+/** MCP server config. Compatible with Cursor-style mcp.json entries. */
+export type McpServerConfig = {
+  /** Stdio transport: executable to spawn. */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  /** HTTP/SSE transport: remote MCP endpoint URL. */
+  url?: string;
+  headers?: Record<string, string>;
 };
 
 type RawProviderConfig = Omit<ProviderConfig, "models"> & {
@@ -23,6 +39,8 @@ export type GAgentConfig = {
   /** Active provider in "provider-name/model-name" form. */
   provider?: string;
   providers?: Record<string, ProviderConfig>;
+  /** Global MCP servers available to all agents (unless overridden per agent). */
+  mcpServers?: Record<string, McpServerConfig>;
   /** Active agent name. Selects which agent (skills + system prompt) loads at startup. */
   agent?: string;
 };
@@ -39,6 +57,10 @@ export type ResolvedProvider = {
   /** Model name sent to the LLM API. */
   modelName: string;
   apiKey: string;
+  /** Context window in tokens, from model config. */
+  contextWindow?: number;
+  /** Extra fields merged into the LLM /chat/completions request body. */
+  requestBody?: Record<string, unknown>;
 };
 
 export type LoadedConfig = {
@@ -76,6 +98,34 @@ function resolveModelName(key: string, model: ModelConfig): string {
   return name || key;
 }
 
+function normalizeRequestBody(
+  value: unknown,
+  path: string,
+): Record<string, unknown> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "object" || value == null || Array.isArray(value)) {
+    throw new Error(`${path} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function resolveContextWindow(
+  key: string,
+  model: ModelConfig,
+  path: string,
+): number | undefined {
+  const value = model.contextWindow;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${path}.${key}.contextWindow must be a positive number`);
+  }
+  return Math.floor(value);
+}
+
 function normalizeModels(
   value: unknown,
   path: string,
@@ -97,7 +147,15 @@ function normalizeModels(
     }
 
     const raw = item as ModelConfig;
-    models[key] = raw;
+    const requestBody = normalizeRequestBody(
+      (item as Record<string, unknown>).requestBody,
+      `${path}.${key}.requestBody`,
+    );
+    models[key] = {
+      ...raw,
+      contextWindow: resolveContextWindow(key, raw, path),
+      ...(requestBody ? { requestBody } : {}),
+    };
   }
 
   return models;
@@ -132,6 +190,55 @@ function parseProviderRef(ref: string): { name: string; model?: string } {
 
 function looksLikeApiKey(value: string): boolean {
   return /^(sk-|api-)/i.test(value.trim());
+}
+
+function normalizeMcpServers(
+  value: unknown,
+  path: string,
+): Record<string, McpServerConfig> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "object" || value == null || Array.isArray(value)) {
+    throw new Error(`${path} must be an object`);
+  }
+
+  const servers: Record<string, McpServerConfig> = {};
+
+  for (const [name, item] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof item !== "object" || item == null || Array.isArray(item)) {
+      throw new Error(`${path}.${name} must be an object`);
+    }
+
+    const raw = item as McpServerConfig;
+    const command = raw.command?.trim();
+    const url = raw.url?.trim();
+    const hasCommand = Boolean(command);
+    const hasUrl = Boolean(url);
+
+    if (hasCommand === hasUrl) {
+      throw new Error(
+        `${path}.${name} must specify exactly one of "command" (stdio) or "url" (HTTP)`,
+      );
+    }
+
+    servers[name] = {
+      ...(command ? { command } : {}),
+      ...(url ? { url } : {}),
+      ...(raw.args ? { args: raw.args.map(String) } : {}),
+      ...(raw.env ? { env: Object.fromEntries(Object.entries(raw.env).map(([k, v]) => [k, String(v)])) } : {}),
+      ...(raw.cwd?.trim() ? { cwd: raw.cwd.trim() } : {}),
+      ...(raw.headers
+        ? {
+            headers: Object.fromEntries(
+              Object.entries(raw.headers).map(([k, v]) => [k, String(v)]),
+            ),
+          }
+        : {}),
+    };
+  }
+
+  return servers;
 }
 
 function normalizeConfig(raw: RawGAgentConfig): GAgentConfig {
@@ -187,6 +294,7 @@ function normalizeConfig(raw: RawGAgentConfig): GAgentConfig {
   return {
     provider: providerRef,
     providers,
+    mcpServers: normalizeMcpServers(raw.mcpServers, "mcpServers"),
     agent: agentRef,
   };
 }
@@ -223,6 +331,10 @@ export type AgentProviderOverrides = {
   providers?: Record<string, unknown>;
 };
 
+export type AgentMcpOverrides = {
+  mcpServers?: Record<string, unknown>;
+};
+
 /**
  * Merge agent-level provider overrides into the global config.
  *
@@ -231,6 +343,32 @@ export type AgentProviderOverrides = {
  *   the global providers: same-name providers are overridden (shallow),
  *   and new providers are added.
  */
+/**
+ * Merge agent-level MCP server overrides into the global config.
+ *
+ * Agent entries replace or add servers by name on top of global `mcpServers`.
+ */
+export function mergeAgentMcpServers(
+  config: GAgentConfig,
+  overrides?: AgentMcpOverrides,
+): Record<string, McpServerConfig> {
+  const merged: Record<string, McpServerConfig> = { ...(config.mcpServers ?? {}) };
+
+  if (!overrides?.mcpServers) {
+    return merged;
+  }
+
+  const agentServers = normalizeMcpServers(
+    overrides.mcpServers,
+    "agent.mcpServers",
+  );
+  if (!agentServers) {
+    return merged;
+  }
+
+  return { ...merged, ...agentServers };
+}
+
 export function mergeAgentProviderOverrides(
   config: GAgentConfig,
   overrides?: AgentProviderOverrides,
@@ -312,6 +450,8 @@ export function getActiveProvider(config: GAgentConfig): ResolvedProvider | null
       provider.models[resolvedModelKey],
     ),
     apiKey,
+    contextWindow: provider.models[resolvedModelKey].contextWindow,
+    requestBody: provider.models[resolvedModelKey].requestBody,
   };
 }
 
