@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
+import { Box, Text, useApp, useStdout, useWindowSize } from "ink";
 import { ChatInput, type SlashCommand } from "./components/ChatInput.js";
 import { LoadingSpinner } from "./components/LoadingSpinner.js";
 import { MessageLine } from "./components/MessageLine.js";
@@ -67,7 +67,6 @@ export function App({
   const {
     connection,
     staticLines,
-    staticRenderKey,
     streamingLine,
     waitingForReply,
     streaming,
@@ -95,10 +94,10 @@ export function App({
   } = useAgentSocket(serverUrl);
 
   const commands = useMemo<SlashCommand[]>(() => [
-    { value: "/skills", description: "Browse skills (↑↓ expand)", category: "Commands" },
-    { value: "/mcp", description: "Browse MCP servers (↑↓ expand)", category: "Commands" },
-    { value: "/agent", description: "Browse agents (↑↓ expand)", category: "Commands" },
-    { value: "/resume", description: "Browse saved sessions (↑↓ expand)", category: "Commands" },
+    { value: "/skills", description: "Browse skills", category: "Commands" },
+    { value: "/mcp", description: "Browse MCP servers", category: "Commands" },
+    { value: "/agent", description: "Browse agents", category: "Commands" },
+    { value: "/resume", description: "Browse saved sessions", category: "Commands" },
     { value: "/new", description: "Start a new conversation", category: "Commands" },
     { value: "/log", description: "Export the full conversation log", category: "Commands" },
   ], []);
@@ -271,11 +270,6 @@ export function App({
 
   const inputDisabled = connection !== "connected";
   const hasMessages = staticLines.length > 0 || streamingLine !== null;
-  // Reserve space for status bar, input border, and the fixed-height slash-command menu.
-  const maxMenuReserveRows = menuItemLimit * 2 + 3;
-  const footerReserveRows = 3 + maxMenuReserveRows;
-  const streamingMaxHeight = Math.max(6, terminalRows - footerReserveRows);
-
   const bannerBlock = banner.length > 0 ? (
     <Box flexDirection="column" flexShrink={0} marginBottom={1}>
       {banner.map((line, i) => (
@@ -311,22 +305,17 @@ export function App({
   ) : null;
 
   return (
-    <>
-      {staticLines.length > 0 ? (
-        <Static key={staticRenderKey} items={staticLines}>
-          {(line) => (
-            <Box key={line.id} flexShrink={0} paddingX={1}>
-              <MessageLine line={line} />
-            </Box>
-          )}
-        </Static>
-      ) : null}
-
-      <Box flexDirection="column" flexShrink={0}>
+    <Box
+      flexDirection="column"
+      height={terminalRows}
+      minHeight={terminalRows}
+      flexShrink={0}
+    >
         {!hasMessages ? (
           <Box
             flexDirection="column"
-            minHeight={Math.max(1, terminalRows - footerReserveRows)}
+            flexGrow={1}
+            minHeight={0}
             paddingX={1}
             marginBottom={1}
           >
@@ -336,19 +325,28 @@ export function App({
               {welcomeContent}
             </Box>
           </Box>
-        ) : liveTurnContent ? (
+        ) : (
           <Box
             flexDirection="column"
-            flexShrink={0}
-            maxHeight={streamingMaxHeight}
+            flexGrow={1}
+            minHeight={0}
             overflow="hidden"
             justifyContent="flex-end"
             paddingX={1}
             marginBottom={1}
           >
-            {liveTurnContent}
+            {bannerBlock}
+            <Box flexDirection="column" flexShrink={0} marginBottom={1}>
+              {welcomeContent}
+            </Box>
+            {staticLines.map((line) => (
+              <Box key={line.id} flexShrink={0}>
+                <MessageLine line={line} />
+              </Box>
+            ))}
+            {liveTurnContent ?? null}
           </Box>
-        ) : null}
+        )}
 
         {error ? (
           <Box paddingX={1} flexShrink={0}>
@@ -384,7 +382,6 @@ export function App({
             onUndo={handleUndo}
           />
         </Box>
-      </Box>
-    </>
+    </Box>
   );
 }
