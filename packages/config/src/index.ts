@@ -35,6 +35,25 @@ type RawProviderConfig = Omit<ProviderConfig, "models"> & {
   models: Record<string, ModelConfig>;
 };
 
+export type SkillsConfig = {
+  /** When false, exclude ~/.agents/skills from global skill discovery. Default: true. */
+  loadAgentsSkills?: boolean;
+  /** Paths to skip during global skill auto-discovery. Supports ~ for home. */
+  skipPaths?: string[];
+  /** Explicit global skill directories. When set, replaces auto-discovery (first existing wins). */
+  paths?: string[];
+};
+
+/** Per-agent skill loading overrides in agent.json. */
+export type AgentSkillsConfig = {
+  /** When false, this agent does not load any global skills. Default: true. */
+  global?: boolean;
+  /** Per-agent override of skills.loadAgentsSkills from config.json. */
+  loadAgentsSkills?: boolean;
+  /** Extra paths to skip for this agent. Merged with global skipPaths. */
+  skipPaths?: string[];
+};
+
 export type GAgentConfig = {
   /** Active provider in "provider-name/model-name" form. */
   provider?: string;
@@ -43,10 +62,13 @@ export type GAgentConfig = {
   mcpServers?: Record<string, McpServerConfig>;
   /** Active agent name. Selects which agent (skills + system prompt) loads at startup. */
   agent?: string;
+  /** Global skill discovery and loading options. */
+  skills?: SkillsConfig;
 };
 
 type RawGAgentConfig = Omit<GAgentConfig, "providers"> & {
   providers?: Record<string, RawProviderConfig>;
+  skills?: unknown;
 };
 
 export type ResolvedProvider = {
@@ -241,6 +263,63 @@ function normalizeMcpServers(
   return servers;
 }
 
+function normalizeStringList(value: unknown, path: string): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${path} must be an array of strings`);
+  }
+  const items = value.map((item, index) => {
+    if (typeof item !== "string" || !item.trim()) {
+      throw new Error(`${path}[${index}] must be a non-empty string`);
+    }
+    return item.trim();
+  });
+  return items.length > 0 ? items : undefined;
+}
+
+function normalizeBoolean(value: unknown, path: string): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw new Error(`${path} must be a boolean`);
+  }
+  return value;
+}
+
+function normalizeSkillsConfig(value: unknown): SkillsConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "object" || value == null || Array.isArray(value)) {
+    throw new Error("skills must be an object");
+  }
+
+  const raw = value as Record<string, unknown>;
+  const loadAgentsSkills = normalizeBoolean(
+    raw.loadAgentsSkills,
+    "skills.loadAgentsSkills",
+  );
+  const skipPaths = normalizeStringList(raw.skipPaths, "skills.skipPaths");
+  const paths = normalizeStringList(raw.paths, "skills.paths");
+
+  if (
+    loadAgentsSkills === undefined &&
+    skipPaths === undefined &&
+    paths === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(loadAgentsSkills !== undefined ? { loadAgentsSkills } : {}),
+    ...(skipPaths ? { skipPaths } : {}),
+    ...(paths ? { paths } : {}),
+  };
+}
+
 function normalizeConfig(raw: RawGAgentConfig): GAgentConfig {
   const providers: Record<string, ProviderConfig> = {};
 
@@ -296,6 +375,7 @@ function normalizeConfig(raw: RawGAgentConfig): GAgentConfig {
     providers,
     mcpServers: normalizeMcpServers(raw.mcpServers, "mcpServers"),
     agent: agentRef,
+    skills: normalizeSkillsConfig(raw.skills),
   };
 }
 

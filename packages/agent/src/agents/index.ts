@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { AgentSkillsConfig, GAgentConfig, SkillsConfig } from "@g-agent/config";
 import { type Skill, loadSkillsFromDir } from "../skills/index.js";
 import {
   formatBuiltinSkillsSection,
@@ -60,21 +61,98 @@ const SYSTEM_PROMPT_FILE = "system.md";
 const BUILTIN_SKILLS_DIR = "builtin-skills";
 const USER_SKILLS_DIR = "skills";
 
-function globalSkillsDirCandidates(): string[] {
+type GlobalSkillsLoadOptions = {
+  loadAgentsSkills: boolean;
+  skipPaths: string[];
+  paths?: string[];
+};
+
+function expandHome(path: string): string {
+  if (path === "~") {
+    return homedir();
+  }
+  if (path.startsWith("~/")) {
+    return join(homedir(), path.slice(2));
+  }
+  return path;
+}
+
+function agentsSkillsDir(): string {
+  return join(homedir(), ".agents", "skills");
+}
+
+function globalSkillsDirCandidates(options: GlobalSkillsLoadOptions): string[] {
   const home = homedir();
-  const candidates: string[] = [];
+  let candidates: string[];
 
-  if (process.env.G_AGENT_GLOBAL_SKILLS_DIR) {
-    candidates.push(process.env.G_AGENT_GLOBAL_SKILLS_DIR);
+  if (options.paths?.length) {
+    candidates = options.paths.map(expandHome);
+  } else {
+    candidates = [];
+    if (process.env.G_AGENT_GLOBAL_SKILLS_DIR) {
+      candidates.push(process.env.G_AGENT_GLOBAL_SKILLS_DIR);
+    }
+    if (process.env.G_AGENT_HOME) {
+      candidates.push(join(process.env.G_AGENT_HOME, "skills"));
+    }
+    candidates.push(agentsSkillsDir());
+    candidates.push(join(home, ".config", "g-agent", "skills"));
+    candidates.push(join(home, ".local", "share", "g-agent", "skills"));
   }
-  if (process.env.G_AGENT_HOME) {
-    candidates.push(join(process.env.G_AGENT_HOME, "skills"));
-  }
-  candidates.push(join(home, ".agents", "skills"));
-  candidates.push(join(home, ".config", "g-agent", "skills"));
-  candidates.push(join(home, ".local", "share", "g-agent", "skills"));
 
-  return [...new Set(candidates)];
+  const skip = new Set<string>();
+  if (!options.loadAgentsSkills) {
+    skip.add(agentsSkillsDir());
+  }
+  for (const path of options.skipPaths) {
+    skip.add(expandHome(path));
+  }
+
+  return [...new Set(candidates.map(expandHome))].filter((path) => !skip.has(path));
+}
+
+export function resolveGlobalSkillsLoadOptions(
+  global?: SkillsConfig,
+  agent?: AgentSkillsConfig,
+): GlobalSkillsLoadOptions {
+  return {
+    loadAgentsSkills:
+      agent?.loadAgentsSkills ?? global?.loadAgentsSkills ?? true,
+    skipPaths: [...(global?.skipPaths ?? []), ...(agent?.skipPaths ?? [])],
+    paths: global?.paths,
+  };
+}
+
+function resolveGlobalSkillsDirForOptions(
+  options: GlobalSkillsLoadOptions,
+): string | null {
+  for (const path of globalSkillsDirCandidates(options)) {
+    if (existsSync(path)) {
+      return path;
+    }
+  }
+  return null;
+}
+
+const globalSkillsCache = new Map<
+  string,
+  { skills: Skill[]; path: string | null }
+>();
+
+async function loadGlobalSkills(
+  options: GlobalSkillsLoadOptions,
+): Promise<{ skills: Skill[]; path: string | null }> {
+  const key = JSON.stringify(options);
+  const cached = globalSkillsCache.get(key);
+  if (cached) {
+    return cached;
+  }
+
+  const path = resolveGlobalSkillsDirForOptions(options);
+  const skills = path ? await loadSkillsFromDir(path, "global") : [];
+  const result = { skills, path };
+  globalSkillsCache.set(key, result);
+  return result;
 }
 
 function userAgentsDirCandidates(): string[] {
@@ -128,12 +206,7 @@ export function resolveBuiltinAgentsDir(): string {
 }
 
 export function resolveGlobalSkillsDir(): string | null {
-  for (const path of globalSkillsDirCandidates()) {
-    if (existsSync(path)) {
-      return path;
-    }
-  }
-  return null;
+  return resolveGlobalSkillsDirForOptions(resolveGlobalSkillsLoadOptions(undefined));
 }
 
 /**
@@ -190,7 +263,43 @@ type AgentMeta = {
   provider?: string;
   providers?: Record<string, unknown>;
   mcpServers?: Record<string, unknown>;
+  skills?: AgentSkillsConfig;
 };
+
+function normalizeAgentSkillsConfig(value: unknown): AgentSkillsConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "object" || value == null || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const config: AgentSkillsConfig = {};
+
+  if (raw.global !== undefined) {
+    if (typeof raw.global !== "boolean") {
+      return undefined;
+    }
+    config.global = raw.global;
+  }
+  if (raw.loadAgentsSkills !== undefined) {
+    if (typeof raw.loadAgentsSkills !== "boolean") {
+      return undefined;
+    }
+    config.loadAgentsSkills = raw.loadAgentsSkills;
+  }
+  if (Array.isArray(raw.skipPaths)) {
+    const skipPaths = raw.skipPaths.filter(
+      (item): item is string => typeof item === "string" && item.trim().length > 0,
+    );
+    if (skipPaths.length > 0) {
+      config.skipPaths = skipPaths;
+    }
+  }
+
+  return Object.keys(config).length > 0 ? config : undefined;
+}
 
 async function readAgentMeta(dir: string): Promise<AgentMeta> {
   const metaPath = join(dir, AGENT_JSON);
@@ -204,6 +313,7 @@ async function readAgentMeta(dir: string): Promise<AgentMeta> {
       provider?: unknown;
       providers?: unknown;
       mcpServers?: unknown;
+      skills?: unknown;
     };
     return {
       description: typeof raw.description === "string" ? raw.description : "",
@@ -219,6 +329,7 @@ async function readAgentMeta(dir: string): Promise<AgentMeta> {
         typeof raw.mcpServers === "object" && raw.mcpServers !== null && !Array.isArray(raw.mcpServers)
           ? (raw.mcpServers as Record<string, unknown>)
           : undefined,
+      skills: normalizeAgentSkillsConfig(raw.skills),
     };
   } catch {
     return { description: "" };
@@ -243,8 +354,7 @@ async function loadAgentDir(
   dir: string,
   name: string,
   source: "builtin" | "user",
-  globalSkills: Skill[],
-  globalSkillsPath: string | null,
+  globalSkillsConfig?: SkillsConfig,
 ): Promise<AgentConfig> {
   const [meta, { body, path: systemPromptPath }] = await Promise.all([
     readAgentMeta(dir),
@@ -254,6 +364,16 @@ async function loadAgentDir(
   const builtinSkillsPath = join(dir, BUILTIN_SKILLS_DIR);
   const selfSkillsPath = join(dir, USER_SKILLS_DIR);
   const hasSelfSkills = existsSync(selfSkillsPath);
+
+  let globalSkills: Skill[] = [];
+  let globalSkillsPath: string | null = null;
+  if (meta.skills?.global !== false) {
+    const loaded = await loadGlobalSkills(
+      resolveGlobalSkillsLoadOptions(globalSkillsConfig, meta.skills),
+    );
+    globalSkills = loaded.skills;
+    globalSkillsPath = loaded.path;
+  }
 
   const [builtinSkills, selfSkills] = await Promise.all([
     loadSkillsFromDir(builtinSkillsPath, "builtin"),
@@ -281,8 +401,7 @@ async function loadAgentDir(
 async function loadAgentsFromDir(
   dir: string,
   source: "builtin" | "user",
-  globalSkills: Skill[],
-  globalSkillsPath: string | null,
+  globalSkillsConfig?: SkillsConfig,
 ): Promise<AgentConfig[]> {
   if (!existsSync(dir)) return [];
 
@@ -297,25 +416,24 @@ async function loadAgentsFromDir(
       join(dir, entry.name),
       entry.name,
       source,
-      globalSkills,
-      globalSkillsPath,
+      globalSkillsConfig,
     ));
   }
 
   return agents;
 }
 
-export async function loadAgents(): Promise<LoadedAgents> {
+export async function loadAgents(config?: GAgentConfig): Promise<LoadedAgents> {
   const builtinPath = resolveBuiltinAgentsDir();
   const userPath = resolveAgentsDir();
-  const globalSkillsPath = resolveGlobalSkillsDir();
-  const globalSkills = globalSkillsPath
-    ? await loadSkillsFromDir(globalSkillsPath, "global")
-    : [];
+  const globalSkillsConfig = config?.skills;
+  const defaultGlobal = await loadGlobalSkills(
+    resolveGlobalSkillsLoadOptions(globalSkillsConfig),
+  );
 
   const [builtinAgents, userAgents] = await Promise.all([
-    loadAgentsFromDir(builtinPath, "builtin", globalSkills, globalSkillsPath),
-    userPath ? loadAgentsFromDir(userPath, "user", globalSkills, globalSkillsPath) : Promise.resolve([]),
+    loadAgentsFromDir(builtinPath, "builtin", globalSkillsConfig),
+    userPath ? loadAgentsFromDir(userPath, "user", globalSkillsConfig) : Promise.resolve([]),
   ]);
 
   // User agents override builtin agents with the same name.
@@ -338,7 +456,7 @@ export async function loadAgents(): Promise<LoadedAgents> {
     list,
     builtinPath,
     userPath,
-    globalSkillsPath,
+    globalSkillsPath: defaultGlobal.path,
     skillConflicts,
     defaultName: DEFAULT_AGENT_NAME,
     defaultSystemBody,

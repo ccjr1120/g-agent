@@ -15,24 +15,115 @@ export type SlashCommand = {
 export type SlashCommandGroups = Record<string, SlashCommand[]>;
 
 const GROUP_TRIGGERS = ["/skills", "/agent", "/mcp", "/resume"] as const;
+type GroupTrigger = (typeof GROUP_TRIGGERS)[number];
 
-function resolveMenuItems(
+function isGroupTrigger(value: string): value is GroupTrigger {
+  return GROUP_TRIGGERS.includes(value as GroupTrigger);
+}
+
+function hasGroupChildren(
+  trigger: string,
+  groups: SlashCommandGroups,
+): boolean {
+  return (groups[trigger]?.length ?? 0) > 0;
+}
+
+function buildExpandedMenu(
+  rootItems: SlashCommand[],
+  groups: SlashCommandGroups,
+  expandedRootIndex: number,
+): SlashCommand[] {
+  const items: SlashCommand[] = [];
+  for (let i = 0; i < rootItems.length; i++) {
+    items.push(rootItems[i]);
+    const root = rootItems[i];
+    if (
+      i === expandedRootIndex &&
+      isGroupTrigger(root.value) &&
+      hasGroupChildren(root.value, groups)
+    ) {
+      items.push(...groups[root.value]!);
+    }
+  }
+  return items;
+}
+
+function navigateSlashMenu(
+  delta: number,
+  menuIndex: number,
+  expandedRootIndex: number,
+  rootItems: SlashCommand[],
+  groups: SlashCommandGroups,
+): { menuIndex: number; expandedRootIndex: number } {
+  const items = buildExpandedMenu(rootItems, groups, expandedRootIndex);
+  if (items.length === 0) {
+    return { menuIndex: 0, expandedRootIndex: -1 };
+  }
+
+  const wrap = (index: number) =>
+    ((index % items.length) + items.length) % items.length;
+
+  const current = items[menuIndex];
+  const currentRootIndex = current
+    ? rootItems.findIndex((item) => item.value === current.value)
+    : -1;
+
+  if (
+    delta > 0 &&
+    currentRootIndex >= 0 &&
+    expandedRootIndex !== currentRootIndex &&
+    isGroupTrigger(current.value) &&
+    hasGroupChildren(current.value, groups)
+  ) {
+    return {
+      menuIndex: currentRootIndex + 1,
+      expandedRootIndex: currentRootIndex,
+    };
+  }
+
+  if (delta < 0 && expandedRootIndex >= 0) {
+    if (menuIndex === expandedRootIndex + 1) {
+      return { menuIndex: expandedRootIndex, expandedRootIndex };
+    }
+    if (menuIndex === expandedRootIndex) {
+      return { menuIndex: expandedRootIndex, expandedRootIndex: -1 };
+    }
+  }
+
+  const nextIndex = wrap(menuIndex + delta);
+  const selected = items[nextIndex];
+  if (!selected) {
+    return { menuIndex: nextIndex, expandedRootIndex };
+  }
+
+  const selectedRootIndex = rootItems.findIndex((item) => item.value === selected.value);
+  if (selectedRootIndex >= 0) {
+    if (
+      isGroupTrigger(selected.value) &&
+      hasGroupChildren(selected.value, groups)
+    ) {
+      return { menuIndex: nextIndex, expandedRootIndex: selectedRootIndex };
+    }
+
+    const collapsedIndex = selectedRootIndex;
+    return { menuIndex: collapsedIndex, expandedRootIndex: -1 };
+  }
+
+  for (let rootIndex = 0; rootIndex < rootItems.length; rootIndex++) {
+    const children = groups[rootItems[rootIndex]!.value] ?? [];
+    if (children.some((child) => child.value === selected.value)) {
+      return { menuIndex: nextIndex, expandedRootIndex: rootIndex };
+    }
+  }
+
+  return { menuIndex: nextIndex, expandedRootIndex: -1 };
+}
+
+function resolveRootMenuItems(
   value: string,
   commands: SlashCommand[],
   groups: SlashCommandGroups,
 ): SlashCommand[] {
-  if (!value.startsWith("/") || value.includes(" ")) {
-    return [];
-  }
-
-  for (const trigger of GROUP_TRIGGERS) {
-    if (value === trigger) {
-      const header = commands.find((cmd) => cmd.value === trigger);
-      const children = groups[trigger] ?? [];
-      return header ? [header, ...children] : children;
-    }
-  }
-
   const topMatches = commands.filter((cmd) =>
     cmd.value.toLowerCase().startsWith(value.toLowerCase()),
   );
@@ -87,6 +178,7 @@ export function ChatInput({
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [menuIndex, setMenuIndex] = useState(0);
+  const [expandedRootIndex, setExpandedRootIndex] = useState(-1);
 
   useEffect(() => {
     if (restoreText === undefined || restoreText === null) {
@@ -104,14 +196,32 @@ export function ChatInput({
 
   const isMenuOpen = value.startsWith("/") && !value.includes(" ");
 
-  const matchedCommands = useMemo(
-    () => resolveMenuItems(value, commands, commandGroups),
+  const rootMenuItems = useMemo(
+    () => resolveRootMenuItems(value, commands, commandGroups),
     [value, commands, commandGroups],
+  );
+
+  const matchedCommands = useMemo(
+    () => buildExpandedMenu(rootMenuItems, commandGroups, expandedRootIndex),
+    [commandGroups, expandedRootIndex, rootMenuItems],
   );
 
   const clampedMenuIndex = matchedCommands.length > 0
     ? Math.min(menuIndex, matchedCommands.length - 1)
     : 0;
+
+  const focusedRootIndex = expandedRootIndex >= 0
+    ? expandedRootIndex
+    : rootMenuItems.findIndex((item) => item.value === matchedCommands[clampedMenuIndex]?.value);
+  const focusedRoot = focusedRootIndex >= 0 ? rootMenuItems[focusedRootIndex] : undefined;
+  const isGroupExpanded =
+    expandedRootIndex >= 0 &&
+    focusedRoot !== undefined &&
+    isGroupTrigger(focusedRoot.value) &&
+    hasGroupChildren(focusedRoot.value, commandGroups);
+  const expandedChildren = isGroupExpanded && focusedRoot
+    ? commandGroups[focusedRoot.value] ?? []
+    : [];
   const windowStart = Math.max(
     0,
     Math.min(
@@ -128,6 +238,7 @@ export function ChatInput({
 
   useEffect(() => {
     setMenuIndex(0);
+    setExpandedRootIndex(-1);
   }, [value]);
 
   const menuRows = visibleCommands.flatMap((cmd, index) => {
@@ -140,6 +251,9 @@ export function ChatInput({
           { type: "command" as const, command: cmd, index: commandIndex },
         ];
   });
+
+  // Reserve fixed height while the menu is open so expand/collapse does not move the input.
+  const reservedMenuRows = menuLimit * 2 + 3;
 
   const submit = useCallback(
     (raw: string) => {
@@ -158,10 +272,17 @@ export function ChatInput({
     [disabled, onSubmit],
   );
 
-  const expandGroup = useCallback((trigger: string) => {
-    setValue(trigger);
-    setMenuIndex(0);
-  }, []);
+  const moveMenuIndex = useCallback((delta: number) => {
+    const next = navigateSlashMenu(
+      delta,
+      menuIndex,
+      expandedRootIndex,
+      rootMenuItems,
+      commandGroups,
+    );
+    setMenuIndex(next.menuIndex);
+    setExpandedRootIndex(next.expandedRootIndex);
+  }, [commandGroups, expandedRootIndex, menuIndex, rootMenuItems]);
 
   useInput(
     (input, key) => {
@@ -169,12 +290,12 @@ export function ChatInput({
 
       if (isMenuOpen && matchedCommands.length > 0) {
         if (key.upArrow) {
-          setMenuIndex((i) => (i <= 0 ? matchedCommands.length - 1 : i - 1));
+          moveMenuIndex(-1);
           return;
         }
 
         if (key.downArrow) {
-          setMenuIndex((i) => (i >= matchedCommands.length - 1 ? 0 : i + 1));
+          moveMenuIndex(1);
           return;
         }
 
@@ -184,28 +305,14 @@ export function ChatInput({
             return;
           }
 
-          const isGroupTrigger = GROUP_TRIGGERS.includes(
-            selected.value as (typeof GROUP_TRIGGERS)[number],
-          );
-          const hasGroupChildren = (commandGroups[selected.value]?.length ?? 0) > 0;
-
-          if (isGroupTrigger && hasGroupChildren && value !== selected.value) {
-            expandGroup(selected.value);
-            return;
-          }
-
           submit(selected.value);
           return;
         }
 
         if (key.escape) {
-          if (GROUP_TRIGGERS.includes(value as (typeof GROUP_TRIGGERS)[number])) {
-            setValue("/");
-            setMenuIndex(0);
-            return;
-          }
           setValue("");
           setMenuIndex(0);
+          setExpandedRootIndex(-1);
           return;
         }
       }
@@ -301,52 +408,66 @@ export function ChatInput({
     );
   })();
 
-  return (
-    <Box flexDirection="column" flexShrink={0}>
-      {isMenuOpen && visibleCommands.length > 0 && (
-        <Box flexDirection="column" paddingX={1}>
-          {hiddenAbove > 0 ? (
-            <Text color="gray" dimColor>
-              {`↑ ${hiddenAbove} more — use ↑↓ to scroll`}
-            </Text>
-          ) : null}
-          {menuRows.map((row) => {
-            if (row.type === "category") {
-              return (
-                <Box key={`category-${row.label}`}>
-                  <Text color="gray" bold>
-                    {row.label}
-                  </Text>
-                </Box>
-              );
-            }
+  const menuElement = isMenuOpen && visibleCommands.length > 0 ? (
+    <Box flexDirection="column" paddingX={1}>
+      {isGroupExpanded && focusedRoot ? (
+        <Text color="gray" dimColor>
+          {`${focusedRoot.value} — ↑↓ browse · Enter select · Esc close`}
+        </Text>
+      ) : null}
+      {hiddenAbove > 0 ? (
+        <Text color="gray" dimColor>
+          {`↑ ${hiddenAbove} more — use ↑↓ to scroll`}
+        </Text>
+      ) : null}
+      {menuRows.map((row) => {
+        if (row.type === "category") {
+          return (
+            <Box key={`category-${row.label}`}>
+              <Text color="gray" bold>
+                {row.label}
+              </Text>
+            </Box>
+          );
+        }
 
-            const selected = row.index === clampedMenuIndex;
-            const cmd = row.command;
-            return (
-              <Box key={`${cmd.category}-${cmd.value}-${cmd.description}`}>
-                <Box flexShrink={0} marginRight={2}>
-                  <Text color={selected ? "cyan" : "white"} bold={selected}>
-                    {cmd.value}
-                  </Text>
-                </Box>
-                {cmd.description ? (
-                  <Box flexGrow={1} minWidth={0}>
-                    <Text color="gray" wrap="truncate-end">
-                      {cmd.description}
-                    </Text>
-                  </Box>
-                ) : null}
+        const selected = row.index === clampedMenuIndex;
+        const cmd = row.command;
+        const isGroupHeader = isGroupExpanded
+          && focusedRoot !== undefined
+          && cmd.value === focusedRoot.value;
+        const isGroupChild = expandedChildren.some((child) => child.value === cmd.value);
+        return (
+          <Box key={`${cmd.category}-${cmd.value}-${row.index}-${cmd.description}`} paddingLeft={isGroupChild ? 2 : 0}>
+            <Box flexShrink={0} marginRight={2}>
+              <Text
+                color={selected ? "cyan" : isGroupHeader ? "gray" : "white"}
+                bold={selected}
+                dimColor={isGroupHeader && !selected}
+              >
+                {isGroupHeader ? `${cmd.value} · list all` : cmd.value}
+              </Text>
+            </Box>
+            {cmd.description ? (
+              <Box flexGrow={1} minWidth={0}>
+                <Text color="gray" wrap="truncate-end" dimColor={isGroupHeader && !selected}>
+                  {cmd.description}
+                </Text>
               </Box>
-            );
-          })}
-          {hiddenBelow > 0 ? (
-            <Text color="gray" dimColor>
-              {`↓ ${hiddenBelow} more — use ↑↓ to scroll`}
-            </Text>
-          ) : null}
-        </Box>
-      )}
+            ) : null}
+          </Box>
+        );
+      })}
+      {hiddenBelow > 0 ? (
+        <Text color="gray" dimColor>
+          {`↓ ${hiddenBelow} more — use ↑↓ to scroll`}
+        </Text>
+      ) : null}
+    </Box>
+  ) : null;
+
+  return (
+    <Box flexDirection="column-reverse" flexShrink={0}>
       <Box
         flexDirection="column"
         width="100%"
@@ -355,9 +476,20 @@ export function ChatInput({
         borderRight={false}
         borderColor="gray"
         paddingX={1}
+        flexShrink={0}
       >
         {inputElement}
       </Box>
+      {menuElement ? (
+        <Box
+          flexDirection="column"
+          height={reservedMenuRows}
+          justifyContent="flex-end"
+          flexShrink={0}
+        >
+          {menuElement}
+        </Box>
+      ) : null}
     </Box>
   );
 }

@@ -76,7 +76,36 @@ agent 目录从以下路径查找：`$G_AGENT_AGENTS_DIR` → `$G_AGENT_HOME/age
 每个 agent 会加载三类技能：
 
 - built-in skills：`<agent>/builtin-skills/<skill>/SKILL.md`
-- global skills：`$G_AGENT_GLOBAL_SKILLS_DIR` → `$G_AGENT_HOME/skills` → `~/.agents/skills` → `~/.config/g-agent/skills` → `~/.local/share/g-agent/skills`
+- global skills：`$G_AGENT_GLOBAL_SKILLS_DIR` → `$G_AGENT_HOME/skills` → `~/.agents/skills` → `~/.config/g-agent/skills` → `~/.local/share/g-agent/skills`（按顺序取第一个存在的目录）
+
+  可在 `config.json` 中通过 `skills` 控制全局技能发现：
+
+  ```json
+  {
+    "skills": {
+      "loadAgentsSkills": false
+    }
+  }
+  ```
+
+  - `loadAgentsSkills: false` — 跳过 `~/.agents/skills`（常见于 Cursor 的技能目录）
+  - `skipPaths` — 额外跳过的目录，支持 `~` 前缀
+  - `paths` — 显式指定全局技能目录（替换自动发现，仍取第一个存在的目录）
+
+  单个 agent 可在 `agent.json` 中覆盖：
+
+  ```json
+  {
+    "description": "隔离环境的 agent",
+    "skills": {
+      "global": false,
+      "loadAgentsSkills": false
+    }
+  }
+  ```
+
+  - `global: false` — 该 agent 不加载任何 global skills
+  - `loadAgentsSkills` / `skipPaths` — 仅对该 agent 生效，与全局配置合并
 - self skills：`<agent>/skills/<skill>/SKILL.md`
 
 同名技能按 `self > global > built-in` 的优先级覆盖。启动时如果发现同名冲突，会在 server 日志中输出被选中的来源和所有候选路径。

@@ -1,5 +1,8 @@
 {
   "provider": "openai/gpt-4o-mini",
+  "skills": {
+    "loadAgentsSkills": false
+  },
   "mcpServers": {
     "example-stdio": {
       "command": "npx",

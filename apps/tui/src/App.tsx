@@ -95,10 +95,10 @@ export function App({
   } = useAgentSocket(serverUrl);
 
   const commands = useMemo<SlashCommand[]>(() => [
-    { value: "/skills", description: "Browse skills (↑↓) · Enter to list all", category: "Commands" },
-    { value: "/mcp", description: "Browse MCP servers (↑↓) · Enter to list all", category: "Commands" },
-    { value: "/agent", description: "Browse agents (↑↓) · Enter to list all", category: "Commands" },
-    { value: "/resume", description: "Resume a saved session for current agent", category: "Commands" },
+    { value: "/skills", description: "Browse skills (↑↓ expand)", category: "Commands" },
+    { value: "/mcp", description: "Browse MCP servers (↑↓ expand)", category: "Commands" },
+    { value: "/agent", description: "Browse agents (↑↓ expand)", category: "Commands" },
+    { value: "/resume", description: "Browse saved sessions (↑↓ expand)", category: "Commands" },
     { value: "/new", description: "Start a new conversation", category: "Commands" },
     { value: "/log", description: "Export the full conversation log", category: "Commands" },
   ], []);
@@ -271,8 +271,9 @@ export function App({
 
   const inputDisabled = connection !== "connected";
   const hasMessages = staticLines.length > 0 || streamingLine !== null;
-  // Reserve space for status bar, input border, and an optional slash-command menu.
-  const footerReserveRows = 6;
+  // Reserve space for status bar, input border, and the fixed-height slash-command menu.
+  const maxMenuReserveRows = menuItemLimit * 2 + 3;
+  const footerReserveRows = 3 + maxMenuReserveRows;
   const streamingMaxHeight = Math.max(6, terminalRows - footerReserveRows);
 
   const bannerBlock = banner.length > 0 ? (

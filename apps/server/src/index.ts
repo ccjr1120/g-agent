@@ -26,7 +26,7 @@ import { parseClientMessage, type McpServerCatalogEntry, type ServerMessage } fr
 import type { McpServerConfig } from "@g-agent/config";
 
 const { config, path: configPath } = await loadConfig();
-const loadedAgents = await loadAgents();
+const loadedAgents = await loadAgents(config);
 const { agent: initialAgent, fallback } = resolveActiveAgent(
   config.agent,
   loadedAgents,
