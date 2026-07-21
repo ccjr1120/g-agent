@@ -87,6 +87,18 @@ type UndoAction =
   | { kind: "chat"; userLineId: string; text: string; queueItemId: string }
   | { kind: "local"; lineId: string };
 
+// Keep terminal rendering comfortably below a typical 60 Hz refresh rate.
+// Token deltas often arrive much faster than the terminal can paint them.
+const SHORT_STREAM_RENDER_INTERVAL_MS = 32;
+const MEDIUM_STREAM_RENDER_INTERVAL_MS = 50;
+const LONG_STREAM_RENDER_INTERVAL_MS = 75;
+
+function streamRenderInterval(textLength: number): number {
+  if (textLength >= 16_000) return LONG_STREAM_RENDER_INTERVAL_MS;
+  if (textLength >= 4_000) return MEDIUM_STREAM_RENDER_INTERVAL_MS;
+  return SHORT_STREAM_RENDER_INTERVAL_MS;
+}
+
 function createLineId(): string {
   return crypto.randomUUID();
 }
@@ -211,10 +223,8 @@ export function useAgentSocket(serverUrl: string) {
   });
   const [agentFallback, setAgentFallback] = useState<AgentFallbackInfo | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
-  const [log, setLog] = useState<LogEntry[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<{ id: string; text: string }[]>([]);
   const [savedSessions, setSavedSessions] = useState<SavedSessionSummary[]>([]);
-  const [staticRenderKey, setStaticRenderKey] = useState(0);
 
   const queueRef = useRef<QueueItem[]>([]);
   const undoStackRef = useRef<UndoAction[]>([]);
@@ -222,6 +232,11 @@ export function useAgentSocket(serverUrl: string) {
   const ignoreResponseRef = useRef(false);
   const socketRef = useRef<WebSocket | null>(null);
   const streamingRef = useRef<ChatLine | null>(null);
+  const pendingDeltaRef = useRef("");
+  const streamRenderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Conversation logs do not affect rendering. Keeping them outside React
+  // avoids an extra state update and an ever-growing array copy per delta.
+  const logRef = useRef<LogEntry[]>([]);
   const prevActiveAgentRef = useRef<string>("");
   const turnStartMsRef = useRef<number | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -260,10 +275,55 @@ export function useAgentSocket(serverUrl: string) {
     setQueuedMessages(waiting);
   }, []);
 
+  const cancelPendingStreamRender = useCallback(() => {
+    if (streamRenderTimerRef.current !== null) {
+      clearTimeout(streamRenderTimerRef.current);
+      streamRenderTimerRef.current = null;
+    }
+    pendingDeltaRef.current = "";
+  }, []);
+
+  const flushPendingStreamRender = useCallback(() => {
+    if (streamRenderTimerRef.current !== null) {
+      clearTimeout(streamRenderTimerRef.current);
+      streamRenderTimerRef.current = null;
+    }
+
+    const delta = pendingDeltaRef.current;
+    pendingDeltaRef.current = "";
+    if (!delta) return;
+
+    const current = streamingRef.current;
+    const next: ChatLine = current
+      ? { ...current, text: current.text + delta }
+      : {
+          id: createLineId(),
+          role: "assistant",
+          text: delta,
+          tools: [],
+        };
+    streamingRef.current = next;
+    setStreamingLine(next);
+    logRef.current.push({ type: "delta", text: delta });
+  }, []);
+
+  const scheduleStreamRender = useCallback(() => {
+    if (streamRenderTimerRef.current !== null) return;
+    const bufferedLength =
+      (streamingRef.current?.text.length ?? 0) + pendingDeltaRef.current.length;
+    streamRenderTimerRef.current = setTimeout(() => {
+      streamRenderTimerRef.current = null;
+      flushPendingStreamRender();
+    }, streamRenderInterval(bufferedLength));
+  }, [flushPendingStreamRender]);
+
   const updateStreamingLine = useCallback((line: ChatLine | null) => {
+    if (line === null) {
+      cancelPendingStreamRender();
+    }
     streamingRef.current = line;
     setStreamingLine(line);
-  }, []);
+  }, [cancelPendingStreamRender]);
 
   const commitTurn = useCallback(() => {
     const line = streamingRef.current;
@@ -274,6 +334,7 @@ export function useAgentSocket(serverUrl: string) {
   }, [updateStreamingLine]);
 
   const finishTurn = useCallback(() => {
+    flushPendingStreamRender();
     stopTurnTiming();
     commitTurn();
     processingRef.current = false;
@@ -282,7 +343,7 @@ export function useAgentSocket(serverUrl: string) {
     queueMicrotask(() => {
       tryProcessQueueRef.current();
     });
-  }, [commitTurn, stopTurnTiming]);
+  }, [commitTurn, flushPendingStreamRender, stopTurnTiming]);
 
   const tryProcessQueueRef = useRef<() => void>(() => {});
 
@@ -312,7 +373,7 @@ export function useAgentSocket(serverUrl: string) {
       { id: next.userLineId, role: "user", text: next.text },
     ]);
 
-    setLog((prev) => [...prev, { type: "user", text: next.text, ts: Date.now() }]);
+    logRef.current.push({ type: "user", text: next.text, ts: Date.now() });
     ws.send(JSON.stringify({ type: "chat", message: next.text } satisfies ClientMessage));
   }, [syncQueue]);
 
@@ -423,7 +484,7 @@ export function useAgentSocket(serverUrl: string) {
             setIsStreaming(false);
             setPending(false);
             setError(null);
-            setLog([]);
+            logRef.current = [];
             setContextUsage({ usedTokens: 0, maxTokens: 0, percent: 0 });
             resetTurnTiming();
             setAgentFallback(null);
@@ -455,7 +516,7 @@ export function useAgentSocket(serverUrl: string) {
           });
           break;
         case "system_prompt":
-          setLog((prev) => [...prev, { type: "system_prompt", text: message.text, ts: Date.now() }]);
+          logRef.current.push({ type: "system_prompt", text: message.text, ts: Date.now() });
           break;
         case "start":
           if (!processingRef.current) return;
@@ -467,56 +528,43 @@ export function useAgentSocket(serverUrl: string) {
             text: "",
             tools: [],
           });
-          setLog((prev) => [...prev, { type: "start", ts: Date.now() }]);
+          logRef.current.push({ type: "start", ts: Date.now() });
           break;
         case "delta":
           if (!processingRef.current) return;
-          setStreamingLine((current) => {
-            const base =
-              current ??
-              ({
-                id: createLineId(),
-                role: "assistant",
-                text: message.text,
-                tools: [],
-              } as ChatLine);
-            const next =
-              current == null
-                ? base
-                : { ...current, text: current.text + message.text };
-            streamingRef.current = next;
-            return next;
-          });
-          setLog((prev) => [...prev, { type: "delta", text: message.text }]);
+          pendingDeltaRef.current += message.text;
+          scheduleStreamRender();
           break;
         case "tool_call":
           if (!processingRef.current) return;
-          setStreamingLine((current) => {
-            const base =
-              current ??
-              ({
-                id: createLineId(),
-                role: "assistant",
-                text: "",
-                tools: [],
-              } as ChatLine);
-            const label = formatToolCall(message.name, message.args);
+          flushPendingStreamRender();
+          {
+            const base = streamingRef.current ?? {
+              id: createLineId(),
+              role: "assistant" as const,
+              text: "",
+              tools: [],
+            };
             const next = {
               ...base,
-              tools: [...(base.tools ?? []), { name: message.name, label }],
+              tools: [
+                ...(base.tools ?? []),
+                { name: message.name, label: formatToolCall(message.name, message.args) },
+              ],
             };
             streamingRef.current = next;
-            return next;
-          });
-          setLog((prev) => [...prev, { type: "tool_call", name: message.name, args: message.args }]);
+            setStreamingLine(next);
+          }
+          logRef.current.push({ type: "tool_call", name: message.name, args: message.args });
           break;
         case "tool_result":
           if (!processingRef.current) return;
-          setLog((prev) => [...prev, { type: "tool_result", name: message.name, output: message.output }]);
+          logRef.current.push({ type: "tool_result", name: message.name, output: message.output });
           break;
         case "done":
           if (!processingRef.current) return;
-          setLog((prev) => [...prev, { type: "done", ts: Date.now() }]);
+          flushPendingStreamRender();
+          logRef.current.push({ type: "done", ts: Date.now() });
           finishTurn();
           break;
         case "error":
@@ -528,7 +576,8 @@ export function useAgentSocket(serverUrl: string) {
           }
           if (!processingRef.current) return;
           setError(message.message);
-          setLog((prev) => [...prev, { type: "error", message: message.message, ts: Date.now() }]);
+          flushPendingStreamRender();
+          logRef.current.push({ type: "error", message: message.message, ts: Date.now() });
           finishTurn();
           break;
         case "resumed": {
@@ -545,14 +594,13 @@ export function useAgentSocket(serverUrl: string) {
             ignoreResponseRef.current = false;
             syncQueue();
             setStaticLines(historyToStaticLines(session.history));
-            setLog(historyToLog(session.history, session.startedAt));
+            logRef.current = historyToLog(session.history, session.startedAt);
             updateStreamingLine(null);
             setIsStreaming(false);
             setPending(false);
             setError(null);
             resetTurnTiming();
             setAgentFallback(null);
-            setStaticRenderKey((key) => key + 1);
           }
           break;
         }
@@ -562,10 +610,11 @@ export function useAgentSocket(serverUrl: string) {
     setSocket(ws);
 
     return () => {
+      cancelPendingStreamRender();
       ws.close();
       socketRef.current = null;
     };
-  }, [serverUrl, finishTurn, syncQueue, commitTurn, updateStreamingLine, resetTurnTiming]);
+  }, [serverUrl, finishTurn, syncQueue, commitTurn, updateStreamingLine, resetTurnTiming, flushPendingStreamRender, scheduleStreamRender, cancelPendingStreamRender]);
 
   const sendMessage = useCallback(
     (text: string) => {
@@ -677,12 +726,11 @@ export function useAgentSocket(serverUrl: string) {
     setIsStreaming(false);
     setPending(false);
     setError(null);
-    setLog([]);
+    logRef.current = [];
     setContextUsage({ usedTokens: 0, maxTokens: 0, percent: 0 });
     resetTurnTiming();
     sessionIdRef.current = null;
     sessionStartedAtRef.current = 0;
-    setStaticRenderKey((key) => key + 1);
   }, [syncQueue, updateStreamingLine, resetTurnTiming]);
 
   const resumeSession = useCallback(async (idOrPrefix: string): Promise<boolean> => {
@@ -732,6 +780,7 @@ export function useAgentSocket(serverUrl: string) {
   }, []);
 
   const dumpLog = useCallback(async (): Promise<string> => {
+    const log = logRef.current;
     const startedAt = log.find((e) => e.type === "user")?.ts ?? Date.now();
     const systemPrompt = [...log]
       .reverse()
@@ -835,7 +884,7 @@ export function useAgentSocket(serverUrl: string) {
     const logPath = join(logDir, filename);
     await writeFile(logPath, lines.join("\n"), "utf8");
     return logPath;
-  }, [log]);
+  }, []);
 
   // True while the model is working but has not yet emitted any visible
   // content (pending or streaming with an empty line). The UI renders a
@@ -847,7 +896,6 @@ export function useAgentSocket(serverUrl: string) {
   return {
     connection,
     staticLines,
-    staticRenderKey,
     streamingLine,
     streaming,
     pending,

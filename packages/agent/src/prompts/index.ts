@@ -21,22 +21,25 @@ export function joinPromptSections(...sections: string[]): string {
 }
 
 export function formatBuiltinSkillsSection(skills: Skill[]): string {
-  if (skills.length === 0) return "";
+  const active = skills.filter((skill) => !skill.disableModelInvocation);
+  if (active.length === 0) return "";
 
-  const lines = [
+  const sections = [
     "## Built-in skills",
     "",
-    "When a skill is relevant, use the `read` tool to load its SKILL.md before following its instructions.",
+    "These skills are included in your system prompt. When a task matches one, **prioritize it** and follow its instructions directly — do not improvise with raw tools.",
     "",
   ];
 
-  for (const skill of skills) {
-    lines.push(
-      `- **${skill.name}** — ${skill.description ? skill.description + " " : ""}(instructions: \`${skill.path}\`)`,
-    );
+  for (const skill of active) {
+    const header = skill.description
+      ? `### ${skill.name}\n\n${skill.description}`
+      : `### ${skill.name}`;
+
+    sections.push(header, "", skill.body, "");
   }
 
-  return lines.join("\n");
+  return sections.join("\n").trim();
 }
 
 export function formatSkillsSection(

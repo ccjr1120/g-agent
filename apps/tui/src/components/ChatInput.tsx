@@ -24,6 +24,16 @@ function matchingCommands(value: string, commands: SlashCommand[]): SlashCommand
   return commands.filter((command) => command.value.toLowerCase().startsWith(query));
 }
 
+function previousCharacterIndex(value: string, cursorIndex: number): number {
+  const previousCharacter = Array.from(value.slice(0, cursorIndex)).at(-1);
+  return previousCharacter ? cursorIndex - previousCharacter.length : cursorIndex;
+}
+
+function nextCharacterIndex(value: string, cursorIndex: number): number {
+  const nextCharacter = Array.from(value.slice(cursorIndex))[0];
+  return nextCharacter ? cursorIndex + nextCharacter.length : cursorIndex;
+}
+
 function commandHasChildren(
   command: SlashCommand,
   openGroup: string | null,
@@ -152,6 +162,7 @@ export function ChatInput({
   onUndo?: () => void;
 }) {
   const [value, setValue] = useState("");
+  const [cursorIndex, setCursorIndex] = useState(0);
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [menuIndex, setMenuIndex] = useState(0);
@@ -161,6 +172,7 @@ export function ChatInput({
   useEffect(() => {
     if (restoreText === undefined || restoreText === null) return;
     setValue(restoreText);
+    setCursorIndex(restoreText.length);
     setHistoryIndex(-1);
     onRestoreConsumed?.();
   }, [restoreText, onRestoreConsumed]);
@@ -225,6 +237,7 @@ export function ChatInput({
       : [...previous, trimmed]);
     setHistoryIndex(-1);
     setValue("");
+    setCursorIndex(0);
     closeMenu();
     onSubmit(trimmed);
   }, [closeMenu, disabled, onSubmit]);
@@ -260,6 +273,7 @@ export function ChatInput({
           setMenuIndex(0);
         } else {
           setValue("");
+          setCursorIndex(0);
           closeMenu();
         }
         return;
@@ -271,54 +285,102 @@ export function ChatInput({
       return;
     }
 
-    if (!isMenuOpen && (key.upArrow || key.downArrow)) {
+    if (!isMenuOpen && !key.ctrl && (key.upArrow || key.downArrow)) {
       if (key.upArrow) {
         if (history.length === 0) return;
         const nextIndex = Math.min(historyIndex + 1, history.length - 1);
         setHistoryIndex(nextIndex);
-        setValue(history[history.length - 1 - nextIndex] ?? "");
+        const nextValue = history[history.length - 1 - nextIndex] ?? "";
+        setValue(nextValue);
+        setCursorIndex(nextValue.length);
       } else if (historyIndex <= 0) {
         setHistoryIndex(-1);
         setValue("");
+        setCursorIndex(0);
       } else {
         const nextIndex = historyIndex - 1;
         setHistoryIndex(nextIndex);
-        setValue(history[history.length - 1 - nextIndex] ?? "");
+        const nextValue = history[history.length - 1 - nextIndex] ?? "";
+        setValue(nextValue);
+        setCursorIndex(nextValue.length);
       }
       return;
     }
 
+    if (key.leftArrow) {
+      setCursorIndex((current) => previousCharacterIndex(value, current));
+      return;
+    }
+    if (key.rightArrow) {
+      setCursorIndex((current) => nextCharacterIndex(value, current));
+      return;
+    }
+    if (!key.ctrl && key.home) {
+      const lineStart = value.lastIndexOf("\n", Math.max(0, cursorIndex - 1)) + 1;
+      setCursorIndex(lineStart);
+      return;
+    }
+    if (!key.ctrl && key.end) {
+      const nextLineBreak = value.indexOf("\n", cursorIndex);
+      setCursorIndex(nextLineBreak === -1 ? value.length : nextLineBreak);
+      return;
+    }
+
     if (key.return && key.shift) {
-      setValue((current) => `${current}\n`);
+      setValue((current) =>
+        `${current.slice(0, cursorIndex)}\n${current.slice(cursorIndex)}`,
+      );
+      setCursorIndex((current) => current + 1);
       return;
     }
     if (key.return) {
       submit(value);
       return;
     }
-    if (key.backspace || key.delete) {
-      setValue((current) => current.slice(0, -1));
+    if (key.backspace) {
+      if (cursorIndex === 0) return;
+      const previousIndex = previousCharacterIndex(value, cursorIndex);
+      setValue((current) =>
+        current.slice(0, previousIndex) + current.slice(cursorIndex),
+      );
+      setCursorIndex(previousIndex);
+      return;
+    }
+    if (key.delete) {
+      if (cursorIndex === value.length) return;
+      const nextIndex = nextCharacterIndex(value, cursorIndex);
+      setValue((current) =>
+        current.slice(0, cursorIndex) + current.slice(nextIndex),
+      );
       return;
     }
     if (key.ctrl && input === "u") {
       setValue("");
+      setCursorIndex(0);
       closeMenu();
       return;
     }
     if (!key.ctrl && !key.meta && input) {
       setHistoryIndex(-1);
-      setValue((current) => current + input);
+      setValue((current) =>
+        current.slice(0, cursorIndex) + input + current.slice(cursorIndex),
+      );
+      setCursorIndex((current) => current + input.length);
     }
   }, { isActive: !disabled });
 
   const lines = value.split("\n");
+  const textBeforeCursor = value.slice(0, cursorIndex);
+  const cursorLineIndex = textBeforeCursor.split("\n").length - 1;
+  const cursorColumn = textBeforeCursor.length - (textBeforeCursor.lastIndexOf("\n") + 1);
   const inputElement = value ? (
     <Box flexDirection="column">
       {lines.map((line, index) => (
         <Text key={`${index}-${line}`} wrap="wrap" color="cyan">
           {index === 0 ? "> " : "  "}
-          {line}
-          {index === lines.length - 1 ? <BlinkingCursor /> : null}
+          {index === cursorLineIndex ? line.slice(0, cursorColumn) : line}
+          {index === cursorLineIndex ? <BlinkingCursor /> : null}
+          {index === cursorLineIndex ? line.slice(cursorColumn) : null}
         </Text>
       ))}
     </Box>
@@ -375,6 +437,9 @@ export function ChatInput({
       <Box
         flexDirection="column"
         width="100%"
+        maxHeight={6}
+        overflow="hidden"
+        justifyContent="flex-end"
         borderStyle="single"
         borderLeft={false}
         borderRight={false}

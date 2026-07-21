@@ -53,7 +53,7 @@ g-agent server restart
 
 - `provider` — 默认 provider，形如 `openai/gpt-4o-mini`
 - `providers` — provider 清单（baseUrl / apiKeyEnv / models）
-- `agent` — 可选；指定启动时加载哪个 agent。未设置或指向不存在的 agent 时回退到内置 `default`（见下）
+- `agent` — 可选；指定启动时加载哪个 agent。未设置或指向不存在的 agent 时回退到内置 `default`（见下）。运行时切换 agent 会自动写回此字段，下次启动沿用上次的 agent
 
 `G_AGENT_PROVIDER` 环境变量可临时覆盖 `provider`。
 
@@ -119,7 +119,7 @@ TUI 内：
 - `/agent` — 列出所有 agent（`*` 标记当前）
 - `/agent <name>` — 切换到指定 agent（清空当前对话、重载技能与 system prompt）
 
-`config.json` 的可选 `agent` 字段决定首次打开加载哪个 agent；未设置或指向不存在的 agent 时回退到内置 `default`。
+`config.json` 的可选 `agent` 字段决定启动时加载哪个 agent；未设置或指向不存在的 agent 时回退到内置 `default`。在 TUI 中切换 agent 后会自动更新该字段，下次启动默认使用上次在用的 agent。
 
 ## 开发
 
@@ -129,6 +129,20 @@ TUI 内：
 pnpm install
 pnpm dev
 ```
+
+终端性能的后续优化计划见
+[docs/terminal-performance-todo.md](docs/terminal-performance-todo.md)。
+
+### 修改内置 agent
+
+内置 agent 源码位于 `packages/agent/src/agents/builtin/<name>/`：
+
+| 文件 | 作用 |
+|------|------|
+| `system.md` | system prompt 主体（原则、工具说明等） |
+| `builtin-skills/<skill>/SKILL.md` | 内置技能；运行时正文由 `formatBuiltinSkillsSection` 自动嵌入系统提示词 |
+
+**新增或修改 `builtin-skills` 时，须同步更新 `system.md`**——例如 Skills first 原则、能力边界、与新 skill 相关的触发说明。`SKILL.md` 正文会自动拼入提示词，但 `system.md` 中的原则性描述需人工维护。
 
 ## 卸载
 

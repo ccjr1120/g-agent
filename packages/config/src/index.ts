@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DEFAULT_SERVER_PORT } from "@g-agent/shared";
 
 export type ModelConfig = {
@@ -113,6 +113,46 @@ export function resolveConfigPath(): string | null {
     }
   }
   return null;
+}
+
+/** Path used when creating or updating config.json (e.g. persisting active agent). */
+export function resolveConfigPathForWrite(): string {
+  const existing = resolveConfigPath();
+  if (existing) {
+    return existing;
+  }
+  if (process.env.G_AGENT_CONFIG) {
+    return process.env.G_AGENT_CONFIG;
+  }
+  if (process.env.G_AGENT_HOME) {
+    return join(process.env.G_AGENT_HOME, "config.json");
+  }
+  return join(homedir(), ".config", "g-agent", "config.json");
+}
+
+/** Persist the active agent name to config.json for the next startup. */
+export async function saveActiveAgent(agentName: string): Promise<string> {
+  const trimmed = agentName.trim();
+  if (!trimmed) {
+    throw new Error("agent name is required");
+  }
+
+  const path = resolveConfigPathForWrite();
+  let raw: Record<string, unknown> = {};
+
+  try {
+    raw = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  raw.agent = trimmed;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+  return path;
 }
 
 function resolveModelName(key: string, model: ModelConfig): string {

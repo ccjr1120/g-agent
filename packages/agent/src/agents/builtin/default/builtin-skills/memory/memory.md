@@ -1,1 +1,2 @@
 - [2026-07-09] 用户的开发目录 ~/development 包含以下子目录：company（公司项目）、forks（fork 的仓库）、self（个人项目）、temp（临时文件）
+- [2026-07-21] g-agent 仓库（~/development/self/g-agent）：新增或修改 `packages/agent/src/agents/builtin/<agent>/builtin-skills/` 时，须同步更新同 agent 的 `system.md`。`SKILL.md` 正文会在运行时由 `formatBuiltinSkillsSection` 自动嵌入系统提示词；`system.md` 负责原则性说明（如 Skills first、能力边界、与新 skill 相关的触发指引）。

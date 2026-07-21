@@ -32,7 +32,7 @@ export function LoadingSpinner({
   useEffect(() => {
     const timer = setInterval(() => {
       setFrame((current) => (current + 1) % SPINNER_FRAMES.length);
-    }, 80);
+    }, 140);
 
     return () => clearInterval(timer);
   }, []);

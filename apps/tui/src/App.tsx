@@ -1,11 +1,21 @@
-import React, { useCallback, useMemo, useState } from "react";
-import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Box,
+  measureElement,
+  Text,
+  useApp,
+  useInput,
+  useStdout,
+  useWindowSize,
+  type DOMElement,
+} from "ink";
 import { ChatInput, type SlashCommand } from "./components/ChatInput.js";
 import { LoadingSpinner } from "./components/LoadingSpinner.js";
 import { MessageLine } from "./components/MessageLine.js";
 import { StatusBar } from "./components/StatusBar.js";
 import { useAgentSocket, type McpServerInfo } from "./hooks/useAgentSocket.js";
 import { formatSessionAge, formatSessionLabel } from "./lib/sessionStore.js";
+import { onMouseWheel } from "./lib/mouseInput.js";
 
 const SKILL_CATEGORY_LABEL = {
   builtin: "Built-in Skills",
@@ -18,6 +28,8 @@ const SKILL_SOURCE_ORDER = {
   global: 1,
   self: 2,
 } as const;
+
+const PAGE_SCROLL_STEP = 8;
 
 function skillCategory(source: keyof typeof SKILL_CATEGORY_LABEL | undefined): string {
   return source ? SKILL_CATEGORY_LABEL[source] : "Skills";
@@ -62,12 +74,11 @@ export function App({
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const { rows: terminalRows } = useWindowSize();
+  const { columns: terminalColumns, rows: terminalRows } = useWindowSize();
   const [restoreText, setRestoreText] = useState<string | null>(null);
   const {
     connection,
     staticLines,
-    staticRenderKey,
     streamingLine,
     waitingForReply,
     streaming,
@@ -269,10 +280,60 @@ export function App({
     }
   }, [undoLastTurn]);
 
+  // Number of rendered terminal rows below the viewport. Zero follows the
+  // live response; positive values freeze the viewport in transcript history.
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [transcriptHeight, setTranscriptHeight] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const transcriptRef = useRef<DOMElement>(null);
+  const viewportRef = useRef<DOMElement>(null);
+  const previousTranscriptHeightRef = useRef(0);
+  const maxHistoryOffset = Math.max(0, transcriptHeight - viewportHeight);
+
+  const scrollHistory = useCallback((delta: number) => {
+    setHistoryOffset((current) =>
+      Math.max(0, Math.min(maxHistoryOffset, current + delta)),
+    );
+  }, [maxHistoryOffset]);
+
+  useLayoutEffect(() => {
+    if (!transcriptRef.current || !viewportRef.current) return;
+
+    const nextTranscriptHeight = measureElement(transcriptRef.current).height;
+    const nextViewportHeight = measureElement(viewportRef.current).height;
+    const previousHeight = previousTranscriptHeightRef.current;
+    const growth = Math.max(0, nextTranscriptHeight - previousHeight);
+    const nextMaxOffset = Math.max(0, nextTranscriptHeight - nextViewportHeight);
+
+    previousTranscriptHeightRef.current = nextTranscriptHeight;
+    setTranscriptHeight(nextTranscriptHeight);
+    setViewportHeight(nextViewportHeight);
+    setHistoryOffset((current) =>
+      current > 0 ? Math.min(nextMaxOffset, current + growth) : 0,
+    );
+  }, [staticLines, streamingLine, terminalColumns, terminalRows]);
+
+  useInput((_input, key) => {
+    if (key.pageUp || (key.ctrl && key.upArrow)) {
+      scrollHistory(PAGE_SCROLL_STEP);
+    } else if (key.pageDown || (key.ctrl && key.downArrow)) {
+      scrollHistory(-PAGE_SCROLL_STEP);
+    } else if (key.ctrl && key.home) {
+      setHistoryOffset(maxHistoryOffset);
+    } else if (key.ctrl && key.end) {
+      setHistoryOffset(0);
+    }
+  });
+
+  useEffect(() => {
+    return onMouseWheel((direction) => {
+      scrollHistory(direction === "up" ? 1 : -1);
+    });
+  }, [scrollHistory]);
+
   const inputDisabled = connection !== "connected";
   const hasMessages = staticLines.length > 0 || streamingLine !== null;
-  // Keep completed messages in the terminal's scrollback instead of clipping
-  // them inside the live viewport. Only the in-progress turn stays dynamic.
+  const browsingHistory = historyOffset > 0;
   const bannerBlock = banner.length > 0 ? (
     <Box flexDirection="column" flexShrink={0} marginBottom={1}>
       {banner.map((line, i) => (
@@ -308,91 +369,94 @@ export function App({
   ) : null;
 
   return (
-    <>
-      {staticLines.length > 0 ? (
-        <Static key={staticRenderKey} items={staticLines}>
-          {(line) => (
-            <Box key={line.id} flexShrink={0} paddingX={1}>
-              <MessageLine line={line} />
-            </Box>
-          )}
-        </Static>
-      ) : null}
-
-      <Box
-        flexDirection="column"
-        height={terminalRows}
-        minHeight={terminalRows}
-        flexShrink={0}
-      >
-        {!hasMessages ? (
+    <Box
+      flexDirection="column"
+      height={terminalRows}
+      minHeight={terminalRows}
+      flexShrink={0}
+    >
+      {!hasMessages ? (
+        <Box
+          ref={viewportRef}
+          flexDirection="column"
+          flexGrow={1}
+          minHeight={0}
+          paddingX={1}
+          marginBottom={1}
+        >
+          <Box flexGrow={1} />
+          {bannerBlock}
+          {welcomeContent}
+        </Box>
+      ) : (
+        <Box
+          ref={viewportRef}
+          flexDirection="column"
+          flexGrow={1}
+          minHeight={0}
+          overflow="hidden"
+          paddingX={1}
+          marginBottom={1}
+        >
           <Box
+            ref={transcriptRef}
+            position="absolute"
+            top={Math.min(0, viewportHeight - transcriptHeight) + historyOffset}
+            width="100%"
             flexDirection="column"
-            flexGrow={1}
-            minHeight={0}
-            paddingX={1}
-            marginBottom={1}
-          >
-            <Box flexGrow={1} />
-            {bannerBlock}
-            <Box flexDirection="column" justifyContent="flex-end">
-              {welcomeContent}
-            </Box>
-          </Box>
-        ) : (
-          <Box
-            flexDirection="column"
-            flexGrow={1}
-            minHeight={0}
-            overflow="hidden"
-            justifyContent="flex-end"
-            paddingX={1}
-            marginBottom={1}
           >
             {staticLines.map((line) => (
               <Box key={line.id} flexShrink={0}>
                 <MessageLine line={line} />
               </Box>
             ))}
-            {liveTurnContent ?? null}
+            {liveTurnContent}
           </Box>
-        )}
-
-        {error ? (
-          <Box paddingX={1} flexShrink={0}>
-            <Text color="red">{error}</Text>
-          </Box>
-        ) : null}
-        {queuedMessages.length > 0 ? (
-          <Box flexDirection="column" marginBottom={1} paddingX={1} flexShrink={0}>
-            {queuedMessages.map((msg) => (
-              <Text key={msg.id} dimColor wrap="truncate-end">
-                {"· "}
-                {msg.text}
-              </Text>
-            ))}
-          </Box>
-        ) : null}
-
-        <Box flexShrink={0} flexDirection="column">
-          <StatusBar
-            connection={connection}
-            model={model}
-            activeAgent={activeAgent}
-            contextUsage={contextUsage}
-          />
-          <ChatInput
-            disabled={inputDisabled}
-            commands={commands}
-            commandGroups={commandGroups}
-            maxMenuItems={menuItemLimit}
-            restoreText={restoreText}
-            onRestoreConsumed={() => setRestoreText(null)}
-            onSubmit={handleSubmit}
-            onUndo={handleUndo}
-          />
         </Box>
+      )}
+
+      {browsingHistory ? (
+        <Box paddingX={1} flexShrink={0}>
+          <Text color="yellow" dimColor>
+            {`History · ${historyOffset} rows below · scroll down to follow`}
+          </Text>
+        </Box>
+      ) : null}
+
+      {error ? (
+        <Box paddingX={1} flexShrink={0}>
+          <Text color="red">{error}</Text>
+        </Box>
+      ) : null}
+      {queuedMessages.length > 0 ? (
+        <Box flexDirection="column" marginBottom={1} paddingX={1} flexShrink={0}>
+          {queuedMessages.map((msg) => (
+            <Text key={msg.id} dimColor wrap="truncate-end">
+              {"· "}
+              {msg.text}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
+
+      <Box flexShrink={0} flexDirection="column">
+        <StatusBar
+          connection={connection}
+          model={model}
+          activeAgent={activeAgent}
+          contextUsage={contextUsage}
+        />
+        <ChatInput
+          disabled={inputDisabled}
+          commands={commands}
+          commandGroups={commandGroups}
+          maxMenuItems={menuItemLimit}
+          restoreText={restoreText}
+          onRestoreConsumed={() => setRestoreText(null)}
+          onSubmit={handleSubmit}
+          onUndo={handleUndo}
+        />
       </Box>
-    </>
+    </Box>
   );
 }

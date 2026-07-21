@@ -16,7 +16,7 @@ function toolIcon(name: string): string {
   return TOOL_ICONS[name] ?? "🔧";
 }
 
-export function MessageLine({
+export const MessageLine = React.memo(function MessageLine({
   line,
   showThinking = false,
   streaming = false,
@@ -57,7 +57,7 @@ export function MessageLine({
       />
     </Box>
   );
-}
+});
 
 function TimingFootnote({
   streaming,

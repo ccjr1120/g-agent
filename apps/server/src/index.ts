@@ -19,6 +19,8 @@ import {
   loadConfig,
   mergeAgentMcpServers,
   mergeAgentProviderOverrides,
+  saveActiveAgent,
+  type GAgentConfig,
   type ResolvedProvider,
 } from "@g-agent/config";
 import type { Skill } from "@g-agent/agent";
@@ -34,10 +36,13 @@ const { agent: initialAgent, fallback } = resolveActiveAgent(
 const host = getServerHost();
 const port = getServerPort();
 
-function resolveProvider(agent: AgentConfig): ResolvedProvider | null {
+function resolveProvider(
+  agent: AgentConfig,
+  runtimeConfig: GAgentConfig = config,
+): ResolvedProvider | null {
   try {
     return getActiveProvider(
-      mergeAgentProviderOverrides(config, {
+      mergeAgentProviderOverrides(runtimeConfig, {
         provider: agent.provider,
         providers: agent.providers,
       }),
@@ -47,13 +52,16 @@ function resolveProvider(agent: AgentConfig): ResolvedProvider | null {
   }
 }
 
-function mergedMcpServers(agent: AgentConfig) {
-  return mergeAgentMcpServers(config, { mcpServers: agent.mcpServers });
+function mergedMcpServers(agent: AgentConfig, runtimeConfig: GAgentConfig = config) {
+  return mergeAgentMcpServers(runtimeConfig, { mcpServers: agent.mcpServers });
 }
 
-async function connectMcpForAgent(agent: AgentConfig): Promise<McpManager> {
+async function connectMcpForAgent(
+  agent: AgentConfig,
+  runtimeConfig: GAgentConfig = config,
+): Promise<McpManager> {
   const manager = new McpManager();
-  const results = await manager.connect(mergedMcpServers(agent));
+  const results = await manager.connect(mergedMcpServers(agent, runtimeConfig));
 
   for (const result of results) {
     if (result.ok) {
@@ -251,6 +259,13 @@ function buildSkillPrompt(skill: Skill): string {
   ].join("\n");
 }
 
+/** Re-read config.json so reconnecting clients pick up the last-used agent. */
+async function loadStartupAgent(): Promise<ResolvedAgent & { runtimeConfig: GAgentConfig }> {
+  const { config: runtimeConfig } = await loadConfig();
+  const resolved = resolveActiveAgent(runtimeConfig.agent, loadedAgents);
+  return { ...resolved, runtimeConfig };
+}
+
 async function applyAgentSwitch(
   ws: ServerWebSocket<WsData>,
   target: AgentConfig,
@@ -262,6 +277,17 @@ async function applyAgentSwitch(
     ws.data.systemPrompt = buildAgentSystemPrompt(target, loadedAgents);
     ws.data.effectiveProvider = resolveProvider(target);
     ws.data.mcpManager = await connectMcpForAgent(target);
+
+    void saveActiveAgent(target.name)
+      .then(() => {
+        config.agent = target.name;
+      })
+      .catch((error) => {
+        console.warn(
+          `Failed to persist active agent "${target.name}" to config:`,
+          error instanceof Error ? error.message : error,
+        );
+      });
   }
 
   ws.data.promptQueue.length = 0;
@@ -391,7 +417,12 @@ Bun.serve<WsData>({
   websocket: {
     open(ws) {
       void (async () => {
-        ws.data.mcpManager = await connectMcpForAgent(ws.data.activeAgent);
+        const { agent, fallback, runtimeConfig } = await loadStartupAgent();
+        ws.data.activeAgent = agent;
+        ws.data.systemPrompt = buildAgentSystemPrompt(agent, loadedAgents);
+        ws.data.effectiveProvider = resolveProvider(agent, runtimeConfig);
+        ws.data.startupFallback = fallback;
+        ws.data.mcpManager = await connectMcpForAgent(agent, runtimeConfig);
 
         send(ws, { type: "ready" });
         if (ws.data.startupFallback) {

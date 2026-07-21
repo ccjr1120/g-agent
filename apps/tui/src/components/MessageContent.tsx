@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { Box, Text } from "ink";
 import { StreamMarkdown } from "ink-stream-markdown";
 
@@ -9,6 +9,12 @@ export function MessageContent({
   role: "user" | "assistant";
   text: string;
 }) {
+  const markdownWidth = Math.max(20, (process.stdout.columns ?? 80) - 4);
+  const markdownTheme = useMemo(
+    () => ({ width: markdownWidth }),
+    [markdownWidth],
+  );
+
   if (!text) {
     return null;
   }
@@ -26,13 +32,11 @@ export function MessageContent({
   // continuation lines align under the first line's content rather than
   // under the icon. flexGrow + minWidth=0 lets the content box take the
   // remaining width and wrap against it without overflowing on long tokens.
-  const markdownWidth = Math.max(20, (process.stdout.columns ?? 80) - 4);
-
   return (
     <Box>
       <Text>{"❯ "}</Text>
       <Box flexGrow={1} minWidth={0}>
-        <StreamMarkdown theme={{ width: markdownWidth }}>{text}</StreamMarkdown>
+        <StreamMarkdown theme={markdownTheme}>{text}</StreamMarkdown>
       </Box>
     </Box>
   );
