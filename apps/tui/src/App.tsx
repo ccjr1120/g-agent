@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Box, Text, useApp, useStdout, useWindowSize } from "ink";
+import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import { ChatInput, type SlashCommand } from "./components/ChatInput.js";
 import { LoadingSpinner } from "./components/LoadingSpinner.js";
 import { MessageLine } from "./components/MessageLine.js";
@@ -67,6 +67,7 @@ export function App({
   const {
     connection,
     staticLines,
+    staticRenderKey,
     streamingLine,
     waitingForReply,
     streaming,
@@ -270,6 +271,8 @@ export function App({
 
   const inputDisabled = connection !== "connected";
   const hasMessages = staticLines.length > 0 || streamingLine !== null;
+  // Keep completed messages in the terminal's scrollback instead of clipping
+  // them inside the live viewport. Only the in-progress turn stays dynamic.
   const bannerBlock = banner.length > 0 ? (
     <Box flexDirection="column" flexShrink={0} marginBottom={1}>
       {banner.map((line, i) => (
@@ -305,12 +308,23 @@ export function App({
   ) : null;
 
   return (
-    <Box
-      flexDirection="column"
-      height={terminalRows}
-      minHeight={terminalRows}
-      flexShrink={0}
-    >
+    <>
+      {staticLines.length > 0 ? (
+        <Static key={staticRenderKey} items={staticLines}>
+          {(line) => (
+            <Box key={line.id} flexShrink={0} paddingX={1}>
+              <MessageLine line={line} />
+            </Box>
+          )}
+        </Static>
+      ) : null}
+
+      <Box
+        flexDirection="column"
+        height={terminalRows}
+        minHeight={terminalRows}
+        flexShrink={0}
+      >
         {!hasMessages ? (
           <Box
             flexDirection="column"
@@ -335,10 +349,6 @@ export function App({
             paddingX={1}
             marginBottom={1}
           >
-            {bannerBlock}
-            <Box flexDirection="column" flexShrink={0} marginBottom={1}>
-              {welcomeContent}
-            </Box>
             {staticLines.map((line) => (
               <Box key={line.id} flexShrink={0}>
                 <MessageLine line={line} />
@@ -382,6 +392,7 @@ export function App({
             onUndo={handleUndo}
           />
         </Box>
-    </Box>
+      </Box>
+    </>
   );
 }
