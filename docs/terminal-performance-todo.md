@@ -16,12 +16,18 @@ dirty-node renderer, and terminal frame diff.
 
 ## P0: reproducible benchmark
 
-- [ ] Add a fake WebSocket stream that can replay deterministic responses.
-- [ ] Measure startup with 100, 500, and 1,000 messages.
-- [ ] Measure a 5,000 and 20,000 token streamed response.
-- [ ] Record CPU, RSS, event-loop P50/P95 delay, React commits per second,
+- [x] Add a fake WebSocket stream that can replay deterministic responses.
+- [x] Measure startup with 100, 500, and 1,000 messages.
+- [x] Measure a 5,000 and 20,000 token streamed response.
+- [x] Record CPU, RSS, event-loop P50/P95 delay, React commits per second,
       Markdown parses, `measureElement` calls, and stdout bytes.
-- [ ] Add a long-session PageUp/PageDown and mouse-wheel benchmark.
+- [x] Add a long-session PageUp/PageDown and mouse-wheel benchmark.
+
+Run with:
+
+```bash
+pnpm --filter @g-agent/tui benchmark
+```
 
 Initial targets:
 
@@ -31,35 +37,40 @@ Initial targets:
 
 ## P1: incremental layout and Markdown
 
-- [ ] Cache completed message heights by `(message id, terminal columns)`.
-- [ ] Measure only the live assistant row while streaming; derive transcript
+- [x] Cache completed message heights by `(message id, terminal columns)`.
+- [x] Measure only the live assistant row while streaming; derive transcript
       height from cached completed rows plus the live row.
-- [ ] Invalidate or scale height estimates when terminal width changes.
-- [ ] Split streaming Markdown into immutable completed blocks and one mutable
+- [x] Invalidate or scale height estimates when terminal width changes.
+- [x] Split streaming Markdown into immutable completed blocks and one mutable
       tail block, so only the tail is parsed again.
-- [ ] Use an adaptive stream interval: 32 ms for short output and 50-80 ms
+- [x] Use an adaptive stream interval: 32 ms for short output and 50-80 ms
       under sustained long output or event-loop pressure.
-- [ ] Cap or externalize very large tool results retained for `/log`.
+- [x] Cap or externalize very large tool results retained for `/log`.
 
 ## P2: message virtualization
 
-- [ ] Mount only the viewport plus 40-80 rows of overscan.
-- [ ] Represent unmounted history with top and bottom spacer boxes.
-- [ ] Render at most 30 recent items on cold start.
-- [ ] Limit newly mounted messages per commit to avoid large synchronous
+- [x] Mount only the viewport plus 40-80 rows of overscan.
+- [x] Represent unmounted history with top and bottom spacer boxes.
+- [x] Render at most 30 recent items on cold start.
+- [x] Limit newly mounted messages per commit to avoid large synchronous
       Markdown/Yoga bursts during fast scrolling.
-- [ ] Quantize scroll-driven React subscriptions while letting the terminal
+- [x] Quantize scroll-driven React subscriptions while letting the terminal
       viewport move at full input resolution.
-- [ ] Preserve bottom-follow and history anchoring as streamed rows grow.
-- [ ] Add regression coverage for resize, resume, `/new`, undo, and scrolling
+- [x] Preserve bottom-follow and history anchoring as streamed rows grow.
+- [x] Add regression coverage for resize, resume, `/new`, undo, and scrolling
       while a response is streaming.
+
+Unit tests live in `apps/tui/src/lib/performance.test.ts`.
 
 ## P3: renderer-level work
 
 Only start this after benchmarks show that application-level work is no
 longer sufficient.
 
-- [ ] Cache display width for immutable completed lines.
+These remain deferred because they require maintaining a custom Ink fork.
+Application-level optimizations above are preferred for this repo.
+
+- [x] Cache display width for immutable completed lines (`lineWidth` cache).
 - [ ] Track dirty subtrees and skip painting unchanged nodes.
 - [ ] Reuse unchanged areas from the previous screen buffer.
 - [ ] Diff terminal cells and write only changed ranges.

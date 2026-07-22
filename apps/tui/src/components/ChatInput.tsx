@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
 import stringWidth from "string-width";
 import { BlinkingCursor } from "./BlinkingCursor.js";
+import { blockTranscriptScrollRef } from "../lib/inputFocus.js";
 
 const DEFAULT_MAX_MENU_ITEMS = 8;
 const MIN_MAX_MENU_ITEMS = 5;
@@ -182,6 +183,9 @@ export function ChatInput({
     Math.min(MAX_MAX_MENU_ITEMS, maxMenuItems),
   );
   const isMenuOpen = value.startsWith("/") && !value.includes(" ");
+  useEffect(() => {
+    blockTranscriptScrollRef.current = isMenuOpen;
+  }, [isMenuOpen]);
   const rootItems = useMemo(
     () => matchingCommands(value, commands),
     [commands, value],
@@ -285,8 +289,8 @@ export function ChatInput({
       return;
     }
 
-    if (!isMenuOpen && !key.ctrl && (key.upArrow || key.downArrow)) {
-      if (key.upArrow) {
+    if (!isMenuOpen && key.ctrl && (input === "p" || input === "n")) {
+      if (input === "p") {
         if (history.length === 0) return;
         const nextIndex = Math.min(historyIndex + 1, history.length - 1);
         setHistoryIndex(nextIndex);

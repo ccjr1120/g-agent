@@ -7,7 +7,7 @@ import { getServerUrl, loadConfig } from "@g-agent/config";
 import { DEFAULT_SERVER_URL } from "@g-agent/shared";
 import { App } from "./App.js";
 import { ensureServerRunning, restartServer } from "./lib/serverBootstrap.js";
-import { createMouseFilteredStdin } from "./lib/mouseInput.js";
+import { createScrollAwareStdin } from "./lib/terminalInput.js";
 
 await loadConfig();
 
@@ -36,16 +36,17 @@ const loadedBanner = await loadBanner();
 const banner = getBannerLines(loadedBanner);
 
 const enterFullscreen = () => {
-  // Alternate screen keeps the shell buffer untouched. SGR mouse mode gives
-  // the app wheel events so scrolling is independent of terminal scrollback.
-  process.stdout.write("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+  // Alternate screen keeps the shell buffer untouched. Alternate scroll mode
+  // turns wheel events into cursor keys without capturing mouse clicks, so the
+  // terminal can still select text for copy.
+  process.stdout.write("\x1b[?1049h\x1b[?1007h");
 };
 
 let fullscreen = false;
 const leaveFullscreen = () => {
   if (!fullscreen) return;
   fullscreen = false;
-  process.stdout.write("\x1b[?1006l\x1b[?1000l\x1b[?1049l");
+  process.stdout.write("\x1b[?1007l\x1b[?1049l");
 };
 
 enterFullscreen();
@@ -53,7 +54,7 @@ fullscreen = true;
 process.once("exit", leaveFullscreen);
 
 try {
-  const stdin = createMouseFilteredStdin(process.stdin);
+  const stdin = createScrollAwareStdin(process.stdin);
   const instance = render(<App serverUrl={serverUrl} banner={banner} />, { stdin });
   await instance.waitUntilExit();
 } finally {

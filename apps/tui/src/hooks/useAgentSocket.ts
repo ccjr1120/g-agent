@@ -70,7 +70,7 @@ type LogEntry =
   | { type: "start"; ts: number }
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; args: string }
-  | { type: "tool_result"; name: string; output: string }
+  | { type: "tool_result"; name: string; output: string; externalPath?: string }
   | { type: "done"; ts: number }
   | { type: "error"; message: string; ts: number };
 
@@ -87,17 +87,11 @@ type UndoAction =
   | { kind: "chat"; userLineId: string; text: string; queueItemId: string }
   | { kind: "local"; lineId: string };
 
-// Keep terminal rendering comfortably below a typical 60 Hz refresh rate.
-// Token deltas often arrive much faster than the terminal can paint them.
-const SHORT_STREAM_RENDER_INTERVAL_MS = 32;
-const MEDIUM_STREAM_RENDER_INTERVAL_MS = 50;
-const LONG_STREAM_RENDER_INTERVAL_MS = 75;
-
-function streamRenderInterval(textLength: number): number {
-  if (textLength >= 16_000) return LONG_STREAM_RENDER_INTERVAL_MS;
-  if (textLength >= 4_000) return MEDIUM_STREAM_RENDER_INTERVAL_MS;
-  return SHORT_STREAM_RENDER_INTERVAL_MS;
-}
+import {
+  createEventLoopLagTracker,
+  streamRenderInterval,
+} from "../lib/streamRender.js";
+import { storeToolResultOutput } from "../lib/logOutput.js";
 
 function createLineId(): string {
   return crypto.randomUUID();
@@ -243,6 +237,7 @@ export function useAgentSocket(serverUrl: string) {
   const sessionStartedAtRef = useRef<number>(0);
   const resumingRef = useRef(false);
   const pendingResumeRef = useRef<SavedSession | null>(null);
+  const eventLoopLagRef = useRef(createEventLoopLagTracker());
 
   const refreshSavedSessions = useCallback(async () => {
     const sessions = await listSessions();
@@ -314,7 +309,7 @@ export function useAgentSocket(serverUrl: string) {
     streamRenderTimerRef.current = setTimeout(() => {
       streamRenderTimerRef.current = null;
       flushPendingStreamRender();
-    }, streamRenderInterval(bufferedLength));
+    }, streamRenderInterval(bufferedLength, eventLoopLagRef.current.sample()));
   }, [flushPendingStreamRender]);
 
   const updateStreamingLine = useCallback((line: ChatLine | null) => {
@@ -559,7 +554,14 @@ export function useAgentSocket(serverUrl: string) {
           break;
         case "tool_result":
           if (!processingRef.current) return;
-          logRef.current.push({ type: "tool_result", name: message.name, output: message.output });
+          void storeToolResultOutput(message.name, message.output, Date.now()).then((stored) => {
+            logRef.current.push({
+              type: "tool_result",
+              name: message.name,
+              output: stored.inline,
+              ...(stored.externalPath ? { externalPath: stored.externalPath } : {}),
+            });
+          });
           break;
         case "done":
           if (!processingRef.current) return;
@@ -611,6 +613,7 @@ export function useAgentSocket(serverUrl: string) {
 
     return () => {
       cancelPendingStreamRender();
+      eventLoopLagRef.current.stop();
       ws.close();
       socketRef.current = null;
     };
@@ -850,6 +853,10 @@ export function useAgentSocket(serverUrl: string) {
         case "tool_result":
           lines.push(`### ↩ Tool Result: \`${entry.name}\``);
           lines.push(``);
+          if (entry.externalPath) {
+            lines.push(`> Full output: ${entry.externalPath}`);
+            lines.push(``);
+          }
           lines.push("```");
           lines.push(entry.output);
           lines.push("```");

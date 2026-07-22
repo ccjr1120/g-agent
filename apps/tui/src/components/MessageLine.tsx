@@ -49,7 +49,9 @@ export const MessageLine = React.memo(function MessageLine({
           ))}
         </Box>
       ) : null}
-      {hasText ? <MessageContent role={line.role} text={line.text} /> : null}
+      {hasText ? (
+        <MessageContent role={line.role} text={line.text} streaming={streaming} />
+      ) : null}
       <TimingFootnote
         streaming={streaming}
         turnStartMs={turnStartMs}

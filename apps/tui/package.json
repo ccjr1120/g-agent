@@ -9,7 +9,9 @@
   "scripts": {
     "build": "bun build ./src/cli.tsx --outfile ./dist/cli.js --target bun --format esm --packages external",
     "dev": "bun ./src/cli.tsx",
-    "start": "bun ./dist/cli.js"
+    "start": "bun ./dist/cli.js",
+    "test": "bun test src",
+    "benchmark": "bun ./src/benchmark/run.ts"
   },
   "dependencies": {
     "@g-agent/agent": "workspace:*",

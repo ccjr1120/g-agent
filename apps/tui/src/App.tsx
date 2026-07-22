@@ -1,7 +1,6 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
-  measureElement,
   Text,
   useApp,
   useInput,
@@ -12,10 +11,15 @@ import {
 import { ChatInput, type SlashCommand } from "./components/ChatInput.js";
 import { LoadingSpinner } from "./components/LoadingSpinner.js";
 import { MessageLine } from "./components/MessageLine.js";
+import { VirtualTranscript } from "./components/VirtualTranscript.js";
 import { StatusBar } from "./components/StatusBar.js";
 import { useAgentSocket, type McpServerInfo } from "./hooks/useAgentSocket.js";
 import { formatSessionAge, formatSessionLabel } from "./lib/sessionStore.js";
-import { onMouseWheel } from "./lib/mouseInput.js";
+import { copyToClipboard } from "./lib/clipboard.js";
+import { lastAssistantText } from "./lib/transcript.js";
+import { onScrollWheel } from "./lib/terminalInput.js";
+import { blockTranscriptScrollRef } from "./lib/inputFocus.js";
+import { quantizeScrollDelta } from "./lib/virtualScroll.js";
 
 const SKILL_CATEGORY_LABEL = {
   builtin: "Built-in Skills",
@@ -76,6 +80,7 @@ export function App({
   const { stdout } = useStdout();
   const { columns: terminalColumns, rows: terminalRows } = useWindowSize();
   const [restoreText, setRestoreText] = useState<string | null>(null);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const {
     connection,
     staticLines,
@@ -280,41 +285,59 @@ export function App({
     }
   }, [undoLastTurn]);
 
+  const handleCopyLastReply = useCallback(async () => {
+    const text = lastAssistantText(staticLines, streamingLine);
+    if (!text) {
+      setCopyNotice("Nothing to copy");
+      return;
+    }
+
+    const copied = await copyToClipboard(text);
+    setCopyNotice(copied ? "Copied last reply" : "Copy failed — select text with mouse instead");
+  }, [staticLines, streamingLine]);
+
+  useEffect(() => {
+    if (!copyNotice) {
+      return;
+    }
+    const timer = setTimeout(() => setCopyNotice(null), 2000);
+    return () => clearTimeout(timer);
+  }, [copyNotice]);
+
   // Number of rendered terminal rows below the viewport. Zero follows the
   // live response; positive values freeze the viewport in transcript history.
   const [historyOffset, setHistoryOffset] = useState(0);
-  const [transcriptHeight, setTranscriptHeight] = useState(0);
-  const [viewportHeight, setViewportHeight] = useState(0);
-  const transcriptRef = useRef<DOMElement>(null);
+  const [maxHistoryOffset, setMaxHistoryOffset] = useState(0);
   const viewportRef = useRef<DOMElement>(null);
-  const previousTranscriptHeightRef = useRef(0);
-  const maxHistoryOffset = Math.max(0, transcriptHeight - viewportHeight);
+
+  const handleTranscriptLayout = useCallback((layout: {
+    totalHeight: number;
+    viewportHeight: number;
+    maxHistoryOffset: number;
+    growth: number;
+  }) => {
+    setMaxHistoryOffset(layout.maxHistoryOffset);
+    setHistoryOffset((current) =>
+      current > 0 ? Math.min(layout.maxHistoryOffset, current + layout.growth) : 0,
+    );
+  }, []);
 
   const scrollHistory = useCallback((delta: number) => {
     setHistoryOffset((current) =>
-      Math.max(0, Math.min(maxHistoryOffset, current + delta)),
+      Math.max(0, Math.min(maxHistoryOffset, current + quantizeScrollDelta(delta))),
     );
   }, [maxHistoryOffset]);
 
-  useLayoutEffect(() => {
-    if (!transcriptRef.current || !viewportRef.current) return;
-
-    const nextTranscriptHeight = measureElement(transcriptRef.current).height;
-    const nextViewportHeight = measureElement(viewportRef.current).height;
-    const previousHeight = previousTranscriptHeightRef.current;
-    const growth = Math.max(0, nextTranscriptHeight - previousHeight);
-    const nextMaxOffset = Math.max(0, nextTranscriptHeight - nextViewportHeight);
-
-    previousTranscriptHeightRef.current = nextTranscriptHeight;
-    setTranscriptHeight(nextTranscriptHeight);
-    setViewportHeight(nextViewportHeight);
-    setHistoryOffset((current) =>
-      current > 0 ? Math.min(nextMaxOffset, current + growth) : 0,
-    );
-  }, [staticLines, streamingLine, terminalColumns, terminalRows]);
-
   useInput((_input, key) => {
-    if (key.pageUp || (key.ctrl && key.upArrow)) {
+    if (key.ctrl && _input === "y") {
+      void handleCopyLastReply();
+      return;
+    }
+    if (key.upArrow && !key.ctrl && !key.meta && !blockTranscriptScrollRef.current) {
+      scrollHistory(1);
+    } else if (key.downArrow && !key.ctrl && !key.meta && !blockTranscriptScrollRef.current) {
+      scrollHistory(-1);
+    } else if (key.pageUp || (key.ctrl && key.upArrow)) {
       scrollHistory(PAGE_SCROLL_STEP);
     } else if (key.pageDown || (key.ctrl && key.downArrow)) {
       scrollHistory(-PAGE_SCROLL_STEP);
@@ -326,7 +349,7 @@ export function App({
   });
 
   useEffect(() => {
-    return onMouseWheel((direction) => {
+    return onScrollWheel((direction) => {
       scrollHistory(direction === "up" ? 1 : -1);
     });
   }, [scrollHistory]);
@@ -347,7 +370,7 @@ export function App({
   ) : (
     <Box flexDirection="column">
       <Text dimColor>
-        Active agent: <Text color="cyan">{activeAgent || "—"}</Text>. Type a message and press Enter. Type / to see commands. Esc to undo.
+        Active agent: <Text color="cyan">{activeAgent || "—"}</Text>. Type a message and press Enter. Type / to see commands. Esc to undo. Mouse-select or Ctrl+Y to copy.
       </Text>
       {agentFallback ? (
         <Text color="yellow">
@@ -398,22 +421,22 @@ export function App({
           paddingX={1}
           marginBottom={1}
         >
-          <Box
-            ref={transcriptRef}
-            position="absolute"
-            top={Math.min(0, viewportHeight - transcriptHeight) + historyOffset}
-            width="100%"
-            flexDirection="column"
-          >
-            {staticLines.map((line) => (
-              <Box key={line.id} flexShrink={0}>
-                <MessageLine line={line} />
-              </Box>
-            ))}
-            {liveTurnContent}
-          </Box>
+          <VirtualTranscript
+            staticLines={staticLines}
+            liveTurnContent={liveTurnContent}
+            columns={terminalColumns}
+            historyOffset={historyOffset}
+            onLayout={handleTranscriptLayout}
+            viewportRef={viewportRef}
+          />
         </Box>
       )}
+
+      {copyNotice ? (
+        <Box paddingX={1} flexShrink={0}>
+          <Text color="green" dimColor>{copyNotice}</Text>
+        </Box>
+      ) : null}
 
       {browsingHistory ? (
         <Box paddingX={1} flexShrink={0}>
