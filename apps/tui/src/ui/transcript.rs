@@ -19,6 +19,8 @@ const ASSISTANT_CONTINUATION: &str = "  ";
 const THINKING_CONTINUATION: &str = "  ";
 /// Left gutter for transcript content (terminal columns; user-facing "2px").
 const TRANSCRIPT_LEFT_PADDING: u16 = 1;
+/// Blank lines above the startup banner for breathing room from the terminal top.
+const BANNER_TOP_PADDING_LINES: usize = 2;
 
 fn content_width(viewport_width: u16) -> u16 {
     viewport_width
@@ -70,6 +72,9 @@ pub fn build_transcript_lines(
     let width = content_width(content.width.max(1));
 
     if !content.banner.is_empty() {
+        for _ in 0..BANNER_TOP_PADDING_LINES {
+            rendered.push(Line::from(""));
+        }
         let banner_width = content.width.max(1);
         for line in content.banner {
             rendered.push(Line::from(Span::styled(

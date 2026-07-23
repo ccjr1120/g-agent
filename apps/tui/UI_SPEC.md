@@ -30,7 +30,7 @@
 
 | 元素 | Helper | 说明 |
 | --- | --- | --- |
-| Banner | `style::banner()` | 启动 Banner，品牌色加粗 |
+| Banner | `style::banner()` | 启动 Banner，品牌色加粗；顶部预留 2 行空白 |
 | 欢迎/引导文案 | `style::welcome()` | 灰色说明文字 |
 | Agent 回退警告 | `style::warning()` | 配置的 agent 不存在时的提示 |
 | 用户消息 | `style::user_message()` | `> ` 前缀与正文均为品牌色 |
@@ -55,12 +55,16 @@
 
 ## 状态栏（Status Bar）
 
+布局：**左侧**连接状态（品牌色），**右侧** Model / Agent / 上下文（字符画 icon + 灰色次要信息，环承载用量语义色）。
+
 | 元素 | Helper | 说明 |
 | --- | --- | --- |
-| 连接图标 | `style::status_icon()` | 品牌色 |
-| 连接标签 | `style::status_label()` | 灰色 |
-| Model / Agent | `style::status_value()` | 品牌色 |
-| 上下文环轨道 | `style::context_track()` | 灰色 |
+| 连接图标 | `style::status_icon()` | 品牌色，左侧 `●` / `○` |
+| 连接标签 | `style::status_label()` | 灰色，如 `Connected` |
+| Model 图标 | `style::status_label()` | 灰色，`◇` |
+| Agent 图标 | `style::status_label()` | 灰色，`◎` |
+| 字段值 | `style::status_meta()` | 灰色，Model / Agent 名称、上下文百分比 |
+| 上下文环轨道 | `style::context_track()` | 灰色，百分比右侧 |
 | 上下文环填充 | `style::context_usage(percent)` | `<75%` 品牌色，`≥75%` 黄，`≥90%` 红 |
 
 ## 全局反馈（App chrome）

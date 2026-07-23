@@ -102,11 +102,12 @@ pub mod style {
         brand()
     }
 
-    pub fn status_value() -> Style {
-        brand()
+    pub fn status_label() -> Style {
+        muted()
     }
 
-    pub fn status_label() -> Style {
+    /// Secondary metadata on the status bar (model, agent, context percent).
+    pub fn status_meta() -> Style {
         muted()
     }
 

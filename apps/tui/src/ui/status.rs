@@ -5,12 +5,17 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
+use unicode_width::UnicodeWidthStr;
 
 use crate::agent::client::{ConnectionState, ContextUsage};
 use crate::ui::theme::style;
 
 pub const STATUS_HEIGHT: u16 = 1;
 const RING_WIDTH: u16 = 1;
+const SECTION_GAP: &str = "  ";
+
+const ICON_MODEL: &str = "◇";
+const ICON_AGENT: &str = "◎";
 
 const BRAILLE_DOT: [u16; 8] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
 
@@ -34,56 +39,83 @@ impl Widget for StatusBar<'_> {
             return;
         }
 
-        let ring_width = RING_WIDTH.min(area.width);
-        let text_width = area.width.saturating_sub(ring_width);
-        let text_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: text_width,
-            height: area.height,
-        };
-        let ring_area = Rect {
-            x: area.x + text_width,
-            y: area.y,
-            width: ring_width,
-            height: area.height,
-        };
+        let connection = self.connection_line();
+        let connection_width = line_width(&connection) as u16;
+        if connection_width > 0 {
+            buf.set_line(area.x, area.y, &connection, connection_width);
+        }
 
-        self.render_text(text_area, buf);
-        ContextRing::new(self.context).render(ring_area, buf);
+        let ring_width = RING_WIDTH.min(area.width);
+        let metadata = self.metadata_line();
+        let metadata_width = line_width(&metadata) as u16;
+        let total_right = metadata_width.saturating_add(ring_width);
+        if total_right == 0 {
+            return;
+        }
+
+        let right_x = area
+            .x
+            .saturating_add(area.width.saturating_sub(total_right));
+        if metadata_width > 0 {
+            buf.set_line(right_x, area.y, &metadata, metadata_width);
+        }
+        if ring_width > 0 {
+            ContextRing::new(self.context).render(
+                Rect {
+                    x: right_x + metadata_width,
+                    y: area.y,
+                    width: ring_width,
+                    height: area.height,
+                },
+                buf,
+            );
+        }
     }
 }
 
 impl StatusBar<'_> {
-    fn render_text(&self, area: Rect, buf: &mut Buffer) {
-        if area.width == 0 {
-            return;
-        }
-
+    fn connection_line(&self) -> Line<'static> {
         let (icon, label) = match self.connection {
             ConnectionState::Connecting => ("●", "Connecting"),
             ConnectionState::Connected => ("●", "Connected"),
             ConnectionState::Disconnected => ("○", "Disconnected"),
         };
+
+        Line::from(vec![
+            Span::styled(icon, style::status_icon()),
+            Span::raw(" "),
+            Span::styled(label, style::status_label()),
+        ])
+    }
+
+    fn metadata_line(&self) -> Line<'static> {
         let model = display_model(self.model);
         let agent = if self.active_agent.is_empty() {
             "—".to_string()
         } else {
             self.active_agent.to_string()
         };
+        let percent = self.context.percent.min(100);
 
-        let line = Line::from(vec![
-            Span::styled(icon, style::status_icon()),
+        Line::from(vec![
+            Span::styled(ICON_MODEL, style::status_label()),
             Span::raw(" "),
-            Span::styled(label, style::status_label()),
-            Span::raw("   "),
-            Span::styled(model, style::status_value()),
-            Span::raw("   "),
-            Span::styled(agent, style::status_value()),
-        ]);
-
-        buf.set_line(area.x, area.y, &line, area.width);
+            Span::styled(model, style::status_meta()),
+            Span::raw(SECTION_GAP),
+            Span::styled(ICON_AGENT, style::status_label()),
+            Span::raw(" "),
+            Span::styled(agent, style::status_meta()),
+            Span::raw(SECTION_GAP),
+            Span::styled(format!("{percent}%"), style::status_meta()),
+        ])
     }
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| span.content.width())
+        .sum()
 }
 
 struct ContextRing {
