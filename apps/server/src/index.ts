@@ -407,6 +407,11 @@ async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<v
         return;
       }
 
+      if (event.type === "thinking_delta") {
+        send(ws, { type: "thinkingDelta", text: event.text });
+        return;
+      }
+
       if (event.type === "delta") {
         assistantText += event.text;
         send(ws, { type: "delta", text: event.text });

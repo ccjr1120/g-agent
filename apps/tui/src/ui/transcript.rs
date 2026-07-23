@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::buffer::Buffer;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
@@ -10,6 +9,43 @@ use unicode_width::UnicodeWidthStr;
 use crate::agent::client::{ChatLine, ToolCallDisplay};
 use crate::ui::markdown::{MarkdownCache, StreamingMarkdown};
 use crate::ui::spinner::spinner_line;
+use crate::ui::theme::style;
+
+const USER_PREFIX: &str = "> ";
+const USER_CONTINUATION: &str = "  ";
+const ASSISTANT_BULLET: &str = "●";
+const ASSISTANT_PREFIX: &str = "● ";
+const ASSISTANT_CONTINUATION: &str = "  ";
+const THINKING_CONTINUATION: &str = "  ";
+/// Left gutter for transcript content (terminal columns; user-facing "2px").
+const TRANSCRIPT_LEFT_PADDING: u16 = 1;
+
+fn content_width(viewport_width: u16) -> u16 {
+    viewport_width
+        .saturating_sub(TRANSCRIPT_LEFT_PADDING)
+        .max(1)
+}
+
+fn center_line_with_offset(text: &str, viewport_width: u16, left_offset: u16) -> String {
+    let line_width = text.width();
+    let viewport = viewport_width.max(1) as usize;
+    if line_width >= viewport {
+        return text.to_string();
+    }
+    let pad = (viewport - line_width) / 2;
+    let pad = pad.saturating_sub(left_offset as usize);
+    format!("{}{}", " ".repeat(pad), text)
+}
+
+fn assistant_leading_spans() -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            ASSISTANT_BULLET.to_string(),
+            style::assistant_bullet(),
+        ),
+        Span::raw(" "),
+    ]
+}
 
 pub struct TranscriptContent<'a> {
     pub lines: &'a [ChatLine],
@@ -22,7 +58,6 @@ pub struct TranscriptContent<'a> {
     pub fallback: Option<(&'a str, &'a str)>,
     pub clock: Instant,
     pub turn_start: Option<Instant>,
-    pub show_banner: bool,
     pub width: u16,
 }
 
@@ -32,18 +67,17 @@ pub fn build_transcript_lines(
     streaming_md: &StreamingMarkdown,
 ) -> Vec<Line<'static>> {
     let mut rendered: Vec<Line<'static>> = Vec::new();
-    let width = content.width.max(1);
+    let width = content_width(content.width.max(1));
 
-    if content.show_banner {
+    if !content.banner.is_empty() {
+        let banner_width = content.width.max(1);
         for line in content.banner {
             rendered.push(Line::from(Span::styled(
-                line.clone(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                center_line_with_offset(line, banner_width, TRANSCRIPT_LEFT_PADDING),
+                style::banner(),
             )));
         }
-        if !content.banner.is_empty() {
-            rendered.push(Line::from(""));
-        }
+        rendered.push(Line::from(""));
     }
 
     if content.show_welcome {
@@ -52,21 +86,21 @@ pub fn build_transcript_lines(
         } else {
             rendered.push(Line::from(vec![Span::styled(
                 format!(
-                    "Active agent: {}. Type a message and press Enter. Type / for commands. Esc to undo.",
+                    "Active agent: {}. Enter to send, / for commands, Esc to undo, Ctrl+Y or Cmd+C to copy.",
                     if content.active_agent.is_empty() {
                         "—"
                     } else {
                         content.active_agent
                     }
                 ),
-                Style::default().fg(Color::DarkGray),
+                style::welcome(),
             )]));
             if let Some((requested, active)) = content.fallback {
                 rendered.push(Line::from(Span::styled(
                     format!(
                         "Configured agent \"{requested}\" not found, using built-in \"{active}\"."
                     ),
-                    Style::default().fg(Color::Yellow),
+                    style::warning(),
                 )));
             }
         }
@@ -103,19 +137,14 @@ fn push_streaming_line(
         return;
     }
 
-    lines.push(Line::from(vec![
-        Span::styled(
-            "Assistant ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-    ]));
     for tool in &line.tools {
         lines.push(tool_line(tool));
     }
+    push_thinking_text(lines, &line.thinking);
     if streaming_md.lines().is_empty() {
-        push_plain_text(lines, &line.text);
+        push_assistant_plain(lines, &line.text);
     } else {
-        lines.extend(streaming_md.lines().iter().cloned());
+        lines.extend(prefix_assistant_lines(streaming_md.lines()));
     }
     lines.push(Line::from(""));
 }
@@ -126,11 +155,11 @@ pub fn max_history_scroll(
     streaming_md: &StreamingMarkdown,
     height: u16,
 ) -> u16 {
-    if height == 0 || content.show_welcome {
+    if height == 0 {
         return 0;
     }
     let lines = build_transcript_lines(content, markdown, streaming_md);
-    let total = line_count(&lines, content.width.max(1));
+    let total = line_count(&lines, content_width(content.width.max(1)));
     total.saturating_sub(height)
 }
 
@@ -179,29 +208,26 @@ pub fn paragraph_scroll_y(total_lines: u16, viewport_height: u16, history_offset
 pub struct TranscriptWidget {
     pub lines: Vec<Line<'static>>,
     pub scroll: u16,
-    pub show_welcome: bool,
 }
 
 impl Widget for TranscriptWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut rendered = self.lines;
+        let rendered = self.lines;
+        let content_area = Rect {
+            x: area.x.saturating_add(TRANSCRIPT_LEFT_PADDING),
+            y: area.y,
+            width: content_width(area.width),
+            height: area.height,
+        };
+        let width = content_area.width.max(1);
 
-        if self.show_welcome && self.scroll == 0 {
-            let content_height = line_count(&rendered, area.width.max(1));
-            let top_pad = area.height.saturating_sub(content_height);
-            for _ in 0..top_pad {
-                rendered.insert(0, Line::from(""));
-            }
-        }
-
-        let width = area.width.max(1);
         let total_lines = line_count(&rendered, width);
-        let scroll_y = paragraph_scroll_y(total_lines, area.height, self.scroll);
+        let scroll_y = paragraph_scroll_y(total_lines, content_area.height, self.scroll);
 
         let paragraph = Paragraph::new(rendered)
             .wrap(Wrap { trim: false })
             .scroll((scroll_y, 0));
-        paragraph.render(area, buf);
+        paragraph.render(content_area, buf);
     }
 }
 
@@ -212,31 +238,99 @@ fn push_chat_line(
     markdown: &mut MarkdownCache,
 ) {
     if line.role == "user" {
-        lines.push(Line::from(vec![
-            Span::styled("You ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        ]));
-        push_plain_text(lines, &line.text);
+        push_user_text(lines, &line.text);
     } else {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Assistant ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-        ]));
         for tool in &line.tools {
             lines.push(tool_line(tool));
         }
+        push_thinking_text(lines, &line.thinking);
         push_assistant_body(lines, &line.text, width, markdown);
     }
 
     if let Some(duration) = line.duration_ms {
         lines.push(Line::from(Span::styled(
             format!("· {:.1}s", duration as f64 / 1000.0),
-            Style::default().fg(Color::DarkGray),
+            style::muted(),
         )));
     }
 
     lines.push(Line::from(""));
+}
+
+fn push_thinking_text(lines: &mut Vec<Line<'static>>, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let style = style::thinking();
+    for chunk in text.lines() {
+        lines.push(Line::from(vec![
+            Span::styled(THINKING_CONTINUATION, style),
+            Span::styled(chunk.to_string(), style),
+        ]));
+    }
+}
+
+fn push_user_text(lines: &mut Vec<Line<'static>>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    for (index, chunk) in text.lines().enumerate() {
+        let style = style::user_message();
+        if index == 0 {
+            lines.push(Line::from(vec![
+                Span::styled(USER_PREFIX, style),
+                Span::styled(chunk.to_string(), style),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw(USER_CONTINUATION),
+                Span::styled(chunk.to_string(), style),
+            ]));
+        }
+    }
+}
+
+fn push_assistant_plain(lines: &mut Vec<Line<'static>>, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    for (index, chunk) in text.lines().enumerate() {
+        if index == 0 {
+            let mut spans = assistant_leading_spans();
+            spans.push(Span::raw(chunk.to_string()));
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw(ASSISTANT_CONTINUATION),
+                Span::raw(chunk.to_string()),
+            ]));
+        }
+    }
+}
+
+fn prefix_assistant_lines(body: &[Line<'static>]) -> Vec<Line<'static>> {
+    body.iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let mut spans = if index == 0 {
+                assistant_leading_spans()
+            } else {
+                vec![Span::raw(ASSISTANT_CONTINUATION)]
+            };
+            spans.extend(line.spans.iter().cloned());
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn assistant_body_width(viewport_width: u16) -> u16 {
+    content_width(viewport_width)
+        .saturating_sub(ASSISTANT_PREFIX.width() as u16)
+        .max(20)
+}
+
+pub fn assistant_markdown_width(viewport_width: u16) -> u16 {
+    assistant_body_width(viewport_width)
 }
 
 fn push_assistant_body(
@@ -248,24 +342,19 @@ fn push_assistant_body(
     if text.trim().is_empty() {
         return;
     }
-    let rendered = markdown.render_static(text, width);
+    let body_width = assistant_body_width(width);
+    let rendered = markdown.render_static(text, body_width);
     if rendered.is_empty() {
-        push_plain_text(lines, text);
+        push_assistant_plain(lines, text);
     } else {
-        lines.extend(rendered.iter().cloned());
-    }
-}
-
-fn push_plain_text(lines: &mut Vec<Line<'static>>, text: &str) {
-    for chunk in text.lines() {
-        lines.push(Line::from(chunk.to_string()));
+        lines.extend(prefix_assistant_lines(rendered));
     }
 }
 
 fn tool_line(tool: &ToolCallDisplay) -> Line<'static> {
     Line::from(Span::styled(
         format!("{} {}", tool_icon(&tool.name), tool.label),
-        Style::default().fg(Color::DarkGray),
+        style::tool_call(),
     ))
 }
 
@@ -292,5 +381,11 @@ mod tests {
     #[test]
     fn paragraph_scroll_reaches_top_at_max_history() {
         assert_eq!(paragraph_scroll_y(100, 20, 80), 0);
+    }
+
+    #[test]
+    fn content_width_reserves_left_padding() {
+        assert_eq!(content_width(80), 79);
+        assert_eq!(content_width(1), 1);
     }
 }

@@ -1,10 +1,11 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::buffer::Buffer;
 use ratatui::widgets::Widget;
 
 use crate::ui::textarea::{TextArea, TextAreaWidget};
+use crate::ui::theme::style;
 
 #[derive(Debug, Clone)]
 pub struct SlashCommand {
@@ -73,10 +74,16 @@ impl Composer {
             .collect();
         if let Some(group) = &self.open_group {
             let mut items = Vec::new();
-            if let Some(header) = root.iter().find(|command| command.value.trim_start_matches('/') == group) {
+            if let Some(header) = root
+                .iter()
+                .find(|command| command_group_id(&command.value) == group.as_str())
+            {
                 items.push(*header);
             }
-            if let Some((_, children)) = groups.iter().find(|(name, _)| *name == group) {
+            if let Some((_, children)) = groups
+                .iter()
+                .find(|(name, _)| command_group_id(name) == group.as_str())
+            {
                 items.extend(children.iter());
             }
             return items;
@@ -107,73 +114,92 @@ impl Composer {
 pub struct ComposerWidget<'a> {
     composer: &'a Composer,
     disabled: bool,
-    menu_items: &'a [SlashCommand],
 }
 
 impl<'a> ComposerWidget<'a> {
-    pub fn new(composer: &'a Composer, disabled: bool, menu_items: &'a [SlashCommand]) -> Self {
-        Self {
-            composer,
-            disabled,
-            menu_items,
-        }
+    pub fn new(composer: &'a Composer, disabled: bool) -> Self {
+        Self { composer, disabled }
     }
 }
 
 impl Widget for ComposerWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let style = if self.disabled {
-            Style::default().fg(Color::DarkGray)
+            style::composer_disabled()
         } else {
-            Style::default().fg(Color::Cyan)
+            style::composer_active()
         };
 
-        let input_height = self.composer.textarea.desired_height(area.width.saturating_sub(2)).min(area.height);
-        let input_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: input_height,
-        };
         TextAreaWidget::new(
             &self.composer.textarea,
             "> ",
             style,
             !self.disabled,
         )
-        .render(input_area, buf);
+        .render(area, buf);
+    }
+}
 
-        if self.composer.menu_open && !self.menu_items.is_empty() {
-            let menu_y = input_area.bottom();
-            if menu_y < area.bottom() {
-                let hint = Line::from(vec![
-                    Span::styled("Commands · ↑↓ select · Enter run · Esc close", Style::default().fg(Color::DarkGray)),
-                ]);
-                buf.set_line(area.x, menu_y, &hint, area.width);
-            }
-            for (index, item) in self.menu_items.iter().enumerate().take(6) {
-                let row = menu_y + 1 + index as u16;
-                if row >= area.bottom() {
-                    break;
-                }
-                let selected = index == self.composer.menu_index;
-                let prefix = if selected { "❯ " } else { "  " };
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("{prefix}{}", item.value),
-                        if selected {
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        },
-                    ),
-                    Span::raw("  "),
-                    Span::styled(item.description.clone(), Style::default().fg(Color::DarkGray)),
-                ]);
-                buf.set_line(area.x, row, &line, area.width);
-            }
+pub struct MenuWidget<'a> {
+    composer: &'a Composer,
+    menu_items: &'a [SlashCommand],
+}
+
+impl<'a> MenuWidget<'a> {
+    pub fn new(composer: &'a Composer, menu_items: &'a [SlashCommand]) -> Self {
+        Self {
+            composer,
+            menu_items,
         }
     }
+}
+
+impl Widget for MenuWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if !self.composer.menu_open || self.menu_items.is_empty() || area.height == 0 {
+            return;
+        }
+
+        let hint = Line::from(vec![Span::styled(
+            "Commands · ↑↓ select · Enter run · Esc close",
+            style::muted(),
+        )]);
+        buf.set_line(area.x, area.y, &hint, area.width);
+
+        for (index, item) in self.menu_items.iter().enumerate().take(6) {
+            let row = area.y + 1 + index as u16;
+            if row >= area.bottom() {
+                break;
+            }
+            let selected = index == self.composer.menu_index;
+            let prefix = if selected { "❯ " } else { "  " };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{prefix}{}", item.value),
+                    if selected {
+                        style::menu_selected()
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::raw("  "),
+                Span::styled(item.description.clone(), style::menu_description()),
+            ]);
+            buf.set_line(area.x, row, &line, area.width);
+        }
+    }
+}
+
+pub fn menu_height(composer: &Composer, menu_items: &[SlashCommand]) -> u16 {
+    if composer.menu_open && !menu_items.is_empty() {
+        menu_items.len().min(6) as u16 + 1
+    } else {
+        0
+    }
+}
+
+pub fn command_group_id(name: &str) -> &str {
+    name.trim_start_matches('/')
 }
 
 impl Default for Composer {

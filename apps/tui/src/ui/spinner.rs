@@ -1,7 +1,8 @@
 use std::time::Instant;
 
-use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+
+use crate::ui::theme::style;
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const FRAME_MS: u64 = 140;
@@ -36,15 +37,15 @@ pub fn spinner_line(label: &str, clock: Instant, turn_start: Option<Instant>, di
     if dim {
         return Line::from(Span::styled(
             format!("{frame}{label_text}"),
-            Style::default().fg(Color::DarkGray),
+            style::muted(),
         ));
     }
 
     Line::from(vec![
-        Span::styled(frame.to_string(), Style::default().fg(Color::Yellow)),
+        Span::styled(frame.to_string(), style::spinner_frame()),
         Span::styled(
             format!(" {label_text}"),
-            Style::default().fg(Color::DarkGray),
+            style::spinner_label(),
         ),
     ])
 }

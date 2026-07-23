@@ -47,6 +47,7 @@ pub struct ToolCallDisplay {
 pub struct ChatLine {
     pub role: String,
     pub text: String,
+    pub thinking: String,
     pub tools: Vec<ToolCallDisplay>,
     pub duration_ms: Option<u64>,
 }
@@ -64,6 +65,7 @@ pub enum AgentEvent {
     Mcp(Vec<McpServerInfo>),
     Context(ContextUsage),
     TurnStarted,
+    ThinkingDelta(String),
     Delta(String),
     ToolCall { name: String, args: String },
     TurnDone,
@@ -162,6 +164,9 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
         }
         ServerMessage::Start => {
             let _ = events.send(AgentEvent::TurnStarted);
+        }
+        ServerMessage::ThinkingDelta { text } => {
+            let _ = events.send(AgentEvent::ThinkingDelta(text));
         }
         ServerMessage::Delta { text } => {
             let _ = events.send(AgentEvent::Delta(text));

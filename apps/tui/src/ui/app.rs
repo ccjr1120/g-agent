@@ -5,14 +5,13 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::{
     cursor::{MoveTo, SetCursorStyle, Show},
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, Borders, Paragraph, Widget},
     Terminal,
 };
@@ -27,10 +26,13 @@ use crate::session::{
     build_session_preview, format_session_label, list_sessions, load_session, save_session,
     SavedSession, SavedSessionSummary, UndoEntry, UndoStack, write_conversation_log,
 };
-use crate::ui::composer::{Composer, SlashCommand};
+use crate::ui::composer::{command_group_id, menu_height, Composer, ComposerWidget, MenuWidget, SlashCommand};
+use crate::ui::status::{StatusBar, STATUS_HEIGHT};
 use crate::ui::markdown::{MarkdownCache, StreamingMarkdown};
+use crate::ui::theme::style;
 use crate::ui::transcript::{
-    build_transcript_lines, max_history_scroll, TranscriptContent, TranscriptWidget,
+    build_transcript_lines, max_history_scroll, assistant_markdown_width, TranscriptContent,
+    TranscriptWidget,
 };
 
 pub struct App {
@@ -150,7 +152,6 @@ impl App {
                 waiting: self.waiting_for_reply(),
                 banner: &self.banner,
                 show_welcome,
-                show_banner: show_welcome && !self.banner.is_empty(),
                 connecting: matches!(self.connection, ConnectionState::Connecting),
                 active_agent: &self.active_agent,
                 fallback: self
@@ -168,7 +169,7 @@ impl App {
             );
 
             terminal.draw(|frame| {
-                self.render(frame.area(), frame.buffer_mut(), transcript_lines, show_welcome);
+                self.render(frame.area(), frame.buffer_mut(), transcript_lines);
             })?;
             self.clamp_history_scroll(width, transcript_area.height);
             if let Some((x, y)) = self.cursor_screen_pos(area) {
@@ -188,20 +189,18 @@ impl App {
         area: Rect,
         buf: &mut ratatui::buffer::Buffer,
         transcript_lines: Vec<Line<'static>>,
-        show_welcome: bool,
     ) {
         let chunks = self.layout_chunks(area);
 
         TranscriptWidget {
             lines: transcript_lines,
             scroll: self.history_scroll,
-            show_welcome,
         }
         .render(chunks[0], buf);
 
         if let Some(notice) = &self.notice {
             Paragraph::new(notice.clone())
-                .style(Style::default().fg(Color::Green))
+                .style(style::success())
                 .render(chunks[1], buf);
         }
         if self.history_scroll > 0 {
@@ -209,77 +208,43 @@ impl App {
                 "History · {} rows below · scroll down to follow",
                 self.history_scroll
             ))
-            .style(Style::default().fg(Color::Yellow))
+            .style(style::warning())
             .render(chunks[2], buf);
         }
         if let Some(error) = &self.error {
             Paragraph::new(error.clone())
-                .style(Style::default().fg(Color::Red))
+                .style(style::error())
                 .render(chunks[3], buf);
         }
 
         let menu_items = self.current_menu_items();
+        MenuWidget::new(&self.composer, &menu_items).render(chunks[4], buf);
+        StatusBar {
+            connection: self.connection,
+            model: &self.model,
+            active_agent: &self.active_agent,
+            context: self.context.clone(),
+        }
+        .render(chunks[5], buf);
+
         let composer_area = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(Color::DarkGray));
-        let inner = composer_area.inner(chunks[4]);
-        composer_area.render(chunks[4], buf);
-        crate::ui::composer::ComposerWidget::new(
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(style::border());
+        let inner = composer_area.inner(chunks[6]);
+        composer_area.render(chunks[6], buf);
+        ComposerWidget::new(
             &self.composer,
             !matches!(self.connection, ConnectionState::Connected),
-            &menu_items,
         )
         .render(inner, buf);
-
-        self.render_status(chunks[5], buf);
     }
 
-    fn render_status(&self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
-        let (icon, label) = match self.connection {
-            ConnectionState::Connecting => ("●", "Connecting"),
-            ConnectionState::Connected => ("●", "Connected"),
-            ConnectionState::Disconnected => ("○", "Disconnected"),
-        };
-        let model = display_model(&self.model);
-        let context = if self.context.max_tokens > 0 {
-            format!(
-                "{}% {}k/{}k",
-                self.context.percent,
-                self.context.used_tokens / 1000,
-                self.context.max_tokens / 1000
-            )
-        } else {
-            format!("{}k/inf", self.context.used_tokens / 1000)
-        };
-        let line = Line::from(vec![
-            Span::styled(icon, Style::default().fg(Color::Cyan)),
-            Span::raw(" "),
-            Span::styled(label, Style::default().fg(Color::DarkGray)),
-            Span::raw("   Model "),
-            Span::styled(model, Style::default().fg(Color::Cyan)),
-            Span::raw("   Agent "),
-            Span::styled(
-                if self.active_agent.is_empty() {
-                    "—".to_string()
-                } else {
-                    self.active_agent.clone()
-                },
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::raw("   Context "),
-            Span::styled(context, Style::default().fg(Color::Cyan)),
-        ]);
-        Paragraph::new(line).render(area, buf);
-    }
-
-    fn composer_height(&self, width: u16) -> u16 {
-        let input = self.composer.textarea.desired_height(width.saturating_sub(2)).max(1);
-        let menu = if self.composer.menu_open {
-            self.current_menu_items().len().min(6) as u16 + 1
-        } else {
-            0
-        };
-        input + menu + 2
+    fn input_height(&self, width: u16) -> u16 {
+        self.composer
+            .textarea
+            .desired_height(width.saturating_sub(2))
+            .max(1)
+            + 2
     }
 
     fn cursor_screen_pos(&self, area: Rect) -> Option<(u16, u16)> {
@@ -287,7 +252,9 @@ impl App {
             return None;
         }
         let chunks = self.layout_chunks(area);
-        let inner = Block::default().borders(Borders::TOP).inner(chunks[4]);
+        let inner = Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .inner(chunks[6]);
         self.composer.cursor_pos(inner, 2)
     }
 
@@ -321,9 +288,15 @@ impl App {
                 self.streaming = Some(ChatLine {
                     role: "assistant".to_string(),
                     text: String::new(),
+                    thinking: String::new(),
                     tools: Vec::new(),
                     duration_ms: None,
                 });
+            }
+            AgentEvent::ThinkingDelta(text) => {
+                if let Some(line) = &mut self.streaming {
+                    line.thinking.push_str(&text);
+                }
             }
             AgentEvent::Delta(text) => {
                 if let Some(line) = &mut self.streaming {
@@ -357,10 +330,11 @@ impl App {
                 line.duration_ms = Some(start.elapsed().as_millis() as u64);
             }
             if !line.text.trim().is_empty() {
-                self.streaming_md.flush(&line.text, width);
-                self.markdown_cache.render_static(&line.text, width);
+                self.streaming_md.flush(&line.text, assistant_markdown_width(width));
+                self.markdown_cache
+                    .render_static(&line.text, assistant_markdown_width(width));
             }
-            if !line.text.trim().is_empty() || !line.tools.is_empty() {
+            if !line.text.trim().is_empty() || !line.thinking.trim().is_empty() || !line.tools.is_empty() {
                 self.static_lines.push(line);
             }
         }
@@ -373,16 +347,10 @@ impl App {
 
     fn handle_input(&mut self, event: Event, area: Rect) {
         let transcript_area = self.transcript_area(area);
-        match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key, transcript_area),
-            Event::Mouse(mouse) => {
-                if mouse.kind == MouseEventKind::ScrollUp {
-                    self.scroll_history(1, transcript_area);
-                } else if mouse.kind == MouseEventKind::ScrollDown {
-                    self.scroll_history(-1, transcript_area);
-                }
+        if let Event::Key(key) = event {
+            if key.kind == KeyEventKind::Press {
+                self.handle_key(key, transcript_area);
             }
-            _ => {}
         }
     }
 
@@ -402,9 +370,12 @@ impl App {
                 KeyCode::Enter => {
                     if let Some(item) = self.current_menu_items().get(self.composer.menu_index).cloned() {
                         if self.composer.open_group.is_none()
-                            && self.command_groups.iter().any(|(name, _)| name == &item.value.trim_start_matches('/'))
+                            && self.command_groups.iter().any(|(name, _)| {
+                                command_group_id(name) == command_group_id(&item.value)
+                            })
                         {
-                            self.composer.open_group = Some(item.value.trim_start_matches('/').to_string());
+                            self.composer.open_group =
+                                Some(command_group_id(&item.value).to_string());
                             self.composer.menu_index = 0;
                             return;
                         }
@@ -475,10 +446,19 @@ impl App {
             KeyCode::Down if !self.composer.menu_open => {
                 self.scroll_history(-1, transcript_area);
             }
-            KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) && ch == 'y' => {
+            KeyCode::Char(ch)
+                if key.modifiers.contains(KeyModifiers::CONTROL) && ch == 'y' =>
+            {
                 self.copy_last_reply();
             }
-            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::SUPER) => {
+                self.copy_last_reply();
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
+            {
                 self.composer.textarea.insert_str(&ch.to_string());
                 self.composer.on_text_changed();
             }
@@ -579,6 +559,7 @@ impl App {
         self.static_lines.push(ChatLine {
             role: "user".to_string(),
             text: text.clone(),
+            thinking: String::new(),
             tools: Vec::new(),
             duration_ms: None,
         });
@@ -593,6 +574,7 @@ impl App {
         self.static_lines.push(ChatLine {
             role: "assistant".to_string(),
             text,
+            thinking: String::new(),
             tools: Vec::new(),
             duration_ms: None,
         });
@@ -624,6 +606,7 @@ impl App {
             .map(|turn| ChatLine {
                 role: turn.role,
                 text: turn.content,
+                thinking: String::new(),
                 tools: Vec::new(),
                 duration_ms: None,
             })
@@ -690,8 +673,8 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        self.menu_groups_raw = vec![("/skills".to_string(), skill_commands.clone())];
-        self.command_groups = vec![("/skills".to_string(), skill_commands)];
+        self.menu_groups_raw = vec![("skills".to_string(), skill_commands.clone())];
+        self.command_groups = vec![("skills".to_string(), skill_commands)];
     }
 
     fn current_menu_items(&self) -> Vec<SlashCommand> {
@@ -766,14 +749,16 @@ impl App {
     fn waiting_for_reply(&self) -> bool {
         (self.pending || self.streaming_flag)
             && self.streaming.as_ref().is_none_or(|line| {
-                line.text.trim().is_empty() && line.tools.is_empty()
+                line.text.trim().is_empty()
+                    && line.thinking.trim().is_empty()
+                    && line.tools.is_empty()
             })
     }
 
     fn sync_streaming_markdown(&mut self, width: u16) {
         if let Some(line) = self.streaming.as_ref() {
             if line.role == "assistant" {
-                self.streaming_md.sync(&line.text, width);
+                self.streaming_md.sync(&line.text, assistant_markdown_width(width));
             }
         }
     }
@@ -783,6 +768,7 @@ impl App {
     }
 
     fn layout_chunks(&self, area: Rect) -> Vec<Rect> {
+        let menu_items = self.current_menu_items();
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -790,8 +776,9 @@ impl App {
                 Constraint::Length(if self.notice.is_some() { 1 } else { 0 }),
                 Constraint::Length(if self.history_scroll > 0 { 1 } else { 0 }),
                 Constraint::Length(if self.error.is_some() { 1 } else { 0 }),
-                Constraint::Length(self.composer_height(area.width)),
-                Constraint::Length(1),
+                Constraint::Length(menu_height(&self.composer, &menu_items)),
+                Constraint::Length(STATUS_HEIGHT),
+                Constraint::Length(self.input_height(area.width)),
             ])
             .split(area)
             .to_vec()
@@ -806,7 +793,6 @@ impl App {
             waiting: self.waiting_for_reply(),
             banner: &self.banner,
             show_welcome,
-            show_banner: show_welcome && !self.banner.is_empty(),
             connecting: matches!(self.connection, ConnectionState::Connecting),
             active_agent: &self.active_agent,
             fallback: self
@@ -839,7 +825,6 @@ impl App {
             waiting: self.waiting_for_reply(),
             banner: &self.banner,
             show_welcome,
-            show_banner: show_welcome && !self.banner.is_empty(),
             connecting: matches!(self.connection, ConnectionState::Connecting),
             active_agent: &self.active_agent,
             fallback: self
@@ -883,34 +868,13 @@ impl App {
         if copy_to_clipboard(&text) {
             self.notice = Some("Copied last reply".into());
         } else {
-            self.notice = Some("Copy failed — select text with mouse instead".into());
+            self.notice = Some("Copy failed".into());
         }
     }
 }
 
-fn display_model(model: &str) -> String {
-    model
-        .rsplit('/')
-        .next()
-        .unwrap_or(model)
-        .to_string()
-}
-
 fn copy_to_clipboard(text: &str) -> bool {
-    if cfg!(target_os = "macos") {
-        std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut() {
-                    stdin.write_all(text.as_bytes())?;
-                }
-                child.wait()?;
-                Ok(())
-            })
-            .is_ok()
-    } else {
-        false
-    }
+    arboard::Clipboard::new()
+        .and_then(|mut clip| clip.set_text(text.to_owned()))
+        .is_ok()
 }

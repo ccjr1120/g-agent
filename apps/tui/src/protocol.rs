@@ -42,6 +42,7 @@ pub enum ServerMessage {
     },
     Start,
     SystemPrompt { text: String },
+    ThinkingDelta { text: String },
     Delta { text: String },
     ToolCall { name: String, args: String },
     ToolResult { name: String, output: String },

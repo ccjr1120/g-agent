@@ -33,6 +33,7 @@ export type AgentRunOptions = {
 
 export type AgentStreamEvent =
   | { type: "system_prompt"; text: string }
+  | { type: "thinking_delta"; text: string }
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "tool_result"; name: string; output: string }
@@ -179,6 +180,7 @@ async function runOpenAI(
       choices?: Array<{
         message?: {
           content?: string | null;
+          reasoning_content?: string | null;
           tool_calls?: ToolCallMessage[];
         };
       }>;
@@ -219,9 +221,14 @@ async function runOpenAI(
       continue;
     }
 
+    const reasoning = message.reasoning_content?.trim();
+    if (reasoning) {
+      await streamText(reasoning, onEvent, "thinking_delta");
+    }
+
     const text = message.content?.trim();
     if (text) {
-      await streamText(text, onEvent);
+      await streamText(text, onEvent, "delta");
     }
     return;
   }
@@ -243,9 +250,10 @@ async function executeNamedTool(
 async function streamText(
   text: string,
   onEvent: (event: AgentStreamEvent) => void,
+  eventType: "delta" | "thinking_delta" = "delta",
 ): Promise<void> {
   for (const char of text) {
-    onEvent({ type: "delta", text: char });
+    onEvent({ type: eventType, text: char });
     await sleep(4);
   }
 }
