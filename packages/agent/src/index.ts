@@ -8,6 +8,7 @@ import { McpManager } from "./mcp/index.js";
 
 export {
   buildAgentSystemPrompt,
+  clearGlobalSkillsCache,
   loadAgents,
   resolveActiveAgent,
   type AgentConfig,

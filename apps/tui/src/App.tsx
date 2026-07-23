@@ -103,6 +103,7 @@ export function App({
     undoLastTurn,
     resetConversation,
     switchAgent,
+    refreshAgents,
     runSkill,
     listMcp,
     dumpLog,
@@ -203,14 +204,18 @@ export function App({
         return;
       }
       if (text === "/agent") {
-        if (agents.length === 0) {
-          addLocalLine("No agents loaded.");
-        } else {
-          const lines = agents
-            .map((a) => `${a.active ? "* " : "  "}${a.name}${a.description ? ` — ${a.description}` : ""}`)
-            .join("\n");
-          addLocalLine(lines);
-        }
+        refreshAgents().then((agentList) => {
+          if (agentList.length === 0) {
+            addLocalLine("No agents loaded.");
+          } else {
+            const lines = agentList
+              .map((a) => `${a.active ? "* " : "  "}${a.name}${a.description ? ` — ${a.description}` : ""}`)
+              .join("\n");
+            addLocalLine(lines);
+          }
+        }).catch((err: unknown) => {
+          addLocalLine(`Failed to refresh agents: ${err instanceof Error ? err.message : String(err)}`);
+        });
         return;
       }
       if (text.startsWith("/agent ")) {
@@ -275,7 +280,7 @@ export function App({
       }
       sendMessage(text);
     },
-    [exit, resetConversation, switchAgent, runSkill, listMcp, skills, mcpServers, agents, sendMessage, addLocalLine, dumpLog, resumeSession, savedSessions, activeAgent, staticLines, streamingLine],
+    [exit, resetConversation, switchAgent, refreshAgents, runSkill, listMcp, skills, mcpServers, agents, sendMessage, addLocalLine, dumpLog, resumeSession, savedSessions, activeAgent, staticLines, streamingLine],
   );
 
   const handleUndo = useCallback(() => {

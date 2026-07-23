@@ -47,7 +47,12 @@ function matchArrow(chunk: string, index: number): { direction: ArrowDirection; 
  * sequences. Bursts are treated as scroll; isolated arrows are forwarded to
  * Ink for transcript scrolling.
  */
-export function createScrollAwareStdin(stdin: NodeJS.ReadStream): NodeJS.ReadStream {
+export type ScrollAwareStdin = {
+  stream: NodeJS.ReadStream;
+  dispose: () => void;
+};
+
+export function createScrollAwareStdin(stdin: NodeJS.ReadStream): ScrollAwareStdin {
   const filtered = new PassThrough() as PassThrough & NodeJS.ReadStream;
 
   Object.defineProperties(filtered, {
@@ -121,7 +126,7 @@ export function createScrollAwareStdin(stdin: NodeJS.ReadStream): NodeJS.ReadStr
     schedulePendingFlush();
   };
 
-  stdin.on("data", (chunk: Buffer | string) => {
+  const onData = (chunk: Buffer | string) => {
     const input = chunk.toString();
     let cursor = 0;
     let output = "";
@@ -145,7 +150,17 @@ export function createScrollAwareStdin(stdin: NodeJS.ReadStream): NodeJS.ReadStr
     if (output) {
       filtered.write(output);
     }
-  });
+  };
 
-  return filtered;
+  stdin.on("data", onData);
+
+  const dispose = () => {
+    clearPending();
+    stdin.off("data", onData);
+    stdin.pause();
+    filtered.end();
+    filtered.destroy();
+  };
+
+  return { stream: filtered, dispose };
 }

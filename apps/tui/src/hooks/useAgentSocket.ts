@@ -238,6 +238,7 @@ export function useAgentSocket(serverUrl: string) {
   const resumingRef = useRef(false);
   const pendingResumeRef = useRef<SavedSession | null>(null);
   const eventLoopLagRef = useRef(createEventLoopLagTracker());
+  const refreshAgentsResolverRef = useRef<((agents: AgentInfo[]) => void) | null>(null);
 
   const refreshSavedSessions = useCallback(async () => {
     const sessions = await listSessions();
@@ -458,6 +459,10 @@ export function useAgentSocket(serverUrl: string) {
           setConnection("connected");
           break;
         case "agents": {
+          if (refreshAgentsResolverRef.current) {
+            refreshAgentsResolverRef.current(message.agents);
+            refreshAgentsResolverRef.current = null;
+          }
           setAgents(message.agents);
           const newActive = message.active;
           // The "agents" message arrives both on socket open and after a
@@ -614,6 +619,7 @@ export function useAgentSocket(serverUrl: string) {
     return () => {
       cancelPendingStreamRender();
       eventLoopLagRef.current.stop();
+      refreshAgentsResolverRef.current = null;
       ws.close();
       socketRef.current = null;
     };
@@ -768,6 +774,29 @@ export function useAgentSocket(serverUrl: string) {
     ws.send(
       JSON.stringify({ type: "agent", ...(name ? { name } : {}) } satisfies ClientMessage),
     );
+  }, []);
+
+  const refreshAgents = useCallback((): Promise<AgentInfo[]> => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("Not connected"));
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (refreshAgentsResolverRef.current) {
+          refreshAgentsResolverRef.current = null;
+          reject(new Error("Timed out refreshing agents"));
+        }
+      }, 5000);
+
+      refreshAgentsResolverRef.current = (agents) => {
+        clearTimeout(timeout);
+        resolve(agents);
+      };
+
+      ws.send(JSON.stringify({ type: "agent" } satisfies ClientMessage));
+    });
   }, []);
 
   const runSkill = useCallback((name: string) => {
@@ -925,6 +954,7 @@ export function useAgentSocket(serverUrl: string) {
     resumeSession,
     refreshSavedSessions,
     switchAgent,
+    refreshAgents,
     runSkill,
     listMcp,
     dumpLog,

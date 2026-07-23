@@ -423,6 +423,10 @@ async function loadAgentsFromDir(
   return agents;
 }
 
+export function clearGlobalSkillsCache(): void {
+  globalSkillsCache.clear();
+}
+
 export async function loadAgents(config?: GAgentConfig): Promise<LoadedAgents> {
   const builtinPath = resolveBuiltinAgentsDir();
   const userPath = resolveAgentsDir();

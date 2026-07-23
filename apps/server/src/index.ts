@@ -1,7 +1,9 @@
 import type { ServerWebSocket } from "bun";
+import { watch } from "node:fs";
 import {
   buildAgentSystemPrompt,
   builtinTools,
+  clearGlobalSkillsCache,
   loadAgents,
   McpManager,
   resolveActiveAgent,
@@ -28,7 +30,7 @@ import { parseClientMessage, type McpServerCatalogEntry, type ServerMessage } fr
 import type { McpServerConfig } from "@g-agent/config";
 
 const { config, path: configPath } = await loadConfig();
-const loadedAgents = await loadAgents(config);
+let loadedAgents = await loadAgents(config);
 const { agent: initialAgent, fallback } = resolveActiveAgent(
   config.agent,
   loadedAgents,
@@ -237,6 +239,88 @@ function modelLabel(provider: ResolvedProvider | null): string {
   return provider ? formatProviderRef(provider) : "echo";
 }
 
+const clients = new Set<ServerWebSocket<WsData>>();
+
+async function reloadAgentsCatalog(): Promise<LoadedAgents> {
+  const { config: freshConfig } = await loadConfig();
+  Object.assign(config, freshConfig);
+  clearGlobalSkillsCache();
+  loadedAgents = await loadAgents(config);
+  ensureAgentsDirectoryWatch();
+  return loadedAgents;
+}
+
+function syncActiveAgentConfig(ws: ServerWebSocket<WsData>): AgentConfig {
+  const refreshed = loadedAgents.agents.get(ws.data.activeAgent.name);
+  if (refreshed) {
+    ws.data.activeAgent = refreshed;
+    ws.data.systemPrompt = buildAgentSystemPrompt(refreshed, loadedAgents);
+    return refreshed;
+  }
+
+  const { agent } = resolveActiveAgent(config.agent, loadedAgents);
+  ws.data.activeAgent = agent;
+  ws.data.systemPrompt = buildAgentSystemPrompt(agent, loadedAgents);
+  ws.data.effectiveProvider = resolveProvider(agent);
+  return agent;
+}
+
+function sendAgentsCatalog(ws: ServerWebSocket<WsData>): void {
+  send(ws, {
+    type: "agents",
+    agents: agentCatalog(loadedAgents, ws.data.activeAgent),
+    active: ws.data.activeAgent.name,
+    model: modelLabel(ws.data.effectiveProvider),
+  });
+}
+
+function broadcastAgentsCatalog(): void {
+  for (const ws of clients) {
+    syncActiveAgentConfig(ws);
+    sendAgentsCatalog(ws);
+  }
+}
+
+function watchAgentsDirectory(): void {
+  const userPath = loadedAgents.userPath;
+  if (!userPath) {
+    return;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  watch(userPath, { recursive: true }, () => {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+    timer = setTimeout(() => {
+      timer = null;
+      void reloadAgentsCatalog()
+        .then(() => {
+          broadcastAgentsCatalog();
+        })
+        .catch((error) => {
+          console.warn(
+            "Failed to reload agents after directory change:",
+            error instanceof Error ? error.message : error,
+          );
+        });
+    }, 300);
+  });
+}
+
+let agentsDirectoryWatchStarted = false;
+
+function ensureAgentsDirectoryWatch(): void {
+  if (agentsDirectoryWatchStarted) {
+    return;
+  }
+  if (!loadedAgents.userPath) {
+    return;
+  }
+  agentsDirectoryWatchStarted = true;
+  watchAgentsDirectory();
+}
+
 /**
  * Build the prompt that injects a skill's SKILL.md body into a conversation
  * turn, so the model follows the skill's instructions on demand. `body` is
@@ -261,9 +345,9 @@ function buildSkillPrompt(skill: Skill): string {
 
 /** Re-read config.json so reconnecting clients pick up the last-used agent. */
 async function loadStartupAgent(): Promise<ResolvedAgent & { runtimeConfig: GAgentConfig }> {
-  const { config: runtimeConfig } = await loadConfig();
-  const resolved = resolveActiveAgent(runtimeConfig.agent, loadedAgents);
-  return { ...resolved, runtimeConfig };
+  await reloadAgentsCatalog();
+  const resolved = resolveActiveAgent(config.agent, loadedAgents);
+  return { ...resolved, runtimeConfig: config };
 }
 
 async function applyAgentSwitch(
@@ -416,6 +500,7 @@ Bun.serve<WsData>({
   },
   websocket: {
     open(ws) {
+      clients.add(ws);
       void (async () => {
         const { agent, fallback, runtimeConfig } = await loadStartupAgent();
         ws.data.activeAgent = agent;
@@ -448,6 +533,7 @@ Bun.serve<WsData>({
       })();
     },
     close(ws) {
+      clients.delete(ws);
       void ws.data.mcpManager.close();
     },
     message(ws, raw) {
@@ -474,6 +560,7 @@ Bun.serve<WsData>({
         }
 
         void (async () => {
+          await reloadAgentsCatalog();
           const targetName = message.agent.trim();
           const target = loadedAgents.agents.get(targetName);
           if (!target) {
@@ -498,36 +585,31 @@ Bun.serve<WsData>({
       }
 
       if (message.type === "agent") {
-        if (!message.name) {
-          send(ws, {
-            type: "agents",
-            agents: agentCatalog(loadedAgents, ws.data.activeAgent),
-            active: ws.data.activeAgent.name,
-            model: modelLabel(ws.data.effectiveProvider),
-          });
-          return;
-        }
+        void (async () => {
+          await reloadAgentsCatalog();
+          syncActiveAgentConfig(ws);
 
-        const targetName = message.name.trim();
-        const target = loadedAgents.agents.get(targetName);
-        if (!target) {
-          send(ws, { type: "error", message: `Unknown agent "${targetName}"` });
-          return;
-        }
+          if (!message.name) {
+            sendAgentsCatalog(ws);
+            return;
+          }
 
-        // Switching to the currently active agent is a no-op apart from
-        // re-sending the catalog so the client stays in sync.
-        if (target.name === ws.data.activeAgent.name) {
-          send(ws, {
-            type: "agents",
-            agents: agentCatalog(loadedAgents, ws.data.activeAgent),
-            active: ws.data.activeAgent.name,
-            model: modelLabel(ws.data.effectiveProvider),
-          });
-          return;
-        }
+          const targetName = message.name.trim();
+          const target = loadedAgents.agents.get(targetName);
+          if (!target) {
+            send(ws, { type: "error", message: `Unknown agent "${targetName}"` });
+            return;
+          }
 
-        void applyAgentSwitch(ws, target, { clearHistory: true });
+          // Switching to the currently active agent is a no-op apart from
+          // re-sending the catalog so the client stays in sync.
+          if (target.name === ws.data.activeAgent.name) {
+            sendAgentsCatalog(ws);
+            return;
+          }
+
+          await applyAgentSwitch(ws, target, { clearHistory: true });
+        })();
         return;
       }
 
@@ -567,6 +649,8 @@ Bun.serve<WsData>({
     },
   },
 });
+
+ensureAgentsDirectoryWatch();
 
 const startupProvider = resolveProvider(initialAgent);
 const providerLabel = startupProvider ? formatProviderRef(startupProvider) : "echo";

@@ -53,11 +53,15 @@ enterFullscreen();
 fullscreen = true;
 process.once("exit", leaveFullscreen);
 
+const scrollAwareStdin = createScrollAwareStdin(process.stdin);
+
 try {
-  const stdin = createScrollAwareStdin(process.stdin);
-  const instance = render(<App serverUrl={serverUrl} banner={banner} />, { stdin });
+  const instance = render(<App serverUrl={serverUrl} banner={banner} />, {
+    stdin: scrollAwareStdin.stream,
+  });
   await instance.waitUntilExit();
 } finally {
+  scrollAwareStdin.dispose();
   process.off("exit", leaveFullscreen);
   leaveFullscreen();
 }
