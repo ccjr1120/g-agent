@@ -20,47 +20,31 @@ export function joinPromptSections(...sections: string[]): string {
     .join("\n\n");
 }
 
-export function formatBuiltinSkillsSection(skills: Skill[]): string {
-  const active = skills.filter((skill) => !skill.disableModelInvocation);
-  if (active.length === 0) return "";
-
-  const sections = [
-    "## Built-in skills",
-    "",
-    "These skills are included in your system prompt. When a task matches one, **prioritize it** and follow its instructions directly — do not improvise with raw tools.",
-    "",
-  ];
-
-  for (const skill of active) {
-    const header = skill.description
-      ? `### ${skill.name}\n\n${skill.description}`
-      : `### ${skill.name}`;
-
-    sections.push(header, "", skill.body, "");
-  }
-
-  return sections.join("\n").trim();
-}
-
 export function formatSkillsSection(
   skills: Skill[],
   title: string,
   skillsPath: string | null,
+  layerDescription?: string,
 ): string {
-  if (skills.length === 0) return "";
+  const active = skills.filter((skill) => !skill.disableModelInvocation);
+  if (active.length === 0) return "";
 
   const lines = [`## ${title}`, ""];
 
+  if (layerDescription) {
+    lines.push(layerDescription, "");
+  }
+
   if (skillsPath) {
-    lines.push(`Skills are loaded from: ${skillsPath}`, "");
+    lines.push(`Directory: \`${skillsPath}\``, "");
   }
 
   lines.push(
-    "When a skill is relevant, use the `read` tool to load its SKILL.md before following its instructions.",
+    "Progressive loading: use `read` on the path below when this skill matches the task.",
     "",
   );
 
-  for (const skill of skills) {
+  for (const skill of active) {
     lines.push(
       `- **${skill.name}** — ${skill.description ? skill.description + " " : ""}(instructions: \`${skill.path}\`)`,
     );

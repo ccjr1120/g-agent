@@ -5,7 +5,6 @@ import { join } from "node:path";
 import type { AgentSkillsConfig, GAgentConfig, SkillsConfig } from "@g-agent/config";
 import { type Skill, loadSkillsFromDir } from "../skills/index.js";
 import {
-  formatBuiltinSkillsSection,
   formatSkillsSection,
   joinPromptSections,
   parsePromptFile,
@@ -81,6 +80,10 @@ function agentsSkillsDir(): string {
   return join(homedir(), ".agents", "skills");
 }
 
+function defaultGlobalSkillsDir(): string {
+  return join(homedir(), ".agent", "skills");
+}
+
 function globalSkillsDirCandidates(options: GlobalSkillsLoadOptions): string[] {
   const home = homedir();
   let candidates: string[];
@@ -95,6 +98,7 @@ function globalSkillsDirCandidates(options: GlobalSkillsLoadOptions): string[] {
     if (process.env.G_AGENT_HOME) {
       candidates.push(join(process.env.G_AGENT_HOME, "skills"));
     }
+    candidates.push(defaultGlobalSkillsDir());
     candidates.push(agentsSkillsDir());
     candidates.push(join(home, ".config", "g-agent", "skills"));
     candidates.push(join(home, ".local", "share", "g-agent", "skills"));
@@ -519,8 +523,23 @@ export function buildAgentSystemPrompt(
 
   return joinPromptSections(
     body,
-    formatBuiltinSkillsSection(builtinSkills),
-    formatSkillsSection(globalSkills, "Global skills", agent.globalSkillsPath),
-    formatSkillsSection(selfSkills, "Self skills", agent.selfSkillsPath),
+    formatSkillsSection(
+      builtinSkills,
+      "Built-in skills",
+      agent.builtinSkillsPath,
+      "Shipped with this agent (g-agent package or this agent's `builtin-skills/`). Always loaded for this agent. **Lowest precedence** on name conflicts. To add/remove: use **agent-manager** (not skill-manager).",
+    ),
+    formatSkillsSection(
+      globalSkills,
+      "Global skills",
+      agent.globalSkillsPath,
+      "Shared across agents from user config (default `~/.agent/skills/`; unless this agent sets `skills.global: false`). **Middle precedence** on name conflicts. To add/remove: use **skill-manager**.",
+    ),
+    formatSkillsSection(
+      selfSkills,
+      "Self skills (agent-exclusive)",
+      agent.selfSkillsPath,
+      "Only for the **current agent** — not visible to other agents. **Highest precedence** on name conflicts. To add/remove: use **skill-manager**.",
+    ),
   );
 }

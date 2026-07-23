@@ -1,21 +1,88 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const DEFAULT_CONFIG_DIR = join(homedir(), ".config", "g-agent");
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const memoryPath = join(scriptDir, "..", "memory.md");
+const legacyMemoryPath = join(scriptDir, "..", "memory.md");
 
 function usage(exitCode = 0) {
   const text = `Usage:
+  memory.mjs paths [--json]
   memory.mjs list [--json]
   memory.mjs search <query> [--json]
   memory.mjs get <id> [--json]
   memory.mjs add <content...> [--date YYYY-MM-DD] [--json]
   memory.mjs update <id> <content...> [--date YYYY-MM-DD] [--json]
-  memory.mjs delete <id> [--json]`;
+  memory.mjs delete <id> [--json]
+
+Notes:
+  - memories are stored per agent under ~/.config/g-agent/agents/<agent>/memory.md
+  - override with G_AGENT_MEMORY_PATH`;
   console.log(text);
   process.exit(exitCode);
+}
+
+function expandHome(path) {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  return path;
+}
+
+function configCandidates() {
+  const home = homedir();
+  const candidates = [];
+  if (process.env.G_AGENT_CONFIG) candidates.push(process.env.G_AGENT_CONFIG);
+  if (process.env.G_AGENT_HOME) candidates.push(join(process.env.G_AGENT_HOME, "config.json"));
+  candidates.push(join(home, ".config", "g-agent", "config.json"));
+  candidates.push(join(home, ".local", "share", "g-agent", "config.json"));
+  return [...new Set(candidates)];
+}
+
+function agentsBaseDir() {
+  if (process.env.G_AGENT_HOME) return join(process.env.G_AGENT_HOME, "agents");
+  return join(DEFAULT_CONFIG_DIR, "agents");
+}
+
+async function resolveActiveAgent() {
+  if (process.env.G_AGENT_AGENT?.trim()) {
+    return process.env.G_AGENT_AGENT.trim();
+  }
+
+  for (const path of configCandidates()) {
+    if (!existsSync(path)) continue;
+    try {
+      const config = JSON.parse(await readFile(path, "utf8"));
+      if (typeof config.agent === "string" && config.agent.trim()) {
+        return config.agent.trim();
+      }
+    } catch {
+      // ignore invalid config
+    }
+  }
+
+  return "default";
+}
+
+async function resolveMemoryPath() {
+  if (process.env.G_AGENT_MEMORY_PATH?.trim()) {
+    return expandHome(process.env.G_AGENT_MEMORY_PATH.trim());
+  }
+
+  const agent = await resolveActiveAgent();
+  return join(agentsBaseDir(), agent, "memory.md");
+}
+
+async function ensureMemoryPath() {
+  const memoryPath = await resolveMemoryPath();
+  if (!existsSync(memoryPath) && existsSync(legacyMemoryPath)) {
+    await mkdir(dirname(memoryPath), { recursive: true });
+    await copyFile(legacyMemoryPath, memoryPath);
+  }
+  return memoryPath;
 }
 
 function today() {
@@ -50,7 +117,7 @@ function parseOptions(args) {
   return { values, options };
 }
 
-async function loadEntries() {
+async function loadEntries(memoryPath) {
   let content = "";
   try {
     content = await readFile(memoryPath, "utf8");
@@ -75,7 +142,7 @@ async function loadEntries() {
   return entries;
 }
 
-async function saveEntries(entries) {
+async function saveEntries(memoryPath, entries) {
   await mkdir(dirname(memoryPath), { recursive: true });
   const content = entries
     .map((entry) => `- [${entry.date}] ${entry.content}`)
@@ -113,6 +180,27 @@ function printResult(result, json) {
   console.log(result.message);
 }
 
+async function cmdPaths(options) {
+  const agent = await resolveActiveAgent();
+  const memoryPath = await resolveMemoryPath();
+  const result = {
+    agent,
+    memoryPath,
+    agentsBaseDir: agentsBaseDir(),
+    legacySkillPath: legacyMemoryPath,
+    legacyExists: existsSync(legacyMemoryPath),
+  };
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log(`agent: ${result.agent}`);
+  console.log(`memory: ${result.memoryPath}`);
+  console.log(`agents base: ${result.agentsBaseDir}`);
+}
+
 async function main() {
   const [command, ...rawArgs] = process.argv.slice(2);
   if (!command || command === "-h" || command === "--help") {
@@ -120,7 +208,14 @@ async function main() {
   }
 
   const { values, options } = parseOptions(rawArgs);
-  const entries = await loadEntries();
+
+  if (command === "paths") {
+    await cmdPaths(options);
+    return;
+  }
+
+  const memoryPath = await ensureMemoryPath();
+  const entries = await loadEntries(memoryPath);
 
   if (command === "list") {
     printEntries(entries, options.json);
@@ -156,7 +251,7 @@ async function main() {
       content,
     };
     entries.push(entry);
-    await saveEntries(entries);
+    await saveEntries(memoryPath, entries);
     printResult({ ok: true, entry, message: `Added #${entry.id}: ${entry.content}` }, options.json);
     return;
   }
@@ -170,7 +265,7 @@ async function main() {
     const entry = entries[id - 1];
     entry.date = options.date ?? entry.date;
     entry.content = content;
-    await saveEntries(entries);
+    await saveEntries(memoryPath, entries);
     printResult({ ok: true, entry, message: `Updated #${entry.id}: ${entry.content}` }, options.json);
     return;
   }
@@ -181,7 +276,7 @@ async function main() {
     entries.forEach((entry, index) => {
       entry.id = index + 1;
     });
-    await saveEntries(entries);
+    await saveEntries(memoryPath, entries);
     printResult({ ok: true, entry: deleted, message: `Deleted #${id}: ${deleted.content}` }, options.json);
     return;
   }

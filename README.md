@@ -73,10 +73,18 @@ g-agent server restart
 
 agent 目录从以下路径查找：`$G_AGENT_AGENTS_DIR` → `$G_AGENT_HOME/agents` → `~/.config/g-agent/agents` → `~/.local/share/g-agent/agents`。同名时用户目录下的 agent 覆盖内置同名 agent。
 
-每个 agent 会加载三类技能：
+每个 agent 会加载三类技能（均为**渐进式加载**：系统提示词仅列 name、description 与路径，匹配时用 `read` 加载 `SKILL.md` 全文）：
+
+| 层级 | 作用范围 | 典型路径 | 管理入口 |
+|------|---------|---------|---------|
+| **built-in（内置）** | 随 agent 分发，该 agent 激活时始终可用 | 包内 `builtin-skills/`，或 `~/.config/g-agent/agents/<name>/builtin-skills/` | agent-manager |
+| **global（全局）** | 所有 agent 共享（可被单个 agent 关闭） | `~/.agent/skills/` | skill-manager |
+| **self（专属）** | 仅当前 agent，其他 agent 不可见 | `~/.config/g-agent/agents/<name>/skills/` | skill-manager |
+
+同名时优先级：**self > global > built-in**。
 
 - built-in skills：`<agent>/builtin-skills/<skill>/SKILL.md`
-- global skills：`$G_AGENT_GLOBAL_SKILLS_DIR` → `$G_AGENT_HOME/skills` → `~/.agents/skills` → `~/.config/g-agent/skills` → `~/.local/share/g-agent/skills`（按顺序取第一个存在的目录）
+- global skills：`$G_AGENT_GLOBAL_SKILLS_DIR` → `$G_AGENT_HOME/skills` → `~/.agent/skills` → `~/.agents/skills` → `~/.config/g-agent/skills` → `~/.local/share/g-agent/skills`（按顺序取第一个存在的目录；新建 global skill 默认写入 `~/.agent/skills`）
 
   可在 `config.json` 中通过 `skills` 控制全局技能发现：
 
@@ -110,7 +118,7 @@ agent 目录从以下路径查找：`$G_AGENT_AGENTS_DIR` → `$G_AGENT_HOME/age
 
 同名技能按 `self > global > built-in` 的优先级覆盖。启动时如果发现同名冲突，会在 server 日志中输出被选中的来源和所有候选路径。
 
-内置 `default` agent 已含 `memory` 技能与基础 system prompt，无需配置即可用。
+内置 `default` agent 已含 `memory-manager`、`skill-manager`、`agent-manager`、`mcp-manager` 等内置技能与基础 system prompt，无需配置即可用。
 
 #### 运行时切换
 
@@ -142,9 +150,9 @@ cargo test -p g-agent-tui
 | 文件 | 作用 |
 |------|------|
 | `system.md` | system prompt 主体（原则、工具说明等） |
-| `builtin-skills/<skill>/SKILL.md` | 内置技能；运行时正文由 `formatBuiltinSkillsSection` 自动嵌入系统提示词 |
+| `builtin-skills/<skill>/SKILL.md` | 内置技能；运行时渐进式加载（系统提示词仅列 name、description、路径，匹配时用 `read` 加载全文） |
 
-**新增或修改 `builtin-skills` 时，须同步更新 `system.md`**——例如 Skills first 原则、能力边界、与新 skill 相关的触发说明。`SKILL.md` 正文会自动拼入提示词，但 `system.md` 中的原则性描述需人工维护。
+**新增或修改 `builtin-skills` 时，须同步更新 `system.md`**——例如 Skills first 原则、能力边界、与新 skill 相关的触发说明。`SKILL.md` 正文通过渐进式加载按需读取，但 `system.md` 中的原则性描述需人工维护。
 
 ## 卸载
 

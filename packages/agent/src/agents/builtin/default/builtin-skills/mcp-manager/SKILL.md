@@ -3,6 +3,18 @@ name: mcp-manager
 description: MCP 配置管理：列出、添加、修改、删除 MCP server。当用户要求「加/删/改 MCP」「配置 MCP server」「管理 MCP」时启用。
 ---
 
+## 本 skill 的定位
+
+| 项 | 说明 |
+|----|------|
+| **类型** | 内置 skill（builtin），随内置 `default` agent 分发 |
+| **skill 文件位置** | g-agent 包内 `builtin/default/builtin-skills/mcp-manager/`；**安装时不复制**到 `~/.config/g-agent/` |
+| **LLM 如何获知** | 系统提示词 `## Built-in skills` 中仅列 name、description 与路径；任务匹配时用 `read` 加载本 SKILL.md |
+| **脚本路径** | `{{skill_dir}}/scripts/mcp.mjs`（加载时已替换为磁盘实际路径） |
+| **本 skill 写入的数据** | `~/.config/g-agent/config.json` 与 `~/.config/g-agent/agents/<name>/agent.json` 的 `mcpServers` 字段 |
+
+---
+
 管理 g-agent 的 MCP server 配置。配置分两层，运行时按名称合并（agent 覆盖 global）：
 
 | 层级 | 写入位置 | 作用范围 |

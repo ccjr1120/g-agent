@@ -6,3 +6,4 @@ packages/*/dist/
 package-lock.json
 *.log
 .DS_Store
+packages/agent/src/agents/builtin/**/memory.md

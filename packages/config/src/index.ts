@@ -36,7 +36,7 @@ type RawProviderConfig = Omit<ProviderConfig, "models"> & {
 };
 
 export type SkillsConfig = {
-  /** When false, exclude ~/.agents/skills from global skill discovery. Default: true. */
+  /** When false, exclude ~/.agents/skills (Cursor) from global skill discovery. Default: true. */
   loadAgentsSkills?: boolean;
   /** Paths to skip during global skill auto-discovery. Supports ~ for home. */
   skipPaths?: string[];
