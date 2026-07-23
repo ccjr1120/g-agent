@@ -1,5 +1,9 @@
 # Terminal performance roadmap
 
+> **Note:** The TUI was rewritten in Rust (`apps/tui`, Ratatui + Crossterm). The Ink/React
+> benchmarks and virtual-scroll work below describe the previous TypeScript implementation and
+> remain useful as a feature parity checklist.
+
 This document records follow-up work after the first TUI performance pass.
 The reference implementation is `/Users/ccjr/development/forks/cc-haha`,
 especially its virtual message list, virtual-scroll hook, line-width cache,
@@ -23,10 +27,10 @@ dirty-node renderer, and terminal frame diff.
       Markdown parses, `measureElement` calls, and stdout bytes.
 - [x] Add a long-session PageUp/PageDown and mouse-wheel benchmark.
 
-Run with:
+Run with (legacy TypeScript TUI — removed; re-implement in Rust when needed):
 
 ```bash
-pnpm --filter @g-agent/tui benchmark
+cargo run -p g-agent-tui -- benchmark   # not yet implemented
 ```
 
 Initial targets:
@@ -60,7 +64,7 @@ Initial targets:
 - [x] Add regression coverage for resize, resume, `/new`, undo, and scrolling
       while a response is streaming.
 
-Unit tests live in `apps/tui/src/lib/performance.test.ts`.
+Unit tests live in `apps/tui/src/` (`cargo test -p g-agent-tui`).
 
 ## P3: renderer-level work
 

@@ -2,11 +2,11 @@
 
 无论是 Hermes 还是 Openclaw，对我来说都太重太繁琐，我要的功能没那么复杂，也不太在乎安全，所以有了这个简单简洁版本的。
 
-Monorepo：**pnpm** 管理依赖，**bun** 运行与构建。TUI 位于 `apps/tui`，共享库位于 `packages/`。
+Monorepo：**pnpm** 管理 JS 依赖，**bun** 运行 server；TUI 为 Rust（Ratatui + Crossterm），位于 `apps/tui`。共享协议与 agent 逻辑在 `packages/`。
 
 ## 安装
 
-一行命令（从 GitHub 拉取并安装，自动安装 bun / pnpm）：
+一行命令（从 GitHub 拉取并安装，自动安装 bun / pnpm / Rust）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ccjr1120/g-agent/main/install.sh | bash
@@ -123,11 +123,13 @@ TUI 内：
 
 ## 开发
 
-前置：安装 [bun](https://bun.sh) 与 [pnpm](https://pnpm.io)。
+前置：安装 [bun](https://bun.sh)、[pnpm](https://pnpm.io) 与 [Rust](https://rustup.rs)（含 `cargo`）。
 
 ```bash
 pnpm install
-pnpm dev
+pnpm dev          # 启动 server + Rust TUI
+pnpm dev:tui      # 仅 TUI（server 需已运行或由 TUI 自动拉起）
+cargo test -p g-agent-tui
 ```
 
 终端性能的后续优化计划见
@@ -147,6 +149,9 @@ pnpm dev
 ## 卸载
 
 ```bash
-pnpm unlink --global @g-agent/tui
+cargo uninstall g-agent
+pnpm remove -g @g-agent/tui   # 若曾用旧版 pnpm link 安装
 rm -rf ~/.local/share/g-agent   # 若通过 curl 安装
 ```
+
+若运行 `g-agent` 报 `dist/cli.js` 找不到，说明 PATH 里仍是旧的 pnpm 全局命令。执行 `pnpm remove -g @g-agent/tui`，或确认 `~/.cargo/bin` 在 `~/.local/share/pnpm` 之前。

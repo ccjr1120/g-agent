@@ -45,6 +45,35 @@ require_pnpm() {
   fi
 }
 
+require_rust() {
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "==> Installing Rust..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+  fi
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "Error: Rust/cargo is required. Install from https://rustup.rs" >&2
+    exit 1
+  fi
+}
+
+remove_legacy_pnpm_cli() {
+  if ! command -v pnpm >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if pnpm list -g --depth 0 2>/dev/null | grep -q '@g-agent/tui'; then
+    echo "==> Removing legacy pnpm g-agent CLI..."
+    pnpm remove -g @g-agent/tui >/dev/null 2>&1 || true
+  fi
+
+  local pnpm_bin="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+  rm -f "$pnpm_bin/g-agent"
+}
+
 install_from_dir() {
   local dir="$1"
   echo "==> Installing dependencies..."
@@ -54,15 +83,22 @@ install_from_dir() {
   echo "==> Building G-Agent..."
   pnpm run build
 
-  echo "==> Linking g-agent globally..."
-  ( cd "$dir/apps/tui" && pnpm link --global )
+  remove_legacy_pnpm_cli
+
+  echo "==> Installing g-agent CLI..."
+  cargo install --path "$dir/apps/tui" --locked --force
 
   echo ""
   echo "Done! Run 'g-agent' to start."
-  if ! command -v g-agent >/dev/null 2>&1; then
-    echo "If 'g-agent' is not found, add pnpm to PATH:"
-    echo "  export PNPM_HOME=\"\$HOME/.local/share/pnpm\""
-    echo "  export PATH=\"\$PNPM_HOME:\$PATH\""
+  if command -v g-agent >/dev/null 2>&1; then
+    if [ "$(command -v g-agent)" != "${HOME}/.cargo/bin/g-agent" ]; then
+      echo "Warning: another 'g-agent' appears earlier on PATH than ~/.cargo/bin."
+      echo "  Run: pnpm remove -g @g-agent/tui"
+      echo "  Or ensure ~/.cargo/bin is before pnpm in PATH."
+    fi
+  else
+    echo "If 'g-agent' is not found, add Cargo to PATH:"
+    echo "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
   fi
 }
 
@@ -80,6 +116,7 @@ resolve_repo_root() {
 
 require_bun
 require_pnpm
+require_rust
 
 if repo_root="$(resolve_repo_root)"; then
   echo "==> Installing G-Agent from local checkout..."

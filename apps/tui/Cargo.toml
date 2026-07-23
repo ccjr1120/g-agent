@@ -1,0 +1,29 @@
+[package]
+name = "g-agent-tui"
+version.workspace = true
+edition.workspace = true
+description = "G-Agent terminal UI"
+default-run = "g-agent"
+
+[[bin]]
+name = "g-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+directories = "5"
+futures-util = "0.3.31"
+ratatui = "0.30"
+markdown-ratatui = { package = "codewandler-markdown-ratatui", version = "0.2.1" }
+markdown-stream = { package = "codewandler-markdown-stream", version = "0.2.1" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.26"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+uuid = { version = "1", features = ["v4"] }

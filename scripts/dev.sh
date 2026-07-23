@@ -36,4 +36,4 @@ if ! curl -sf "http://${HOST}:${PORT}/" >/dev/null 2>&1; then
   exit 1
 fi
 
-pnpm --filter @g-agent/tui dev
+cargo run -p g-agent-tui
