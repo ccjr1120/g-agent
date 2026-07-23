@@ -12,6 +12,8 @@ use crate::ui::theme::style;
 
 pub const STATUS_HEIGHT: u16 = 1;
 const RING_WIDTH: u16 = 1;
+/// Left gutter for status bar content (terminal columns; user-facing "1px").
+const STATUS_LEFT_PADDING: u16 = 1;
 const SECTION_GAP: &str = "  ";
 
 const ICON_MODEL: &str = "◇";
@@ -42,7 +44,12 @@ impl Widget for StatusBar<'_> {
         let connection = self.connection_line();
         let connection_width = line_width(&connection) as u16;
         if connection_width > 0 {
-            buf.set_line(area.x, area.y, &connection, connection_width);
+            buf.set_line(
+                area.x.saturating_add(STATUS_LEFT_PADDING),
+                area.y,
+                &connection,
+                connection_width,
+            );
         }
 
         let ring_width = RING_WIDTH.min(area.width);

@@ -378,10 +378,11 @@ async function resolveAgentSkillSources(agentName) {
   const globalEnabled = agentConfig.skills?.global !== false;
 
   let builtinDir;
-  if (userAgentDir && existsSync(join(userAgentDir, "builtin-skills"))) {
-    builtinDir = join(userAgentDir, "builtin-skills");
-  } else if (agentName === "default") {
+  if (agentName === "default") {
+    // Built-in default agent skills always ship with the package.
     builtinDir = join(resolveBundledDefaultAgentDir(), "builtin-skills");
+  } else if (userAgentDir && existsSync(join(userAgentDir, "builtin-skills"))) {
+    builtinDir = join(userAgentDir, "builtin-skills");
   } else if (userAgentDir) {
     builtinDir = join(userAgentDir, "builtin-skills");
   } else {

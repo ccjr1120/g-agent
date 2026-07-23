@@ -365,7 +365,13 @@ async function loadAgentDir(
     readSystemPrompt(dir),
   ]);
 
-  const builtinSkillsPath = join(dir, BUILTIN_SKILLS_DIR);
+  // Built-in `default` is shipped with the package. User overlay under
+  // ~/.config/g-agent/agents/default/ may customize memory, system.md, and
+  // self skills — but never user-side builtin-skills/.
+  const isDefaultUserOverlay = name === DEFAULT_AGENT_NAME && source === "user";
+  const builtinSkillsPath = isDefaultUserOverlay
+    ? join(resolveBuiltinAgentsDir(), DEFAULT_AGENT_NAME, BUILTIN_SKILLS_DIR)
+    : join(dir, BUILTIN_SKILLS_DIR);
   const selfSkillsPath = join(dir, USER_SKILLS_DIR);
   const hasSelfSkills = existsSync(selfSkillsPath);
 

@@ -65,19 +65,22 @@ g-agent server restart
 ~/.config/g-agent/agents/<name>/
   agent.json        # { "description": "..." }
   system.md         # 该 agent 的 system prompt（可选，缺失则用内置 default 的）
-  builtin-skills/   # 该 agent 的内置技能（可选）
+  builtin-skills/   # 该 agent 的内置技能（可选；**内置 default 不支持**）
     <skill>/SKILL.md
   skills/           # 该 agent 的用户技能（可选）
     <skill>/SKILL.md
+  memory.md         # 用户记忆（memory-manager 写入）
 ```
 
 agent 目录从以下路径查找：`$G_AGENT_AGENTS_DIR` → `$G_AGENT_HOME/agents` → `~/.config/g-agent/agents` → `~/.local/share/g-agent/agents`。同名时用户目录下的 agent 覆盖内置同名 agent。
+
+内置 `default` agent 的用户目录（`~/.config/g-agent/agents/default/`）是**叠加层**：可放 `memory.md`、可选 `system.md` 与 `skills/`（专属技能），但**不会**读取其中的 `builtin-skills/`——内置 skill 始终来自 g-agent 包内。自定义 skill（如 weekly-report）请放到 `skills/`（仅 default 可用）或 global 目录（`~/.agent/skills/` 等）。
 
 每个 agent 会加载三类技能（均为**渐进式加载**：系统提示词仅列 name、description 与路径，匹配时用 `read` 加载 `SKILL.md` 全文）：
 
 | 层级 | 作用范围 | 典型路径 | 管理入口 |
 |------|---------|---------|---------|
-| **built-in（内置）** | 随 agent 分发，该 agent 激活时始终可用 | 包内 `builtin-skills/`，或 `~/.config/g-agent/agents/<name>/builtin-skills/` | agent-manager |
+| **built-in（内置）** | 随 agent 分发，该 agent 激活时始终可用 | 包内 `builtin-skills/`；自定义 agent 可用 `~/.config/g-agent/agents/<name>/builtin-skills/`（**不含 default**） | agent-manager |
 | **global（全局）** | 所有 agent 共享（可被单个 agent 关闭） | `~/.agent/skills/` | skill-manager |
 | **self（专属）** | 仅当前 agent，其他 agent 不可见 | `~/.config/g-agent/agents/<name>/skills/` | skill-manager |
 

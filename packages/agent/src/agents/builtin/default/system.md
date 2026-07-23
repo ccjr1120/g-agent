@@ -15,7 +15,7 @@ Skills are listed in three separate sections below. They differ in **scope**, **
 
 | Layer | Scope | Typical location | Manage with | Precedence |
 |-------|-------|------------------|-------------|------------|
-| **Built-in** | Bundled with this agent; always available when this agent is active | g-agent package `builtin/default/builtin-skills/`, or `~/.config/g-agent/agents/<name>/builtin-skills/` for custom agents | **agent-manager** | Lowest — overridden by global or self with the same name |
+| **Built-in** | Bundled with this agent; always available when this agent is active | g-agent package `builtin/default/builtin-skills/`, or `~/.config/g-agent/agents/<name>/builtin-skills/` for **custom** agents (not `default`) | **agent-manager** | Lowest — overridden by global or self with the same name |
 | **Global** | Shared across agents (unless this agent disables global skills) | `~/.agent/skills/` (legacy: `~/.config/g-agent/skills/`, etc.) | **skill-manager** | Middle — overrides built-in; overridden by self |
 | **Self** (agent-exclusive) | Only the **current agent**; other agents never see these | `~/.config/g-agent/agents/<name>/skills/` | **skill-manager** | Highest — wins on name conflicts |
 

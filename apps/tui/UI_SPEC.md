@@ -59,7 +59,7 @@
 
 | 元素 | Helper | 说明 |
 | --- | --- | --- |
-| 连接图标 | `style::status_icon()` | 品牌色，左侧 `●` / `○` |
+| 连接图标 | `style::status_icon()` | 品牌色，左侧 `●` / `○`，距左缘 1 列 |
 | 连接标签 | `style::status_label()` | 灰色，如 `Connected` |
 | Model 图标 | `style::status_label()` | 灰色，`◇` |
 | Agent 图标 | `style::status_label()` | 灰色，`◎` |
