@@ -36,6 +36,16 @@ pub mod style {
         brand().add_modifier(Modifier::BOLD)
     }
 
+    pub fn user_message_queued() -> Style {
+        Style::default().fg(palette::MUTED)
+    }
+
+    pub fn paste_chip() -> Style {
+        Style::default()
+            .fg(palette::MUTED)
+            .add_modifier(Modifier::ITALIC)
+    }
+
     pub fn user_message() -> Style {
         brand()
     }

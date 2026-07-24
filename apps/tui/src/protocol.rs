@@ -15,10 +15,12 @@ pub struct ConversationTurn {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientMessage {
     Chat { message: String },
+    Cancel,
     Reset,
     Agent { #[serde(skip_serializing_if = "Option::is_none")] name: Option<String> },
     Skill { name: String },
     Mcp,
+    McpAuth { name: String },
     Resume { agent: String, history: Vec<ConversationTurn> },
 }
 
@@ -32,6 +34,7 @@ pub enum ServerMessage {
         active: String,
         model: String,
     },
+    #[serde(rename = "agent_fallback")]
     AgentFallback { requested: String, active: String },
     Skills { skills: Vec<SkillInfo> },
     Mcp { servers: Vec<McpServerInfo> },
@@ -41,10 +44,13 @@ pub enum ServerMessage {
         percent: u8,
     },
     Start,
+    #[serde(rename = "system_prompt")]
     SystemPrompt { text: String },
     ThinkingDelta { text: String },
     Delta { text: String },
+    #[serde(rename = "tool_call")]
     ToolCall { name: String, args: String },
+    #[serde(rename = "tool_result")]
     ToolResult { name: String, output: String },
     Done,
     Error { message: String },
@@ -78,6 +84,10 @@ pub struct McpServerInfo {
     pub tool_count: u64,
     #[serde(default)]
     pub tools: Vec<McpToolInfo>,
+    #[serde(default)]
+    pub oauth: bool,
+    #[serde(default)]
+    pub auth_required: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -98,4 +108,32 @@ pub fn health_check_url(server_url: &str) -> String {
 #[allow(dead_code)]
 pub fn parse_loose_json(raw: &str) -> Option<Value> {
     serde_json::from_str(raw).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_snake_case_tool_call_from_server() {
+        let message = parse_server_message(
+            r#"{"type":"tool_call","name":"read","args":"{\"path\":\"README.md\"}"}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::ToolCall { name, .. }) if name == "read"
+        ));
+    }
+
+    #[test]
+    fn parses_snake_case_agent_fallback_from_server() {
+        let message = parse_server_message(
+            r#"{"type":"agent_fallback","requested":"missing","active":"default"}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::AgentFallback { requested, active })
+                if requested == "missing" && active == "default"
+        ));
+    }
 }

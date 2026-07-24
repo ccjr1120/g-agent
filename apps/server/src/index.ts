@@ -22,6 +22,7 @@ import {
   mergeAgentMcpServers,
   mergeAgentProviderOverrides,
   saveActiveAgent,
+  isMcpOAuthEnabled,
   type GAgentConfig,
   type ResolvedProvider,
 } from "@g-agent/config";
@@ -83,6 +84,7 @@ async function connectMcpForAgent(
 type WsData = {
   promptQueue: string[];
   draining: boolean;
+  cancelRequested: boolean;
   history: ConversationMessage[];
   activeAgent: AgentConfig;
   systemPrompt: string;
@@ -223,6 +225,8 @@ function mcpCatalog(
         error: result?.ok ? undefined : result?.error,
         toolCount: result?.toolCount ?? tools.length,
         tools,
+        oauth: isMcpOAuthEnabled(config) || result?.oauth,
+        authRequired: result?.authRequired ?? false,
       } satisfies McpServerCatalogEntry;
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -443,9 +447,13 @@ async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<v
       }
 
       if (!failed) {
-        ws.data.history.push({ role: "user", content: prompt });
-        if (assistantText.trim()) {
-          ws.data.history.push({ role: "assistant", content: assistantText });
+        if (!ws.data.cancelRequested) {
+          ws.data.history.push({ role: "user", content: prompt });
+          if (assistantText.trim()) {
+            ws.data.history.push({ role: "assistant", content: assistantText });
+          }
+        } else {
+          ws.data.cancelRequested = false;
         }
       }
       sendContextUsage(ws);
@@ -472,6 +480,11 @@ async function drainPromptQueue(ws: ServerWebSocket<WsData>): Promise<void> {
         continue;
       }
       await runPrompt(ws, prompt);
+      if (ws.data.cancelRequested) {
+        ws.data.cancelRequested = false;
+        ws.data.promptQueue.length = 0;
+        break;
+      }
     }
   } finally {
     ws.data.draining = false;
@@ -487,6 +500,7 @@ Bun.serve<WsData>({
         data: {
           promptQueue: [],
           draining: false,
+          cancelRequested: false,
           history: [],
           activeAgent: initialAgent,
           systemPrompt: buildAgentSystemPrompt(initialAgent, loadedAgents),
@@ -552,9 +566,16 @@ Bun.serve<WsData>({
 
       if (message.type === "reset") {
         ws.data.promptQueue.length = 0;
+        ws.data.cancelRequested = false;
         ws.data.history.length = 0;
         send(ws, { type: "system_prompt", text: ws.data.systemPrompt });
         sendContextUsage(ws);
+        return;
+      }
+
+      if (message.type === "cancel") {
+        ws.data.cancelRequested = true;
+        ws.data.promptQueue.length = 0;
         return;
       }
 
@@ -640,6 +661,54 @@ Bun.serve<WsData>({
 
       if (message.type === "mcp") {
         sendMcpCatalog(ws);
+        return;
+      }
+
+      if (message.type === "mcp_auth") {
+        void (async () => {
+          const serverName = message.name.trim();
+          if (!serverName) {
+            send(ws, { type: "error", message: "MCP server name is required" });
+            return;
+          }
+
+          const merged = mergedMcpServers(ws.data.activeAgent);
+          if (!(serverName in merged)) {
+            send(ws, {
+              type: "error",
+              message: `Unknown MCP server "${serverName}"`,
+            });
+            return;
+          }
+
+          send(ws, {
+            type: "start",
+          });
+
+          try {
+            const result = await ws.data.mcpManager.authenticate(serverName);
+            if (result.ok) {
+              console.log(
+                `MCP OAuth complete for agent=${ws.data.activeAgent.name} server=${serverName} tools=${result.toolCount ?? 0}`,
+              );
+            } else {
+              console.warn(
+                `MCP OAuth failed for agent=${ws.data.activeAgent.name} server=${serverName}: ${result.error}`,
+              );
+              send(ws, {
+                type: "error",
+                message: result.error ?? "MCP OAuth authorization failed",
+              });
+            }
+          } catch (error) {
+            const messageText =
+              error instanceof Error ? error.message : "MCP OAuth authorization failed";
+            send(ws, { type: "error", message: messageText });
+          } finally {
+            sendMcpCatalog(ws);
+            send(ws, { type: "done" });
+          }
+        })();
         return;
       }
 

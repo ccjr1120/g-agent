@@ -13,6 +13,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::{
     cursor::{Hide, Show},
+    event::{DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     Command,
@@ -67,11 +68,11 @@ async fn main() -> Result<()> {
 async fn run_tui(server_url: String, banner: Vec<String>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableAlternateScroll, Hide)?;
+    execute!(stdout, EnterAlternateScreen, EnableAlternateScroll, EnableBracketedPaste, Hide)?;
 
     let result = App::new(server_url, banner).await.run().await;
 
-    execute!(stdout, DisableAlternateScroll, LeaveAlternateScreen, Show)?;
+    execute!(stdout, DisableAlternateScroll, DisableBracketedPaste, LeaveAlternateScreen, Show)?;
     disable_raw_mode()?;
     stdout.flush()?;
 

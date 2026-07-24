@@ -13,7 +13,7 @@ function usage(exitCode = 0) {
   mcp.mjs list [--agent <name>] [--json]
   mcp.mjs get global <name> [--json]
   mcp.mjs get agent <agent> <name> [--json]
-  mcp.mjs add global <name> (--config '<json>' | --stdio <command> [--arg <arg>...] [--env K=V] [--cwd <path>] | --url <url> [--header K=V]) [--json]
+  mcp.mjs add global <name> (--config '<json>' | --stdio <command> [--arg <arg>...] [--env K=V] [--cwd <path>] | --url <url> [--header K=V] [--oauth]) [--json]
   mcp.mjs add agent <agent> <name> (...same transport flags...) [--json]
   mcp.mjs set global <name> (--config '<json>' | transport flags...) [--json]
   mcp.mjs set agent <agent> <name> (--config '<json>' | transport flags...) [--json]
@@ -151,9 +151,51 @@ function validateServerConfig(name, config) {
         Object.entries(config.headers).map(([key, value]) => [String(key), String(value)]),
       );
     }
+    if (config.oauth !== undefined) {
+      normalized.oauth = normalizeOAuthConfig(name, config.oauth);
+    }
   }
 
   return normalized;
+}
+
+function normalizeOAuthConfig(name, value) {
+  if (value === true) {
+    return true;
+  }
+  if (typeof value !== "object" || value == null || Array.isArray(value)) {
+    throw new Error(`server "${name}".oauth must be true or an object`);
+  }
+
+  const normalized = {};
+  if (value.enabled === false) normalized.enabled = false;
+  if (typeof value.redirectUrl === "string" && value.redirectUrl.trim()) {
+    normalized.redirectUrl = value.redirectUrl.trim();
+  }
+  if (typeof value.clientId === "string" && value.clientId.trim()) {
+    normalized.clientId = value.clientId.trim();
+  }
+  if (typeof value.clientSecret === "string" && value.clientSecret.trim()) {
+    normalized.clientSecret = value.clientSecret.trim();
+  }
+  if (typeof value.clientSecretEnv === "string" && value.clientSecretEnv.trim()) {
+    normalized.clientSecretEnv = value.clientSecretEnv.trim();
+  }
+  if (typeof value.scope === "string" && value.scope.trim()) {
+    normalized.scope = value.scope.trim();
+  }
+  if (typeof value.clientName === "string" && value.clientName.trim()) {
+    normalized.clientName = value.clientName.trim();
+  }
+  if (value.grant === "authorization_code" || value.grant === "client_credentials") {
+    normalized.grant = value.grant;
+  } else if (value.grant !== undefined) {
+    throw new Error(
+      `server "${name}".oauth.grant must be "authorization_code" or "client_credentials"`,
+    );
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : true;
 }
 
 function describeServer(config) {
@@ -161,7 +203,8 @@ function describeServer(config) {
     const args = config.args?.length ? ` ${config.args.join(" ")}` : "";
     return `stdio: ${config.command}${args}`;
   }
-  return `url: ${config.url}`;
+  const oauth = config.oauth ? " oauth" : "";
+  return `url: ${config.url}${oauth}`;
 }
 
 function parseFlagOptions(args) {
@@ -176,6 +219,7 @@ function parseFlagOptions(args) {
     env: {},
     headers: {},
     cwd: null,
+    oauth: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -233,6 +277,10 @@ function parseFlagOptions(args) {
       if (!options.url) throw new Error("--url requires a value");
       continue;
     }
+    if (arg === "--oauth") {
+      options.oauth = true;
+      continue;
+    }
     values.push(arg);
   }
 
@@ -255,6 +303,7 @@ function configFromOptions(options) {
   if (options.url) {
     const config = { url: options.url };
     if (Object.keys(options.headers).length > 0) config.headers = options.headers;
+    if (options.oauth) config.oauth = true;
     return config;
   }
 

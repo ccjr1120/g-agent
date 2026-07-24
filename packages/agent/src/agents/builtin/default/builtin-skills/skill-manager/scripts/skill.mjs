@@ -12,7 +12,7 @@ const bundledDefaultAgentDir = join(scriptDir, "..", "..", "..");
 function usage(exitCode = 0) {
   const text = `Usage:
   skill.mjs paths [--json]
-  skill.mjs list [--agent <name>] [--json]
+  skill.mjs list [--agent <name>] [--global-only] [--json]
   skill.mjs resolve <name> [--agent <name>] [--json]
   skill.mjs get global <name> [--json]
   skill.mjs get self <agent> <name> [--json]
@@ -249,6 +249,7 @@ function parseFlagOptions(args) {
   const values = [];
   const options = {
     json: false,
+    globalOnly: false,
     agent: null,
     description: null,
     body: null,
@@ -263,6 +264,10 @@ function parseFlagOptions(args) {
     const arg = args[i];
     if (arg === "--json") {
       options.json = true;
+      continue;
+    }
+    if (arg === "--global-only") {
+      options.globalOnly = true;
       continue;
     }
     if (arg === "--agent") {
@@ -525,40 +530,45 @@ async function cmdPaths(options) {
   console.log(`bundled default agent: ${result.bundledDefaultAgentDir}`);
 }
 
-async function cmdList(values, options) {
-  if (!options.agent) {
-    const { config, path } = await loadGlobalConfig();
-    const loadOptions = resolveGlobalSkillsLoadOptions(config, {});
-    const globalDir = resolveGlobalSkillsDir(loadOptions);
-    const global = globalDir
-      ? await loadSkillsFromDir(globalDir, "global")
-      : [];
+async function cmdListGlobalOnly(options) {
+  const { config, path } = await loadGlobalConfig();
+  const loadOptions = resolveGlobalSkillsLoadOptions(config, {});
+  const globalDir = resolveGlobalSkillsDir(loadOptions);
+  const global = globalDir
+    ? await loadSkillsFromDir(globalDir, "global")
+    : [];
 
-    if (options.json) {
-      console.log(
-        JSON.stringify({ configPath: path, globalDir, skills: global }, null, 2),
-      );
-      return;
-    }
-
-    if (global.length === 0) {
-      console.log(`(empty) global skills dir: ${globalDir ?? "(none)"}`);
-      return;
-    }
-    for (const skill of global) {
-      console.log(`[global] ${skill.name} — ${skill.description}`);
-    }
-    console.log(`dir: ${globalDir}`);
+  if (options.json) {
+    console.log(
+      JSON.stringify({ configPath: path, globalDir, skills: global }, null, 2),
+    );
     return;
   }
 
-  const view = await resolveAgentSkillSources(options.agent);
+  if (global.length === 0) {
+    console.log(`(empty) global skills dir: ${globalDir ?? "(none)"}`);
+    return;
+  }
+  for (const skill of global) {
+    console.log(`[global] ${skill.name} — ${skill.description}`);
+  }
+  console.log(`dir: ${globalDir}`);
+}
+
+async function cmdList(values, options) {
+  if (options.globalOnly) {
+    await cmdListGlobalOnly(options);
+    return;
+  }
+
+  const agentName = options.agent ?? "default";
+  const view = await resolveAgentSkillSources(agentName);
   if (options.json) {
     console.log(JSON.stringify(view, null, 2));
     return;
   }
 
-  console.log(`Agent: ${options.agent}`);
+  console.log(`Agent: ${agentName}`);
   console.log(`Global enabled: ${view.globalEnabled}`);
   console.log("Builtin:");
   if (view.builtin.length === 0) console.log("  (empty)");

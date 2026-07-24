@@ -24,7 +24,9 @@ curl -fsSL https://raw.githubusercontent.com/ccjr1120/g-agent/main/install.sh | 
 g-agent
 ```
 
-重启后台 server：
+若更新前 server 已在运行，`install.sh` 会在安装完成后自动执行 `g-agent server restart`。
+
+手动重启后台 server：
 
 ```bash
 g-agent server restart

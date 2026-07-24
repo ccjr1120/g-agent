@@ -35,13 +35,7 @@ pub fn ensure_server_running(server_url: &str) -> Result<()> {
 
 pub fn restart_server(server_url: &str) -> Result<()> {
     let health_url = health_check_url(server_url);
-    let stop_result = stop_server_from_pid_file()?;
-
-    if stop_result == StopResult::NotRunning && is_server_up(&health_url)? {
-        return Err(anyhow!(
-            "server is already running at {server_url}, but pid file is missing; cannot safely restart"
-        ));
-    }
+    stop_running_server(server_url, &health_url)?;
 
     spawn_server()?;
 
@@ -53,6 +47,91 @@ pub fn restart_server(server_url: &str) -> Result<()> {
     }
 
     Err(anyhow!("server did not become ready at {server_url}"))
+}
+
+fn stop_running_server(server_url: &str, health_url: &str) -> Result<()> {
+    if !is_server_up(health_url)? {
+        let _ = stop_server_from_pid_file()?;
+        return Ok(());
+    }
+
+    match stop_server_from_pid_file()? {
+        StopResult::Stopped if wait_for_server_down(health_url) => return Ok(()),
+        StopResult::StalePid if wait_for_server_down(health_url) => return Ok(()),
+        _ => {}
+    }
+
+    if is_server_up(health_url)? {
+        stop_listeners_on_port(server_port(server_url))?;
+        if !wait_for_server_down(health_url) {
+            return Err(anyhow!("failed to stop existing server at {server_url}"));
+        }
+    }
+
+    let _ = fs::remove_file(pid_path());
+    Ok(())
+}
+
+fn server_port(server_url: &str) -> u16 {
+    let without_scheme = server_url
+        .strip_prefix("ws://")
+        .or_else(|| server_url.strip_prefix("wss://"))
+        .or_else(|| server_url.strip_prefix("http://"))
+        .or_else(|| server_url.strip_prefix("https://"))
+        .unwrap_or(server_url);
+    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+    if let Some((_host, port_str)) = host_port.rsplit_once(':') {
+        if let Ok(port) = port_str.parse::<u16>() {
+            return port;
+        }
+    }
+    crate::protocol::DEFAULT_SERVER_PORT
+}
+
+fn wait_for_server_down(health_url: &str) -> bool {
+    for _ in 0..POLL_ATTEMPTS {
+        if !is_server_up(health_url).unwrap_or(true) {
+            return true;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    !is_server_up(health_url).unwrap_or(true)
+}
+
+fn stop_listeners_on_port(port: u16) -> Result<()> {
+    for pid in find_listener_pids(port)? {
+        stop_pid(pid);
+    }
+    Ok(())
+}
+
+fn find_listener_pids(port: u16) -> Result<Vec<u32>> {
+    let port_arg = format!("TCP:{port}");
+    let output = Command::new("lsof")
+        .args(["-ti", &port_arg, "-sTCP:LISTEN"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("run lsof for port {port}"))?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect())
+}
+
+fn stop_pid(pid: u32) {
+    let _ = Command::new("kill").arg(pid.to_string()).status();
+    if !wait_for_pid_exit(pid, 30) {
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+        let _ = wait_for_pid_exit(pid, 20);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,13 +202,7 @@ fn stop_server_from_pid_file() -> Result<StopResult> {
         return Ok(StopResult::StalePid);
     }
 
-    let _ = Command::new("kill").arg(pid.to_string()).status();
-    if !wait_for_pid_exit(pid, 30) {
-        let _ = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status();
-        let _ = wait_for_pid_exit(pid, 20);
-    }
+    stop_pid(pid);
     let _ = fs::remove_file(pid_path());
     Ok(StopResult::Stopped)
 }
@@ -164,4 +237,21 @@ fn spawn_server() -> Result<()> {
     let child = command.spawn().context("spawn bun server")?;
     fs::write(pid_path(), child.id().to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_port;
+    use crate::protocol::DEFAULT_SERVER_PORT;
+
+    #[test]
+    fn server_port_parses_ws_url() {
+        assert_eq!(server_port("ws://127.0.0.1:3847"), 3847);
+        assert_eq!(server_port("ws://127.0.0.1:4000/ws"), 4000);
+    }
+
+    #[test]
+    fn server_port_falls_back_to_default() {
+        assert_eq!(server_port("ws://127.0.0.1"), DEFAULT_SERVER_PORT);
+    }
 }

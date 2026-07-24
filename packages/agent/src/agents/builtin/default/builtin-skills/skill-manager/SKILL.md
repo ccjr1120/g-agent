@@ -36,7 +36,7 @@ description: Skill 配置管理：列出、添加、修改、删除 global/self 
 
 ```bash
 node "{{skill_dir}}/scripts/skill.mjs" paths [--json]
-node "{{skill_dir}}/scripts/skill.mjs" list [--agent <name>] [--json]
+node "{{skill_dir}}/scripts/skill.mjs" list [--agent <name>] [--global-only] [--json]
 node "{{skill_dir}}/scripts/skill.mjs" resolve <name> [--agent <name>] [--json]
 node "{{skill_dir}}/scripts/skill.mjs" get global <name> [--json]
 node "{{skill_dir}}/scripts/skill.mjs" get self <agent> <name> [--json]
@@ -62,7 +62,8 @@ node "{{skill_dir}}/scripts/skill.mjs" config set agent <name> [--skills-json '<
 
 | 用户意图 | 触发词示例 |
 |---------|-----------|
-| 列出技能 | 「有哪些 skill」「列出技能」「查看 global skills」 |
+| 列出技能 | 「有哪些 skill」「列出技能」「查看技能」 |
+| 仅查 global | 「查看 global skills」→ 使用 `list --global-only` |
 | 添加技能 | 「加一个 skill」「新建全局技能」「给 xxx agent 加技能」 |
 | 修改技能 | 「改一下 xxx skill 的描述」「更新 SKILL.md」 |
 | 删除技能 | 「删掉 xxx skill」「移除技能」 |
@@ -77,11 +78,13 @@ node "{{skill_dir}}/scripts/skill.mjs" config set agent <name> [--skills-json '<
 ```bash
 node "{{skill_dir}}/scripts/skill.mjs" paths
 node "{{skill_dir}}/scripts/skill.mjs" list --json
-# 若涉及具体 agent：
+# 当前 agent（默认 default）的 builtin / global / self 三层：
 node "{{skill_dir}}/scripts/skill.mjs" list --agent <name> --json
+# 仅 global 目录（不含 builtin / self）：
+node "{{skill_dir}}/scripts/skill.mjs" list --global-only --json
 ```
 
-说明当前 global / self / builtin 分布。**builtin 一律标注为只读**。
+`list` **未指定 `--agent` 时默认 `default`**，返回 builtin / global / self 三层分布。**builtin 一律标注为只读**。
 
 ---
 

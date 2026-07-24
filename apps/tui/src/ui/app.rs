@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,6 +67,9 @@ pub struct App {
     session_id: Option<String>,
     session_started_at: i64,
     undo: UndoStack,
+    send_queue: VecDeque<usize>,
+    in_flight: Option<(usize, String, String)>,
+    cancel_turn: bool,
     pending_resume: Option<SavedSession>,
     resuming: bool,
     notice: Option<String>,
@@ -110,6 +114,9 @@ impl App {
             session_id: None,
             session_started_at: chrono::Utc::now().timestamp(),
             undo: UndoStack::new(),
+            send_queue: VecDeque::new(),
+            in_flight: None,
+            cancel_turn: false,
             pending_resume: None,
             resuming: false,
             notice: None,
@@ -281,6 +288,9 @@ impl App {
             }
             AgentEvent::Context(context) => self.context = context,
             AgentEvent::TurnStarted => {
+                if self.cancel_turn {
+                    return;
+                }
                 self.pending = false;
                 self.streaming_flag = true;
                 self.turn_start = Some(Instant::now());
@@ -288,22 +298,33 @@ impl App {
                 self.streaming = Some(ChatLine {
                     role: "assistant".to_string(),
                     text: String::new(),
+                    sent_content: None,
                     thinking: String::new(),
                     tools: Vec::new(),
                     duration_ms: None,
+                    queued: false,
                 });
             }
             AgentEvent::ThinkingDelta(text) => {
+                if self.cancel_turn {
+                    return;
+                }
                 if let Some(line) = &mut self.streaming {
                     line.thinking.push_str(&text);
                 }
             }
             AgentEvent::Delta(text) => {
+                if self.cancel_turn {
+                    return;
+                }
                 if let Some(line) = &mut self.streaming {
                     line.text.push_str(&text);
                 }
             }
             AgentEvent::ToolCall { name, args } => {
+                if self.cancel_turn {
+                    return;
+                }
                 let label = format_tool_call(&name, &args);
                 if let Some(line) = &mut self.streaming {
                     line.tools.push(ToolCallDisplay { name, label });
@@ -325,6 +346,18 @@ impl App {
 
     fn finish_turn(&mut self) {
         let width = self.last_transcript_width;
+        if self.cancel_turn {
+            self.streaming = None;
+            self.streaming_md.reset();
+            self.pending = false;
+            self.streaming_flag = false;
+            self.turn_start = None;
+            self.in_flight = None;
+            self.cancel_turn = false;
+            self.try_send_next();
+            return;
+        }
+
         if let Some(mut line) = self.streaming.take() {
             if let Some(start) = self.turn_start {
                 line.duration_ms = Some(start.elapsed().as_millis() as u64);
@@ -342,15 +375,21 @@ impl App {
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
+        self.in_flight = None;
         self.persist_session();
+        self.try_send_next();
     }
 
     fn handle_input(&mut self, event: Event, area: Rect) {
         let transcript_area = self.transcript_area(area);
-        if let Event::Key(key) = event {
-            if key.kind == KeyEventKind::Press {
+        match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
                 self.handle_key(key, transcript_area);
             }
+            Event::Paste(text) => {
+                self.composer.insert_paste(&text);
+            }
+            _ => {}
         }
     }
 
@@ -380,7 +419,7 @@ impl App {
                             return;
                         }
                         self.composer.clear();
-                        self.submit(item.value);
+                        self.submit(item.value.clone(), item.value);
                     }
                     return;
                 }
@@ -399,6 +438,9 @@ impl App {
 
         match key.code {
             KeyCode::Esc if !self.composer.menu_open => {
+                if self.revert_last_send() {
+                    return;
+                }
                 if let Some(entry) = self.undo.pop() {
                     match entry {
                         UndoEntry::Local { line_index } => {
@@ -409,9 +451,15 @@ impl App {
                         }
                         UndoEntry::Chat { user_index, text } => {
                             if user_index < self.static_lines.len() {
+                                let restore = self.static_lines[user_index]
+                                    .sent_content
+                                    .clone()
+                                    .unwrap_or_else(|| text.clone());
                                 self.static_lines.remove(user_index);
+                                self.composer.set_restore(restore);
+                            } else {
+                                self.composer.set_restore(text);
                             }
-                            self.composer.set_restore(text);
                         }
                     }
                 }
@@ -421,20 +469,22 @@ impl App {
                 self.composer.on_text_changed();
             }
             KeyCode::Enter => {
-                let text = self.composer.textarea.text().trim().to_string();
-                if text.is_empty() {
+                let display = self.composer.textarea.text().trim().to_string();
+                if display.is_empty() {
                     return;
                 }
+                let full = self.composer.expand_message(&display);
                 self.composer.clear();
-                self.submit(text);
+                self.submit(display, full);
             }
             KeyCode::Backspace => {
-                self.composer.textarea.delete_backward();
-                self.composer.on_text_changed();
+                self.composer.delete_backward();
+            }
+            KeyCode::Delete if key.modifiers.contains(KeyModifiers::SUPER) => {
+                self.composer.delete_current_line();
             }
             KeyCode::Delete => {
-                self.composer.textarea.delete_forward();
-                self.composer.on_text_changed();
+                self.composer.delete_forward();
             }
             KeyCode::Left => self.composer.textarea.move_left(),
             KeyCode::Right => self.composer.textarea.move_right(),
@@ -466,7 +516,8 @@ impl App {
         }
     }
 
-    fn submit(&mut self, text: String) {
+    fn submit(&mut self, display: String, full: String) {
+        let text = display.as_str();
         if text == "exit" {
             self.should_quit = true;
             return;
@@ -483,6 +534,21 @@ impl App {
         if text == "/mcp" {
             self.client.send(ClientMessage::Mcp);
             self.add_local(self.format_mcp());
+            return;
+        }
+        if let Some(name) = text.strip_prefix("/mcp auth ") {
+            let server_name = name.trim();
+            if server_name.is_empty() {
+                self.add_local("Usage: /mcp auth <server-name>".into());
+                return;
+            }
+            self.client.send(ClientMessage::McpAuth {
+                name: server_name.to_string(),
+            });
+            self.add_local(format!(
+                "Starting OAuth for MCP server \"{}\"... Complete sign-in in your browser.",
+                server_name
+            ));
             return;
         }
         if text == "/agent" {
@@ -556,17 +622,122 @@ impl App {
         }
 
         let user_index = self.static_lines.len();
-        self.static_lines.push(ChatLine {
+        self.static_lines.push(Self::user_line(
+            display.clone(),
+            Some(full.clone()),
+            self.is_turn_busy(),
+        ));
+        if self.is_turn_busy() {
+            self.send_queue.push_back(user_index);
+            self.history_scroll = 0;
+            return;
+        }
+        self.start_chat_turn(user_index, display, full);
+    }
+
+    fn user_line(text: String, sent_content: Option<String>, queued: bool) -> ChatLine {
+        ChatLine {
             role: "user".to_string(),
-            text: text.clone(),
+            text,
+            sent_content,
             thinking: String::new(),
             tools: Vec::new(),
             duration_ms: None,
+            queued,
+        }
+    }
+
+    fn is_turn_busy(&self) -> bool {
+        self.in_flight.is_some() || self.pending || self.streaming_flag
+    }
+
+    fn start_chat_turn(&mut self, user_index: usize, display: String, full: String) {
+        if user_index < self.static_lines.len() {
+            self.static_lines[user_index].queued = false;
+        }
+        self.in_flight = Some((user_index, display.clone(), full.clone()));
+        self.undo.push(UndoEntry::Chat {
+            user_index,
+            text: display,
         });
-        self.undo.push(UndoEntry::Chat { user_index, text: text.clone() });
         self.pending = true;
         self.history_scroll = 0;
-        self.client.send(ClientMessage::Chat { message: text });
+        self.client.send(ClientMessage::Chat { message: full });
+    }
+
+    fn try_send_next(&mut self) {
+        if self.is_turn_busy() || self.cancel_turn {
+            return;
+        }
+        let Some(user_index) = self.send_queue.pop_front() else {
+            return;
+        };
+        if user_index >= self.static_lines.len() || !self.static_lines[user_index].queued {
+            self.try_send_next();
+            return;
+        }
+        let text = self.static_lines[user_index].text.clone();
+        let full = self
+            .static_lines[user_index]
+            .sent_content
+            .clone()
+            .unwrap_or_else(|| text.clone());
+        self.start_chat_turn(user_index, text, full);
+    }
+
+    fn revert_last_send(&mut self) -> bool {
+        if let Some(user_index) = self.send_queue.pop_back() {
+            if user_index < self.static_lines.len() && self.static_lines[user_index].queued {
+                let text = self.static_lines[user_index].text.clone();
+                self.static_lines.remove(user_index);
+                self.shift_line_indices_after_remove(user_index);
+                self.composer.set_restore(text);
+                return true;
+            }
+            return false;
+        }
+
+        if self.in_flight.is_some() && self.is_turn_busy() {
+            let Some((user_index, display, full)) = self.in_flight.take() else {
+                return false;
+            };
+            let _ = full;
+            if user_index < self.static_lines.len() {
+                let restore = self.static_lines[user_index]
+                    .sent_content
+                    .clone()
+                    .unwrap_or(display.clone());
+                self.static_lines.remove(user_index);
+                self.shift_line_indices_after_remove(user_index);
+                self.composer.set_restore(restore);
+            } else {
+                self.composer.set_restore(display);
+            }
+            self.undo.pop();
+            self.cancel_turn = true;
+            self.pending = false;
+            self.streaming_flag = false;
+            self.streaming = None;
+            self.streaming_md.reset();
+            self.turn_start = None;
+            self.client.send(ClientMessage::Cancel);
+            return true;
+        }
+
+        false
+    }
+
+    fn shift_line_indices_after_remove(&mut self, removed: usize) {
+        for index in self.send_queue.iter_mut() {
+            if *index > removed {
+                *index -= 1;
+            }
+        }
+        if let Some((index, _, _)) = &mut self.in_flight {
+            if *index > removed {
+                *index -= 1;
+            }
+        }
     }
 
     fn add_local(&mut self, text: String) {
@@ -574,9 +745,11 @@ impl App {
         self.static_lines.push(ChatLine {
             role: "assistant".to_string(),
             text,
+            sent_content: None,
             thinking: String::new(),
             tools: Vec::new(),
             duration_ms: None,
+            queued: false,
         });
         self.undo.push(UndoEntry::Local { line_index });
     }
@@ -595,6 +768,9 @@ impl App {
         self.markdown_cache.clear();
         self.streaming_md.reset();
         self.undo.clear();
+        self.send_queue.clear();
+        self.in_flight = None;
+        self.cancel_turn = false;
     }
 
     fn apply_session(&mut self, session: SavedSession) {
@@ -605,10 +781,12 @@ impl App {
             .into_iter()
             .map(|turn| ChatLine {
                 role: turn.role,
-                text: turn.content,
+                text: turn.content.clone(),
+                sent_content: Some(turn.content),
                 thinking: String::new(),
                 tools: Vec::new(),
                 duration_ms: None,
+                queued: false,
             })
             .collect();
         self.streaming = None;
@@ -628,7 +806,10 @@ impl App {
             .iter()
             .map(|line| ConversationTurn {
                 role: line.role.clone(),
-                content: line.text.clone(),
+                content: line
+                    .sent_content
+                    .clone()
+                    .unwrap_or_else(|| line.text.clone()),
             })
             .filter(|turn| !turn.content.trim().is_empty())
             .collect::<Vec<_>>();
@@ -658,6 +839,7 @@ impl App {
         self.commands = vec![
             SlashCommand { value: "/skills".into(), description: "Browse skills".into() },
             SlashCommand { value: "/mcp".into(), description: "Browse MCP servers".into() },
+            SlashCommand { value: "/mcp auth ".into(), description: "OAuth sign-in for MCP server".into() },
             SlashCommand { value: "/agent".into(), description: "Browse agents".into() },
             SlashCommand { value: "/resume".into(), description: "Browse saved sessions".into() },
             SlashCommand { value: "/new".into(), description: "Start a new conversation".into() },
@@ -694,11 +876,27 @@ impl App {
         if self.skills.is_empty() {
             return "No skills loaded.".into();
         }
-        self.skills
-            .iter()
-            .map(|skill| format!("• [{}] {} — {}", skill.source.clone().unwrap_or_else(|| "unknown".into()), skill.name, skill.description))
-            .collect::<Vec<_>>()
-            .join("\n")
+
+        let mut sections = Vec::new();
+        for (label, source) in [
+            ("Built-in", "builtin"),
+            ("Global", "global"),
+            ("Self", "self"),
+        ] {
+            let items: Vec<String> = self
+                .skills
+                .iter()
+                .filter(|skill| skill.source.as_deref() == Some(source))
+                .map(|skill| format!("  • {} — {}", skill.name, skill.description))
+                .collect();
+            if items.is_empty() {
+                sections.push(format!("{label}:\n  (none)"));
+            } else {
+                sections.push(format!("{label}:\n{}", items.join("\n")));
+            }
+        }
+
+        sections.join("\n\n")
     }
 
     fn format_agents(&self) -> String {
@@ -726,16 +924,21 @@ impl App {
         self.mcp_servers
             .iter()
             .map(|server| {
+                let status = if server.connected {
+                    format!("connected, {} tools", server.tool_count)
+                } else if server.auth_required {
+                    "auth required — use /mcp auth <name>".into()
+                } else {
+                    format!("failed{}", server.error.as_deref().map(|err| format!(": {err}")).unwrap_or_default())
+                };
+                let oauth = if server.oauth { " oauth" } else { "" };
                 format!(
-                    "• [{}] {} ({}) — {}",
+                    "• [{}] {} ({}{}) — {}",
                     server.source,
                     server.name,
                     server.transport,
-                    if server.connected {
-                        format!("connected, {} tools", server.tool_count)
-                    } else {
-                        format!("failed{}", server.error.as_deref().map(|err| format!(": {err}")).unwrap_or_default())
-                    }
+                    oauth,
+                    status
                 )
             })
             .collect::<Vec<_>>()

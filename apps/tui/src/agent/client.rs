@@ -47,9 +47,11 @@ pub struct ToolCallDisplay {
 pub struct ChatLine {
     pub role: String,
     pub text: String,
+    pub sent_content: Option<String>,
     pub thinking: String,
     pub tools: Vec<ToolCallDisplay>,
     pub duration_ms: Option<u64>,
+    pub queued: bool,
 }
 
 #[derive(Debug)]

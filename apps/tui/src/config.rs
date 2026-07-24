@@ -132,17 +132,44 @@ fn banner_paths() -> Vec<PathBuf> {
 }
 
 pub fn repo_root_from_exe() -> Option<PathBuf> {
-    let exe = env::current_exe().ok()?;
-    let mut dir = exe.parent()?.to_path_buf();
-    for _ in 0..8 {
-        if dir.join("apps/server/src/index.ts").is_file() {
-            return Some(dir);
-        }
-        if !dir.pop() {
-            break;
+    for root in repo_root_candidates() {
+        if root.join("apps/server/src/index.ts").is_file() {
+            return Some(root);
         }
     }
     None
+}
+
+fn repo_root_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(path) = env::var("G_AGENT_INSTALL_DIR") {
+        candidates.push(PathBuf::from(path));
+    }
+
+    if let Ok(path) = env::var("G_AGENT_HOME") {
+        candidates.push(PathBuf::from(path));
+    }
+
+    if let Some(home) = directories::UserDirs::new() {
+        candidates.push(home.home_dir().join(".local/share/g-agent"));
+    }
+
+    if let Ok(exe) = env::current_exe() {
+        if let Some(mut dir) = exe.parent().map(Path::to_path_buf) {
+            for _ in 0..8 {
+                candidates.push(dir.clone());
+                if dir.join("apps/server/src/index.ts").is_file() {
+                    break;
+                }
+                if !dir.pop() {
+                    break;
+                }
+            }
+        }
+    }
+
+    candidates
 }
 
 pub fn read_config_server_hint() -> Result<Option<String>> {

@@ -19,6 +19,30 @@ export type ProviderConfig = {
   apiKeyEnv?: string;
 };
 
+/** OAuth options for URL-based MCP servers (MCP authorization spec). */
+export type McpOAuthConfig = {
+  /** When false, OAuth is disabled even if this object is present. Default: true. */
+  enabled?: boolean;
+  /** OAuth redirect URI registered with the authorization server. */
+  redirectUrl?: string;
+  /** Pre-registered OAuth client ID. Uses dynamic registration when omitted. */
+  clientId?: string;
+  /** Pre-registered client secret (client_credentials / confidential clients). */
+  clientSecret?: string;
+  /** Environment variable holding the client secret. */
+  clientSecretEnv?: string;
+  /** Space-separated OAuth scopes to request. */
+  scope?: string;
+  /** Client display name for dynamic registration. Default: g-agent MCP client. */
+  clientName?: string;
+  /**
+   * OAuth grant type.
+   * - authorization_code (default): interactive browser sign-in
+   * - client_credentials: machine-to-machine, no browser
+   */
+  grant?: "authorization_code" | "client_credentials";
+};
+
 /** MCP server config. Compatible with Cursor-style mcp.json entries. */
 export type McpServerConfig = {
   /** Stdio transport: executable to spawn. */
@@ -29,7 +53,34 @@ export type McpServerConfig = {
   /** HTTP/SSE transport: remote MCP endpoint URL. */
   url?: string;
   headers?: Record<string, string>;
+  /** Enable MCP OAuth for this URL server (`true` or options object). */
+  oauth?: boolean | McpOAuthConfig;
 };
+
+export const DEFAULT_MCP_OAUTH_REDIRECT_URL =
+  "http://127.0.0.1:3848/oauth/callback";
+
+export function isMcpOAuthEnabled(config: McpServerConfig): boolean {
+  if (!config.url || config.oauth === undefined) {
+    return false;
+  }
+  if (config.oauth === true) {
+    return true;
+  }
+  return config.oauth.enabled !== false;
+}
+
+export function resolveMcpOAuthConfig(
+  config: McpServerConfig,
+): McpOAuthConfig | undefined {
+  if (!isMcpOAuthEnabled(config)) {
+    return undefined;
+  }
+  if (config.oauth === true) {
+    return { enabled: true };
+  }
+  return config.oauth;
+}
 
 type RawProviderConfig = Omit<ProviderConfig, "models"> & {
   models: Record<string, ModelConfig>;
@@ -254,6 +305,86 @@ function looksLikeApiKey(value: string): boolean {
   return /^(sk-|api-)/i.test(value.trim());
 }
 
+function normalizeMcpOAuth(
+  value: unknown,
+  path: string,
+  hasUrl: boolean,
+): boolean | McpOAuthConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!hasUrl) {
+    throw new Error(`${path.replace(/\.oauth$/, "")} oauth requires "url" transport`);
+  }
+  if (value === true) {
+    return true;
+  }
+  if (typeof value !== "object" || value == null || Array.isArray(value)) {
+    throw new Error(`${path} must be true or an object`);
+  }
+
+  const raw = value as Record<string, unknown>;
+  const enabled = normalizeBoolean(raw.enabled, `${path}.enabled`);
+  const redirectUrl =
+    typeof raw.redirectUrl === "string" && raw.redirectUrl.trim()
+      ? raw.redirectUrl.trim()
+      : undefined;
+  const clientId =
+    typeof raw.clientId === "string" && raw.clientId.trim()
+      ? raw.clientId.trim()
+      : undefined;
+  const clientSecret =
+    typeof raw.clientSecret === "string" && raw.clientSecret.trim()
+      ? raw.clientSecret.trim()
+      : undefined;
+  const clientSecretEnv =
+    typeof raw.clientSecretEnv === "string" && raw.clientSecretEnv.trim()
+      ? raw.clientSecretEnv.trim()
+      : undefined;
+  const scope =
+    typeof raw.scope === "string" && raw.scope.trim()
+      ? raw.scope.trim()
+      : undefined;
+  const clientName =
+    typeof raw.clientName === "string" && raw.clientName.trim()
+      ? raw.clientName.trim()
+      : undefined;
+  const grantRaw = raw.grant;
+  let grant: McpOAuthConfig["grant"] | undefined;
+  if (grantRaw !== undefined) {
+    if (grantRaw !== "authorization_code" && grantRaw !== "client_credentials") {
+      throw new Error(
+        `${path}.grant must be "authorization_code" or "client_credentials"`,
+      );
+    }
+    grant = grantRaw;
+  }
+
+  if (
+    enabled === false &&
+    redirectUrl === undefined &&
+    clientId === undefined &&
+    clientSecret === undefined &&
+    clientSecretEnv === undefined &&
+    scope === undefined &&
+    clientName === undefined &&
+    grant === undefined
+  ) {
+    return { enabled: false };
+  }
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(redirectUrl ? { redirectUrl } : {}),
+    ...(clientId ? { clientId } : {}),
+    ...(clientSecret ? { clientSecret } : {}),
+    ...(clientSecretEnv ? { clientSecretEnv } : {}),
+    ...(scope ? { scope } : {}),
+    ...(clientName ? { clientName } : {}),
+    ...(grant ? { grant } : {}),
+  };
+}
+
 function normalizeMcpServers(
   value: unknown,
   path: string,
@@ -284,6 +415,12 @@ function normalizeMcpServers(
       );
     }
 
+    const oauth = normalizeMcpOAuth(
+      (item as Record<string, unknown>).oauth,
+      `${path}.${name}.oauth`,
+      hasUrl,
+    );
+
     servers[name] = {
       ...(command ? { command } : {}),
       ...(url ? { url } : {}),
@@ -297,6 +434,7 @@ function normalizeMcpServers(
             ),
           }
         : {}),
+      ...(oauth !== undefined ? { oauth } : {}),
     };
   }
 

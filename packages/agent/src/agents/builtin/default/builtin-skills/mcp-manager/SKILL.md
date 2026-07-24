@@ -56,7 +56,40 @@ node "{{skill_dir}}/scripts/mcp.mjs" add global filesystem \
 # url
 node "{{skill_dir}}/scripts/mcp.mjs" add global remote \
   --url http://localhost:3000/mcp --header Authorization=Bearer\ token
+
+# url + OAuth (interactive browser sign-in)
+node "{{skill_dir}}/scripts/mcp.mjs" add global remote \
+  --url https://api.example.com/mcp --oauth
 ```
+
+OAuth 配置也可写在 JSON 中：
+
+```json
+{
+  "url": "https://api.example.com/mcp",
+  "oauth": {
+    "redirectUrl": "http://127.0.0.1:3848/oauth/callback",
+    "scope": "mcp:tools",
+    "clientId": "optional-pre-registered-id",
+    "clientSecretEnv": "MCP_CLIENT_SECRET"
+  }
+}
+```
+
+或机器对机器（无浏览器）：
+
+```json
+{
+  "url": "https://api.example.com/mcp",
+  "oauth": {
+    "grant": "client_credentials",
+    "clientId": "my-client",
+    "clientSecretEnv": "MCP_CLIENT_SECRET"
+  }
+}
+```
+
+OAuth token 保存在 `~/.config/g-agent/mcp-oauth/<server-name>.json`。配置后重启 server；若需登录，在 TUI 执行 `/mcp auth <name>`。
 
 需要结构化结果时加 `--json`。
 
@@ -169,13 +202,14 @@ node "{{skill_dir}}/scripts/mcp.mjs" remove agent <agent> <name>
   "description": "我的 agent",
   "mcpServers": {
     "extra": {
-      "url": "http://localhost:3000/mcp"
+      "url": "http://localhost:3000/mcp",
+      "oauth": true
     }
   }
 }
 ```
 
-每条 server 必须**恰好**包含 `command`（stdio）或 `url`（HTTP）之一。
+每条 server 必须**恰好**包含 `command`（stdio）或 `url`（HTTP）之一。URL server 可选 `oauth: true` 或 `oauth: { ... }` 启用 MCP OAuth。
 
 ---
 

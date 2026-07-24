@@ -74,6 +74,72 @@ remove_legacy_pnpm_cli() {
   rm -f "$pnpm_bin/g-agent"
 }
 
+server_health_url() {
+  if [ -n "${G_AGENT_SERVER_URL:-}" ]; then
+    local url="${G_AGENT_SERVER_URL}"
+    case "$url" in
+      ws://*) echo "http://${url#ws://}" ;;
+      wss://*) echo "https://${url#wss://}" ;;
+      http://*|https://*) echo "$url" ;;
+      *) echo "http://${url}" ;;
+    esac
+    return 0
+  fi
+
+  local host="${G_AGENT_HOST:-127.0.0.1}"
+  local port="${G_AGENT_PORT:-3847}"
+  echo "http://${host}:${port}/"
+}
+
+server_pid_file() {
+  if [ -n "${G_AGENT_CONFIG:-}" ]; then
+    echo "$(dirname "$G_AGENT_CONFIG")/server.pid"
+    return 0
+  fi
+  if [ -n "${G_AGENT_HOME:-}" ]; then
+    echo "${G_AGENT_HOME}/server.pid"
+    return 0
+  fi
+  echo "${XDG_CONFIG_HOME:-$HOME/.config}/g-agent/server.pid"
+}
+
+server_is_running() {
+  local health_url
+  health_url="$(server_health_url)"
+  if command -v curl >/dev/null 2>&1 && curl -sf "$health_url" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local pid_file pid
+  pid_file="$(server_pid_file)"
+  if [ ! -f "$pid_file" ]; then
+    return 1
+  fi
+  pid="$(tr -d '[:space:]' < "$pid_file")"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+restart_server_if_running() {
+  local install_dir="$1"
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+
+  if ! command -v g-agent >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! server_is_running; then
+    return 0
+  fi
+
+  echo "==> Restarting G-Agent server..."
+  if G_AGENT_INSTALL_DIR="$install_dir" g-agent server restart; then
+    echo "Server restarted at $(server_health_url)"
+  else
+    echo "Warning: failed to restart server. Run 'g-agent server restart' manually." >&2
+    return 1
+  fi
+}
+
 install_from_dir() {
   local dir="$1"
   echo "==> Installing dependencies..."
@@ -87,6 +153,8 @@ install_from_dir() {
 
   echo "==> Installing g-agent CLI..."
   cargo install --path "$dir/apps/tui" --locked --force
+
+  restart_server_if_running "$dir" || true
 
   echo ""
   echo "Done! Run 'g-agent' to start."

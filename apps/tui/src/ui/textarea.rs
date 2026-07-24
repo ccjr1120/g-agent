@@ -38,6 +38,19 @@ impl TextArea {
         self.cursor = self.clamp_boundary(self.cursor.min(self.text.len()));
     }
 
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn replace_range(&mut self, range: std::ops::Range<usize>) {
+        if range.start >= range.end || range.end > self.text.len() {
+            return;
+        }
+        self.text.replace_range(range.clone(), "");
+        self.cursor = range.start;
+        self.cursor = self.clamp_boundary(self.cursor);
+    }
+
     pub fn insert_str(&mut self, value: &str) {
         if value.is_empty() {
             return;
@@ -84,6 +97,29 @@ impl TextArea {
 
     pub fn move_end(&mut self) {
         self.cursor = self.line_end(self.cursor);
+    }
+
+    pub fn delete_current_line(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+
+        let start = self.line_start(self.cursor);
+        let end = self.line_end(self.cursor);
+        let mut range_end = end;
+
+        if range_end < self.text.len() && self.text[range_end..].starts_with('\n') {
+            range_end += 1;
+        } else if start > 0 && self.text.as_bytes().get(start - 1) == Some(&b'\n') {
+            self.text.replace_range((start - 1)..end, "");
+            self.cursor = (start - 1).min(self.text.len());
+            self.cursor = self.clamp_boundary(self.cursor);
+            return;
+        }
+
+        self.text.replace_range(start..range_end, "");
+        self.cursor = start.min(self.text.len());
+        self.cursor = self.clamp_boundary(self.cursor);
     }
 
     pub fn desired_height(&self, width: u16) -> u16 {
@@ -293,5 +329,28 @@ mod tests {
         textarea.move_right();
         let col = textarea.text[..textarea.cursor].width();
         assert_eq!(col, 2);
+    }
+
+    #[test]
+    fn delete_current_line_removes_logical_line() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("line1\nline2\nline3".into());
+        for _ in 0..6 {
+            textarea.move_right();
+        }
+        assert_eq!(textarea.cursor(), 6);
+        textarea.delete_current_line();
+        assert_eq!(textarea.text(), "line1\nline3");
+        assert_eq!(textarea.cursor(), 6);
+    }
+
+    #[test]
+    fn delete_current_line_on_last_line() {
+        let mut textarea = TextArea::new();
+        textarea.insert_str("line1\nline2");
+        textarea.move_end();
+        textarea.delete_current_line();
+        assert_eq!(textarea.text(), "line1");
+        assert_eq!(textarea.cursor(), 5);
     }
 }

@@ -4,6 +4,10 @@ use ratatui::text::{Line, Span};
 use ratatui::buffer::Buffer;
 use ratatui::widgets::Widget;
 
+use crate::ui::paste::{
+    expand_paste_placeholders, find_placeholder_at, normalize_paste, paste_placeholder,
+    should_attach_as_block, PastedBlock,
+};
 use crate::ui::textarea::{TextArea, TextAreaWidget};
 use crate::ui::theme::style;
 
@@ -15,6 +19,8 @@ pub struct SlashCommand {
 
 pub struct Composer {
     pub textarea: TextArea,
+    pub pastes: Vec<PastedBlock>,
+    next_paste_id: usize,
     pub menu_open: bool,
     pub menu_index: usize,
     pub open_group: Option<String>,
@@ -25,6 +31,8 @@ impl Composer {
     pub fn new() -> Self {
         Self {
             textarea: TextArea::new(),
+            pastes: Vec::new(),
+            next_paste_id: 1,
             menu_open: false,
             menu_index: 0,
             open_group: None,
@@ -54,8 +62,68 @@ impl Composer {
         self.restore_pending = Some(text);
     }
 
+    pub fn insert_paste(&mut self, raw: &str) {
+        let content = normalize_paste(raw);
+        if content.is_empty() {
+            return;
+        }
+
+        if should_attach_as_block(&content) {
+            let id = self.next_paste_id;
+            self.next_paste_id += 1;
+            let line_count = content.lines().count().max(1);
+            let placeholder = paste_placeholder(id, line_count);
+            self.pastes.push(PastedBlock {
+                id,
+                content,
+                placeholder: placeholder.clone(),
+            });
+            self.textarea.insert_str(&placeholder);
+        } else {
+            self.textarea.insert_str(&content);
+        }
+        self.on_text_changed();
+    }
+
+    pub fn expand_message(&self, display: &str) -> String {
+        expand_paste_placeholders(display, &self.pastes)
+    }
+
+    pub fn delete_backward(&mut self) {
+        if let Some((range, id)) = find_placeholder_at(self.textarea.text(), self.textarea.cursor()) {
+            self.textarea.replace_range(range);
+            self.pastes.retain(|block| block.id != id);
+            self.on_text_changed();
+            return;
+        }
+        self.textarea.delete_backward();
+        self.on_text_changed();
+    }
+
+    pub fn delete_forward(&mut self) {
+        let cursor = self.textarea.cursor();
+        if let Some((range, id)) = find_placeholder_at(self.textarea.text(), cursor.saturating_add(1)) {
+            if range.start == cursor || range.contains(&cursor) {
+                self.textarea.replace_range(range);
+                self.pastes.retain(|block| block.id != id);
+                self.on_text_changed();
+                return;
+            }
+        }
+        self.textarea.delete_forward();
+        self.on_text_changed();
+    }
+
+    pub fn delete_current_line(&mut self) {
+        self.textarea.delete_current_line();
+        self.pastes
+            .retain(|block| self.textarea.text().contains(&block.placeholder));
+        self.on_text_changed();
+    }
+
     pub fn clear(&mut self) {
         self.textarea.set_text(String::new());
+        self.pastes.clear();
         self.on_text_changed();
     }
 

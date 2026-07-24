@@ -5,10 +5,12 @@ export type ConversationTurn = {
 
 export type ClientMessage =
   | { type: "chat"; message: string }
+  | { type: "cancel" }
   | { type: "reset" }
   | { type: "agent"; name?: string }
   | { type: "skill"; name: string }
   | { type: "mcp" }
+  | { type: "mcp_auth"; name: string }
   | { type: "resume"; agent: string; history: ConversationTurn[] };
 
 export type McpServerCatalogEntry = {
@@ -20,6 +22,8 @@ export type McpServerCatalogEntry = {
   error?: string;
   toolCount: number;
   tools: Array<{ name: string; description: string }>;
+  oauth?: boolean;
+  authRequired?: boolean;
 };
 
 export type ServerMessage =
@@ -59,6 +63,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     if (data.type === "reset") {
       return data;
     }
+    if (data.type === "cancel") {
+      return data;
+    }
     if (data.type === "agent") {
       return data;
     }
@@ -66,6 +73,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       return data;
     }
     if (data.type === "mcp") {
+      return data;
+    }
+    if (data.type === "mcp_auth" && typeof data.name === "string") {
       return data;
     }
     if (data.type === "resume") {

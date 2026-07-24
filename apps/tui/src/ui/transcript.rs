@@ -91,7 +91,7 @@ pub fn build_transcript_lines(
         } else {
             rendered.push(Line::from(vec![Span::styled(
                 format!(
-                    "Active agent: {}. Enter to send, / for commands, Esc to undo, Ctrl+Y or Cmd+C to copy.",
+                    "Active agent: {}. Enter to send, / for commands, Esc to revert last send, Ctrl+Y or Cmd+C to copy.",
                     if content.active_agent.is_empty() {
                         "—"
                     } else {
@@ -243,7 +243,7 @@ fn push_chat_line(
     markdown: &mut MarkdownCache,
 ) {
     if line.role == "user" {
-        push_user_text(lines, &line.text);
+        push_user_text(lines, &line.text, line.queued);
     } else {
         for tool in &line.tools {
             lines.push(tool_line(tool));
@@ -275,24 +275,47 @@ fn push_thinking_text(lines: &mut Vec<Line<'static>>, text: &str) {
     }
 }
 
-fn push_user_text(lines: &mut Vec<Line<'static>>, text: &str) {
+fn push_user_text(lines: &mut Vec<Line<'static>>, text: &str, queued: bool) {
     if text.is_empty() {
         return;
     }
     for (index, chunk) in text.lines().enumerate() {
-        let style = style::user_message();
-        if index == 0 {
-            lines.push(Line::from(vec![
-                Span::styled(USER_PREFIX, style),
-                Span::styled(chunk.to_string(), style),
-            ]));
+        let prefix = if index == 0 {
+            if queued { "⏳ " } else { USER_PREFIX }
         } else {
-            lines.push(Line::from(vec![
-                Span::raw(USER_CONTINUATION),
-                Span::styled(chunk.to_string(), style),
-            ]));
-        }
+            USER_CONTINUATION
+        };
+        let style = if queued {
+            style::user_message_queued()
+        } else {
+            style::user_message()
+        };
+        lines.push(Line::from(user_line_spans(chunk, prefix, style)));
     }
+}
+
+fn user_line_spans(chunk: &str, prefix: &str, base_style: ratatui::style::Style) -> Vec<Span<'static>> {
+    const MARKER: &str = "[Pasted text #";
+    let mut spans = vec![Span::styled(prefix.to_string(), base_style)];
+    if let Some(start) = chunk.find(MARKER) {
+        if start > 0 {
+            spans.push(Span::styled(chunk[..start].to_string(), base_style));
+        }
+        let end = chunk[start..]
+            .find(']')
+            .map(|idx| start + idx + 1)
+            .unwrap_or(chunk.len());
+        spans.push(Span::styled(
+            chunk[start..end].to_string(),
+            style::paste_chip(),
+        ));
+        if end < chunk.len() {
+            spans.push(Span::styled(chunk[end..].to_string(), base_style));
+        }
+    } else {
+        spans.push(Span::styled(chunk.to_string(), base_style));
+    }
+    spans
 }
 
 fn push_assistant_plain(lines: &mut Vec<Line<'static>>, text: &str) {
