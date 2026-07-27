@@ -24,8 +24,8 @@ use crate::agent::client::{
 };
 use crate::protocol::{ClientMessage, ConversationTurn};
 use crate::session::{
-    build_session_preview, format_session_label, list_sessions, load_session, save_session,
-    SavedSession, SavedSessionSummary, UndoEntry, UndoStack, write_conversation_log,
+    build_session_preview, format_session_age, format_session_label, list_sessions, load_session,
+    save_session, SavedSession, SavedSessionSummary, UndoEntry, UndoStack, write_conversation_log,
 };
 use crate::ui::composer::{command_group_id, menu_height, Composer, ComposerWidget, MenuWidget, SlashCommand};
 use crate::ui::status::{StatusBar, STATUS_HEIGHT};
@@ -72,6 +72,7 @@ pub struct App {
     cancel_turn: bool,
     pending_resume: Option<SavedSession>,
     resuming: bool,
+    has_connected_once: bool,
     notice: Option<String>,
     started_at: Instant,
     markdown_cache: MarkdownCache,
@@ -80,10 +81,8 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(server_url: String, banner: Vec<String>) -> Self {
-        let (client, events) = AgentClient::connect(server_url.clone())
-            .await
-            .expect("connect websocket");
+    pub fn new(server_url: String, banner: Vec<String>) -> Self {
+        let (client, events) = AgentClient::connect(server_url);
         let client = Arc::new(client);
 
         Self {
@@ -119,6 +118,7 @@ impl App {
             cancel_turn: false,
             pending_resume: None,
             resuming: false,
+            has_connected_once: false,
             notice: None,
             started_at: Instant::now(),
             markdown_cache: MarkdownCache::new(),
@@ -267,7 +267,19 @@ impl App {
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::Connection(state) => self.connection = state,
+            AgentEvent::Connection(state) => {
+                if matches!(state, ConnectionState::Disconnected) {
+                    self.interrupt_turn_on_disconnect();
+                }
+                if matches!(state, ConnectionState::Connected) {
+                    self.error = None;
+                    if self.has_connected_once {
+                        self.restore_history_after_reconnect();
+                    }
+                    self.has_connected_once = true;
+                }
+                self.connection = state;
+            }
             AgentEvent::Agents { agents, active, model } => {
                 if !self.active_agent.is_empty() && self.active_agent != active && !self.resuming {
                     self.reset_local_conversation();
@@ -340,6 +352,7 @@ impl App {
                     self.apply_session(session);
                 }
                 self.resuming = false;
+                self.try_send_next();
             }
         }
     }
@@ -380,6 +393,69 @@ impl App {
         self.try_send_next();
     }
 
+    /// The connection dropped mid-turn: keep whatever streamed so far as a
+    /// static line and clear turn state. Queued messages stay queued and are
+    /// flushed after the session is restored on reconnect.
+    fn interrupt_turn_on_disconnect(&mut self) {
+        if !self.is_turn_busy() {
+            return;
+        }
+        let width = self.last_transcript_width;
+        if let Some(mut line) = self.streaming.take() {
+            if let Some(start) = self.turn_start {
+                line.duration_ms = Some(start.elapsed().as_millis() as u64);
+            }
+            if !line.text.trim().is_empty() {
+                self.streaming_md.flush(&line.text, assistant_markdown_width(width));
+                self.markdown_cache
+                    .render_static(&line.text, assistant_markdown_width(width));
+            }
+            if !line.text.trim().is_empty()
+                || !line.thinking.trim().is_empty()
+                || !line.tools.is_empty()
+            {
+                self.static_lines.push(line);
+            }
+        }
+        self.streaming_md.reset();
+        self.pending = false;
+        self.streaming_flag = false;
+        self.turn_start = None;
+        self.in_flight = None;
+        self.error = Some("Connection lost — reconnecting…".into());
+        self.persist_session();
+    }
+
+    /// After a reconnect the server starts with an empty conversation, so
+    /// push the local transcript back via `resume` before sending anything.
+    fn restore_history_after_reconnect(&mut self) {
+        let history: Vec<ConversationTurn> = self
+            .static_lines
+            .iter()
+            .filter(|line| !line.queued)
+            .map(|line| ConversationTurn {
+                role: line.role.clone(),
+                content: line
+                    .sent_content
+                    .clone()
+                    .unwrap_or_else(|| line.text.clone()),
+            })
+            .filter(|turn| !turn.content.trim().is_empty())
+            .collect();
+
+        if history.is_empty() || self.active_agent.is_empty() {
+            self.try_send_next();
+            return;
+        }
+
+        self.resuming = true;
+        self.notice = Some("Reconnected — session restored".into());
+        self.client.send(ClientMessage::Resume {
+            agent: self.active_agent.clone(),
+            history,
+        });
+    }
+
     fn handle_input(&mut self, event: Event, area: Rect) {
         let transcript_area = self.transcript_area(area);
         match event {
@@ -393,47 +469,70 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, transcript_area: Rect) {
-        if self.composer.menu_open && !self.composer.textarea.is_empty() {
-            match key.code {
-                KeyCode::Up => {
-                    let count = self.current_menu_items().len();
-                    self.composer.move_menu(-1, count);
-                    return;
-                }
-                KeyCode::Down => {
-                    let count = self.current_menu_items().len();
-                    self.composer.move_menu(1, count);
-                    return;
-                }
-                KeyCode::Enter => {
-                    if let Some(item) = self.current_menu_items().get(self.composer.menu_index).cloned() {
-                        if self.composer.open_group.is_none()
-                            && self.command_groups.iter().any(|(name, _)| {
-                                command_group_id(name) == command_group_id(&item.value)
-                            })
-                        {
-                            self.composer.open_group =
-                                Some(command_group_id(&item.value).to_string());
-                            self.composer.menu_index = 0;
-                            return;
-                        }
-                        self.composer.clear();
-                        self.submit(item.value.clone(), item.value);
-                    }
-                    return;
-                }
-                KeyCode::Esc => {
-                    if self.composer.open_group.is_some() {
-                        self.composer.open_group = None;
-                        self.composer.menu_index = 0;
-                    } else {
-                        self.composer.clear();
-                    }
-                    return;
-                }
-                _ => {}
+    /// Handle a key while the command menu is open. Returns true when the
+    /// key was consumed; ↑/↓ with no candidates fall through so they keep
+    /// scrolling history.
+    fn handle_menu_key(&mut self, key: KeyEvent) -> bool {
+        let menu_items = self.current_menu_items();
+        let has_items = !menu_items.is_empty();
+
+        match key.code {
+            KeyCode::Up if has_items => {
+                self.composer.move_menu(-1, menu_items.len());
+                true
             }
+            KeyCode::Down if has_items => {
+                self.composer.move_menu(1, menu_items.len());
+                true
+            }
+            KeyCode::Tab if has_items => {
+                let index = self.composer.menu_index.min(menu_items.len() - 1);
+                if let Some(item) = menu_items.get(index).cloned() {
+                    if !self.try_open_command_group(&item) {
+                        self.complete_into_composer(&item.value);
+                    }
+                }
+                true
+            }
+            KeyCode::Enter if has_items => {
+                let index = self.composer.menu_index.min(menu_items.len() - 1);
+                if let Some(item) = menu_items.get(index).cloned() {
+                    if self.try_open_command_group(&item) {
+                        return true;
+                    }
+                    if item.value.ends_with(' ') {
+                        // The command expects an argument — complete it so the
+                        // candidate list opens instead of running it bare.
+                        self.complete_into_composer(&item.value);
+                        return true;
+                    }
+                    self.composer.clear();
+                    self.submit(item.value.clone(), item.value);
+                }
+                true
+            }
+            // Don't submit the filter text as a chat message when no skills match.
+            KeyCode::Enter if self.composer.open_group.is_some() => true,
+            KeyCode::Esc => {
+                if self.composer.open_group.is_some() {
+                    self.composer.open_group = None;
+                    self.composer.menu_index = 0;
+                    // Return to the root command menu.
+                    self.composer.textarea.set_text("/".into());
+                    self.composer.textarea.move_end();
+                    self.composer.on_text_changed();
+                } else {
+                    self.composer.clear();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, transcript_area: Rect) {
+        if self.composer.menu_open && self.handle_menu_key(key) {
+            return;
         }
 
         match key.code {
@@ -490,10 +589,10 @@ impl App {
             KeyCode::Right => self.composer.textarea.move_right(),
             KeyCode::Home => self.composer.textarea.move_home(),
             KeyCode::End => self.composer.textarea.move_end(),
-            KeyCode::Up if !self.composer.menu_open => {
+            KeyCode::Up => {
                 self.scroll_history(1, transcript_area);
             }
-            KeyCode::Down if !self.composer.menu_open => {
+            KeyCode::Down => {
                 self.scroll_history(-1, transcript_area);
             }
             KeyCode::Char(ch)
@@ -516,10 +615,52 @@ impl App {
         }
     }
 
+    /// If the selected item is a group header (e.g. "/skills"), open the
+    /// group as a filterable picker instead of running it. Returns true when
+    /// it was one.
+    fn try_open_command_group(&mut self, item: &SlashCommand) -> bool {
+        if self.composer.open_group.is_none()
+            && self
+                .command_groups
+                .iter()
+                .any(|(name, _)| command_group_id(name) == command_group_id(&item.value))
+        {
+            self.composer.open_group = Some(command_group_id(&item.value).to_string());
+            self.composer.menu_index = 0;
+            // Clear the input so typing filters the skill list.
+            self.composer.textarea.set_text(String::new());
+            self.composer.menu_open = true;
+            return true;
+        }
+        false
+    }
+
+    fn enter_skills_picker(&mut self) {
+        self.composer.open_group = Some("skills".into());
+        self.composer.menu_index = 0;
+        self.composer.textarea.set_text(String::new());
+        self.composer.menu_open = true;
+    }
+
+    fn complete_into_composer(&mut self, value: &str) {
+        self.composer.textarea.set_text(value.to_string());
+        self.composer.textarea.move_end();
+        self.composer.on_text_changed();
+    }
+
     fn submit(&mut self, display: String, full: String) {
         let text = display.as_str();
-        if text == "exit" {
+        if text == "exit" || text == "/quit" || text == "/exit" {
             self.should_quit = true;
+            return;
+        }
+        if text == "/help" {
+            self.add_local(self.format_help());
+            return;
+        }
+        if text == "/reload" {
+            self.client.send(ClientMessage::Reload);
+            self.notice = Some("Reloading config, agents and skills…".into());
             return;
         }
         if text == "/new" {
@@ -528,7 +669,7 @@ impl App {
             return;
         }
         if text == "/skills" {
-            self.add_local(self.format_skills());
+            self.enter_skills_picker();
             return;
         }
         if text == "/mcp" {
@@ -837,13 +978,16 @@ impl App {
 
     fn rebuild_commands(&mut self) {
         self.commands = vec![
-            SlashCommand { value: "/skills".into(), description: "Browse skills".into() },
+            SlashCommand { value: "/skills".into(), description: "Select and run a skill".into() },
+            SlashCommand { value: "/agent".into(), description: "List agents · add a space to switch".into() },
+            SlashCommand { value: "/resume".into(), description: "List saved sessions · add a space to pick".into() },
             SlashCommand { value: "/mcp".into(), description: "Browse MCP servers".into() },
             SlashCommand { value: "/mcp auth ".into(), description: "OAuth sign-in for MCP server".into() },
-            SlashCommand { value: "/agent".into(), description: "Browse agents".into() },
-            SlashCommand { value: "/resume".into(), description: "Browse saved sessions".into() },
             SlashCommand { value: "/new".into(), description: "Start a new conversation".into() },
+            SlashCommand { value: "/reload".into(), description: "Hot-reload config, agents and skills".into() },
             SlashCommand { value: "/log".into(), description: "Export the full conversation log".into() },
+            SlashCommand { value: "/help".into(), description: "Show commands and keyboard shortcuts".into() },
+            SlashCommand { value: "/quit".into(), description: "Exit g-agent".into() },
         ];
 
         let skill_commands = self
@@ -860,11 +1004,77 @@ impl App {
     }
 
     fn current_menu_items(&self) -> Vec<SlashCommand> {
+        if !self.composer.menu_open {
+            return Vec::new();
+        }
+
         let groups = self
             .menu_groups_raw
             .iter()
             .map(|(name, items)| (name.as_str(), items.as_slice()))
             .collect::<Vec<_>>();
+
+        // Skill (or other group) picker: filter children by whatever is typed.
+        if self.composer.open_group.is_some() {
+            return self
+                .composer
+                .menu_items(&self.commands, &groups)
+                .into_iter()
+                .cloned()
+                .collect();
+        }
+
+        let text = self.composer.textarea.text().to_string();
+
+        if let Some(partial) = text.strip_prefix("/agent ") {
+            return filter_argument_items(
+                self.agents.iter().map(|agent| SlashCommand {
+                    value: format!("/agent {}", agent.name),
+                    description: format!(
+                        "{}{}",
+                        if agent.active { "current · " } else { "" },
+                        agent.description
+                    ),
+                }),
+                partial,
+            );
+        }
+        if let Some(partial) = text.strip_prefix("/mcp auth ") {
+            return filter_argument_items(
+                self.mcp_servers.iter().map(|server| SlashCommand {
+                    value: format!("/mcp auth {}", server.name),
+                    description: if server.connected {
+                        "connected".into()
+                    } else if server.auth_required {
+                        "auth required".into()
+                    } else {
+                        "not connected".into()
+                    },
+                }),
+                partial,
+            );
+        }
+        if let Some(partial) = text.strip_prefix("/resume ") {
+            return filter_argument_items(
+                self.saved_sessions
+                    .iter()
+                    .filter(|session| session.agent == self.active_agent)
+                    .map(|session| SlashCommand {
+                        value: format!("/resume {}", session.id),
+                        description: format!(
+                            "{} · {} · {} msgs",
+                            session.preview,
+                            format_session_age(session.updated_at),
+                            session.turn_count
+                        ),
+                    }),
+                partial,
+            );
+        }
+        if text.contains(' ') {
+            return Vec::new();
+        }
+
         self.composer
             .menu_items(&self.commands, &groups)
             .into_iter()
@@ -872,31 +1082,23 @@ impl App {
             .collect()
     }
 
-    fn format_skills(&self) -> String {
-        if self.skills.is_empty() {
-            return "No skills loaded.".into();
+    fn format_help(&self) -> String {
+        let mut out = String::from("Commands:\n");
+        for command in &self.commands {
+            out.push_str(&format!("  {:<12} {}\n", command.value.trim_end(), command.description));
         }
-
-        let mut sections = Vec::new();
-        for (label, source) in [
-            ("Built-in", "builtin"),
-            ("Global", "global"),
-            ("Self", "self"),
-        ] {
-            let items: Vec<String> = self
-                .skills
-                .iter()
-                .filter(|skill| skill.source.as_deref() == Some(source))
-                .map(|skill| format!("  • {} — {}", skill.name, skill.description))
-                .collect();
-            if items.is_empty() {
-                sections.push(format!("{label}:\n  (none)"));
-            } else {
-                sections.push(format!("{label}:\n{}", items.join("\n")));
-            }
-        }
-
-        sections.join("\n\n")
+        out.push_str(&format!(
+            "  /<skill>     Run a skill directly ({} loaded)\n",
+            self.skills.len()
+        ));
+        out.push_str(concat!(
+            "\nKeys:\n",
+            "  Enter send · Shift+Enter newline · Tab complete command\n",
+            "  ↑/↓ scroll history, or move selection when the menu is open\n",
+            "  Esc undo last send / clear input / cancel a running turn\n",
+            "  Ctrl+Y or Cmd+C copy last reply · mouse wheel scroll\n",
+        ));
+        out
     }
 
     fn format_agents(&self) -> String {
@@ -1080,4 +1282,25 @@ fn copy_to_clipboard(text: &str) -> bool {
     arboard::Clipboard::new()
         .and_then(|mut clip| clip.set_text(text.to_owned()))
         .is_ok()
+}
+
+/// Argument candidates for commands like `/agent <name>`: filter by the
+/// partial argument the user has typed so far (matched against the last
+/// whitespace-separated token of the candidate value).
+fn filter_argument_items(
+    candidates: impl Iterator<Item = SlashCommand>,
+    partial: &str,
+) -> Vec<SlashCommand> {
+    let needle = partial.trim().to_lowercase();
+    candidates
+        .filter(|item| {
+            if needle.is_empty() {
+                return true;
+            }
+            item.value
+                .rsplit(' ')
+                .next()
+                .is_some_and(|arg| arg.to_lowercase().contains(&needle))
+        })
+        .collect()
 }

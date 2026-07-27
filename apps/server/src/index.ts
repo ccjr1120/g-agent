@@ -1,5 +1,6 @@
 import type { ServerWebSocket } from "bun";
 import { watch } from "node:fs";
+import { basename, dirname } from "node:path";
 import {
   buildAgentSystemPrompt,
   builtinTools,
@@ -250,7 +251,7 @@ async function reloadAgentsCatalog(): Promise<LoadedAgents> {
   Object.assign(config, freshConfig);
   clearGlobalSkillsCache();
   loadedAgents = await loadAgents(config);
-  ensureAgentsDirectoryWatch();
+  ensureReloadWatches();
   return loadedAgents;
 }
 
@@ -259,6 +260,7 @@ function syncActiveAgentConfig(ws: ServerWebSocket<WsData>): AgentConfig {
   if (refreshed) {
     ws.data.activeAgent = refreshed;
     ws.data.systemPrompt = buildAgentSystemPrompt(refreshed, loadedAgents);
+    ws.data.effectiveProvider = resolveProvider(refreshed);
     return refreshed;
   }
 
@@ -278,51 +280,91 @@ function sendAgentsCatalog(ws: ServerWebSocket<WsData>): void {
   });
 }
 
-function broadcastAgentsCatalog(): void {
+function refreshClient(ws: ServerWebSocket<WsData>): void {
+  sendAgentsCatalog(ws);
+  send(ws, { type: "skills", skills: skillsCatalog(ws.data.activeAgent) });
+  sendMcpCatalog(ws);
+  send(ws, { type: "system_prompt", text: ws.data.systemPrompt });
+  sendContextUsage(ws);
+}
+
+/**
+ * Re-read config + agents + skills from disk and push the fresh catalogs to
+ * every connected client. MCP connections are only re-established when the
+ * merged MCP server set for a client's active agent actually changed.
+ */
+async function reloadAndRefreshClients(): Promise<void> {
+  const mcpSnapshots = new Map<ServerWebSocket<WsData>, string>();
+  for (const ws of clients) {
+    mcpSnapshots.set(ws, JSON.stringify(mergedMcpServers(ws.data.activeAgent)));
+  }
+
+  await reloadAgentsCatalog();
+
   for (const ws of clients) {
     syncActiveAgentConfig(ws);
-    sendAgentsCatalog(ws);
+    const after = JSON.stringify(mergedMcpServers(ws.data.activeAgent));
+    if (mcpSnapshots.get(ws) !== after) {
+      await ws.data.mcpManager.close();
+      ws.data.mcpManager = await connectMcpForAgent(ws.data.activeAgent);
+    }
+    refreshClient(ws);
   }
 }
 
-function watchAgentsDirectory(): void {
-  const userPath = loadedAgents.userPath;
-  if (!userPath) {
+const watchedReloadPaths = new Set<string>();
+
+/**
+ * Watch a path and trigger a debounced full reload + client refresh on any
+ * change. `filterFile` narrows a directory watch to a single file (used for
+ * config.json, since editors replace the file and break direct file watches).
+ */
+function watchPathForReload(
+  path: string,
+  options: { recursive?: boolean; filterFile?: string } = {},
+): void {
+  if (!path || watchedReloadPaths.has(path)) {
     return;
   }
 
   let timer: ReturnType<typeof setTimeout> | null = null;
-  watch(userPath, { recursive: true }, () => {
-    if (timer !== null) {
-      clearTimeout(timer);
-    }
-    timer = setTimeout(() => {
-      timer = null;
-      void reloadAgentsCatalog()
-        .then(() => {
-          broadcastAgentsCatalog();
-        })
-        .catch((error) => {
+  try {
+    watch(path, { recursive: options.recursive ?? false }, (_event, filename) => {
+      if (options.filterFile && filename && filename !== options.filterFile) {
+        return;
+      }
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        void reloadAndRefreshClients().catch((error) => {
           console.warn(
-            "Failed to reload agents after directory change:",
+            `Failed to reload after change under ${path}:`,
             error instanceof Error ? error.message : error,
           );
         });
-    }, 300);
-  });
+      }, 300);
+    });
+    watchedReloadPaths.add(path);
+  } catch (error) {
+    console.warn(
+      `Failed to watch ${path}:`,
+      error instanceof Error ? error.message : error,
+    );
+  }
 }
 
-let agentsDirectoryWatchStarted = false;
-
-function ensureAgentsDirectoryWatch(): void {
-  if (agentsDirectoryWatchStarted) {
-    return;
+function ensureReloadWatches(): void {
+  if (loadedAgents.userPath) {
+    watchPathForReload(loadedAgents.userPath, { recursive: true });
   }
-  if (!loadedAgents.userPath) {
-    return;
+  if (loadedAgents.globalSkillsPath) {
+    watchPathForReload(loadedAgents.globalSkillsPath, { recursive: true });
   }
-  agentsDirectoryWatchStarted = true;
-  watchAgentsDirectory();
+  if (configPath) {
+    watchPathForReload(dirname(configPath), { filterFile: basename(configPath) });
+  }
 }
 
 /**
@@ -383,16 +425,7 @@ async function applyAgentSwitch(
     ws.data.history.length = 0;
   }
 
-  send(ws, {
-    type: "agents",
-    agents: agentCatalog(loadedAgents, ws.data.activeAgent),
-    active: ws.data.activeAgent.name,
-    model: modelLabel(ws.data.effectiveProvider),
-  });
-  send(ws, { type: "skills", skills: skillsCatalog(ws.data.activeAgent) });
-  sendMcpCatalog(ws);
-  send(ws, { type: "system_prompt", text: ws.data.systemPrompt });
-  sendContextUsage(ws);
+  refreshClient(ws);
 }
 
 async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<void> {
@@ -536,19 +569,7 @@ Bun.serve<WsData>({
             active: ws.data.activeAgent.name,
           });
         }
-        send(ws, {
-          type: "agents",
-          agents: agentCatalog(loadedAgents, ws.data.activeAgent),
-          active: ws.data.activeAgent.name,
-          model: modelLabel(ws.data.effectiveProvider),
-        });
-        send(ws, {
-          type: "skills",
-          skills: skillsCatalog(ws.data.activeAgent),
-        });
-        sendMcpCatalog(ws);
-        send(ws, { type: "system_prompt", text: ws.data.systemPrompt });
-        sendContextUsage(ws);
+        refreshClient(ws);
       })();
     },
     close(ws) {
@@ -664,6 +685,17 @@ Bun.serve<WsData>({
         return;
       }
 
+      if (message.type === "reload") {
+        void reloadAndRefreshClients().catch((error) => {
+          send(ws, {
+            type: "error",
+            message:
+              error instanceof Error ? error.message : "Reload failed",
+          });
+        });
+        return;
+      }
+
       if (message.type === "mcp_auth") {
         void (async () => {
           const serverName = message.name.trim();
@@ -724,7 +756,7 @@ Bun.serve<WsData>({
   },
 });
 
-ensureAgentsDirectoryWatch();
+ensureReloadWatches();
 
 const startupProvider = resolveProvider(initialAgent);
 const providerLabel = startupProvider ? formatProviderRef(startupProvider) : "echo";

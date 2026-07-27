@@ -140,6 +140,13 @@ restart_server_if_running() {
   fi
 }
 
+write_install_dir_marker() {
+  local dir="$1"
+  local marker="${XDG_CONFIG_HOME:-$HOME/.config}/g-agent/install-dir"
+  mkdir -p "$(dirname "$marker")"
+  printf '%s\n' "$dir" >"$marker"
+}
+
 install_from_dir() {
   local dir="$1"
   echo "==> Installing dependencies..."
@@ -153,6 +160,8 @@ install_from_dir() {
 
   echo "==> Installing g-agent CLI..."
   cargo install --path "$dir/apps/tui" --locked --force
+
+  write_install_dir_marker "$dir"
 
   restart_server_if_running "$dir" || true
 

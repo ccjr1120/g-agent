@@ -41,11 +41,15 @@ impl Composer {
     }
 
     pub fn on_text_changed(&mut self) {
-        self.menu_open = self.textarea.text().starts_with('/') && !self.textarea.text().contains(' ');
-        if self.menu_open {
+        // While browsing a group (e.g. skills), keep the menu open and let the
+        // input act as a filter — even when it no longer starts with `/`.
+        if self.open_group.is_some() {
+            self.menu_open = true;
             self.menu_index = 0;
-            self.open_group = None;
+            return;
         }
+        self.menu_open = self.textarea.text().starts_with('/');
+        self.menu_index = 0;
     }
 
     pub fn consume_restore(&mut self) -> Option<String> {
@@ -124,6 +128,7 @@ impl Composer {
     pub fn clear(&mut self) {
         self.textarea.set_text(String::new());
         self.pastes.clear();
+        self.open_group = None;
         self.on_text_changed();
     }
 
@@ -135,26 +140,44 @@ impl Composer {
         if !self.menu_open {
             return Vec::new();
         }
-        let query = self.textarea.text().to_lowercase();
-        let root: Vec<&SlashCommand> = commands
-            .iter()
-            .filter(|command| command.value.to_lowercase().starts_with(&query))
-            .collect();
         if let Some(group) = &self.open_group {
-            let mut items = Vec::new();
-            if let Some(header) = root
-                .iter()
-                .find(|command| command_group_id(&command.value) == group.as_str())
-            {
-                items.push(*header);
-            }
+            let query = self
+                .textarea
+                .text()
+                .trim()
+                .trim_start_matches('/')
+                .to_lowercase();
             if let Some((_, children)) = groups
                 .iter()
                 .find(|(name, _)| command_group_id(name) == group.as_str())
             {
-                items.extend(children.iter());
+                return children
+                    .iter()
+                    .filter(|command| {
+                        if query.is_empty() {
+                            return true;
+                        }
+                        let name = command_group_id(&command.value).to_lowercase();
+                        name.contains(&query)
+                            || command.description.to_lowercase().contains(&query)
+                    })
+                    .collect();
             }
-            return items;
+            return Vec::new();
+        }
+        let query = self.textarea.text().to_lowercase();
+        let mut root: Vec<&SlashCommand> = commands
+            .iter()
+            .filter(|command| command.value.to_lowercase().starts_with(&query))
+            .collect();
+        if root.is_empty() {
+            let needle = query.trim_start_matches('/');
+            if !needle.is_empty() {
+                root = commands
+                    .iter()
+                    .filter(|command| command.value.to_lowercase().contains(needle))
+                    .collect();
+            }
         }
         root
     }
@@ -228,23 +251,40 @@ impl Widget for MenuWidget<'_> {
             return;
         }
 
-        let hint = Line::from(vec![Span::styled(
-            "Commands · ↑↓ select · Enter run · Esc close",
-            style::muted(),
-        )]);
+        let total = self.menu_items.len();
+        let selected = self.composer.menu_index.min(total.saturating_sub(1));
+        let counter = if total > MENU_VISIBLE_ROWS {
+            format!(" · {}/{}", selected + 1, total)
+        } else {
+            String::new()
+        };
+        let hint_text = if self.composer.open_group.is_some() {
+            format!("Filter · type to search · ↑↓ select · Enter run · Esc back{counter}")
+        } else {
+            format!("Commands · ↑↓ select · Tab complete · Enter run · Esc close{counter}")
+        };
+        let hint = Line::from(vec![Span::styled(hint_text, style::muted())]);
         buf.set_line(area.x, area.y, &hint, area.width);
 
-        for (index, item) in self.menu_items.iter().enumerate().take(6) {
-            let row = area.y + 1 + index as u16;
+        let start = selected.saturating_sub(MENU_VISIBLE_ROWS - 1);
+        for (offset, (index, item)) in self
+            .menu_items
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(MENU_VISIBLE_ROWS)
+            .enumerate()
+        {
+            let row = area.y + 1 + offset as u16;
             if row >= area.bottom() {
                 break;
             }
-            let selected = index == self.composer.menu_index;
-            let prefix = if selected { "❯ " } else { "  " };
+            let is_selected = index == selected;
+            let prefix = if is_selected { "❯ " } else { "  " };
             let line = Line::from(vec![
                 Span::styled(
                     format!("{prefix}{}", item.value),
-                    if selected {
+                    if is_selected {
                         style::menu_selected()
                     } else {
                         Style::default()
@@ -258,9 +298,11 @@ impl Widget for MenuWidget<'_> {
     }
 }
 
+pub const MENU_VISIBLE_ROWS: usize = 6;
+
 pub fn menu_height(composer: &Composer, menu_items: &[SlashCommand]) -> u16 {
     if composer.menu_open && !menu_items.is_empty() {
-        menu_items.len().min(6) as u16 + 1
+        menu_items.len().min(MENU_VISIBLE_ROWS) as u16 + 1
     } else {
         0
     }

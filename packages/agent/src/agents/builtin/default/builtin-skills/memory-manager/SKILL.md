@@ -1,6 +1,6 @@
 ---
 name: memory-manager
-description: 用户记忆管理：除纯打招呼外，回答前应查阅用户记忆；「记住…」「列出记忆」「删除记忆」「我的…」「你还记得…」等显式记忆操作时启用。
+description: 用户记忆的写入与维护：记住、列出、搜索、修改、删除记忆时启用。查询类需求优先直接用系统提示里的 ## Memory，不必先加载本 skill。
 ---
 
 ## 本 skill 的定位
@@ -13,7 +13,12 @@ description: 用户记忆管理：除纯打招呼外，回答前应查阅用户�
 | **脚本路径** | `{{skill_dir}}/scripts/memory.mjs`（加载时已替换为磁盘实际路径） |
 | **本 skill 写入的数据** | `~/.config/g-agent/agents/<agent>/memory.md`（见下文） |
 
----
+## 读取 vs 写入
+
+会话启动时，当前 agent 的 `memory.md` 会自动注入系统提示的 `## Memory` 段。
+
+- **查/用记忆**（打开某个别名、找路径、回忆偏好等）：直接看系统提示里的 `## Memory`，不要再 `list` / `read`。
+- **改记忆**（记住、更新、删除、显式「列出全部记忆」）：用本 skill 的脚本；改完后以脚本输出为准，本轮不必再读文件。
 
 ## 记忆文件
 
@@ -55,25 +60,11 @@ node "{{skill_dir}}/scripts/memory.mjs" delete <id>
 
 需要结构化结果时加 `--json`。
 
-## 读取记忆
-
-除非是纯粹的打招呼（如「你好」「hi」「早上好」），否则在回答前先用 `bash` 执行：
-
-```bash
-node "{{skill_dir}}/scripts/memory.mjs" list
-```
-
-再据此回答。脚本失败时，先 `paths` 拿到 `memoryPath`，再用 `read` 读取该文件（不存在则视为空）。
-
-以下类型的问题必须查阅记忆：个人习惯与偏好、开发/工作目录与路径、身份与称呼、配置与环境、用户曾要求记住的内容，以及含「我的」「你还记得」「之前说过」等表述的问题。
-
-已经在本轮对话中读取过则无需重复读取。写入、更新或删除记忆前，同样先用 `list` 或 `search` 查看当前内容。
-
 ## 写入记忆
 
 当用户说「记住……」「记一下……」「帮我记……」或类似表达时：
 
-1. 先读取现有记忆，判断是否已有等价或冲突内容
+1. 先对照系统提示 `## Memory`（或 `list` / `search`）判断是否已有等价或冲突内容
 2. 无等价内容时，用 `bash` 执行：
 
 ```bash
@@ -86,9 +77,10 @@ node "{{skill_dir}}/scripts/memory.mjs" add "<内容>"
 
 ## 查询记忆
 
-当用户询问「我有哪些记忆」「列出记忆」「搜索记忆」「查一下记忆里有没有……」时：
+当用户显式询问「我有哪些记忆」「列出记忆」「搜索记忆」「查一下记忆里有没有……」时：
 
-- 列出全部：`node "{{skill_dir}}/scripts/memory.mjs" list`
+- 若只需引用已知内容：直接用系统提示 `## Memory`
+- 列出全部（要带 `#id`）：`node "{{skill_dir}}/scripts/memory.mjs" list`
 - 关键词搜索：`node "{{skill_dir}}/scripts/memory.mjs" search "<关键词>"`
 - 查看单条：`node "{{skill_dir}}/scripts/memory.mjs" get <id>`
 

@@ -15,6 +15,9 @@ export type AgentConfig = {
   description: string;
   systemPromptBody: string | null;
   systemPromptPath: string | null;
+  /** Injected user memory body (`memory.md`), if any. */
+  memoryBody: string | null;
+  memoryPath: string | null;
   skills: Skill[];
   skillConflicts: SkillConflict[];
   builtinSkillsPath: string;
@@ -57,6 +60,7 @@ const DEFAULT_AGENT_NAME = "default";
 
 const AGENT_JSON = "agent.json";
 const SYSTEM_PROMPT_FILE = "system.md";
+const MEMORY_FILE = "memory.md";
 const BUILTIN_SKILLS_DIR = "builtin-skills";
 const USER_SKILLS_DIR = "skills";
 
@@ -198,6 +202,47 @@ export function resolveAgentsDir(): string | null {
     }
   }
   return null;
+}
+
+/** Prefer the first existing agents dir; fall back to the default config path. */
+function agentsBaseDir(): string {
+  return (
+    resolveAgentsDir() ??
+    join(homedir(), ".config", "g-agent", "agents")
+  );
+}
+
+/**
+ * Resolve the per-agent memory.md path (same rules as memory-manager script).
+ * Honors `G_AGENT_MEMORY_PATH` when set.
+ */
+export function resolveAgentMemoryPath(agentName: string): string {
+  if (process.env.G_AGENT_MEMORY_PATH?.trim()) {
+    return expandHome(process.env.G_AGENT_MEMORY_PATH.trim());
+  }
+  return join(agentsBaseDir(), agentName, MEMORY_FILE);
+}
+
+async function readAgentMemory(agentName: string): Promise<{
+  body: string | null;
+  path: string | null;
+}> {
+  const memoryPath = resolveAgentMemoryPath(agentName);
+  if (!existsSync(memoryPath)) {
+    return { body: null, path: memoryPath };
+  }
+
+  const content = (await readFile(memoryPath, "utf8")).trim();
+  return { body: content || null, path: memoryPath };
+}
+
+function formatMemorySection(body: string, memoryPath: string | null): string {
+  const lines = ["## Memory", ""];
+  if (memoryPath) {
+    lines.push(`Source: \`${memoryPath}\``, "");
+  }
+  lines.push(body);
+  return lines.join("\n");
 }
 
 export function resolveBuiltinAgentsDir(): string {
@@ -360,9 +405,10 @@ async function loadAgentDir(
   source: "builtin" | "user",
   globalSkillsConfig?: SkillsConfig,
 ): Promise<AgentConfig> {
-  const [meta, { body, path: systemPromptPath }] = await Promise.all([
+  const [meta, { body, path: systemPromptPath }, memory] = await Promise.all([
     readAgentMeta(dir),
     readSystemPrompt(dir),
+    readAgentMemory(name),
   ]);
 
   // Built-in `default` is shipped with the package. User overlay under
@@ -396,6 +442,8 @@ async function loadAgentDir(
     description: meta.description,
     systemPromptBody: body,
     systemPromptPath,
+    memoryBody: memory.body,
+    memoryPath: memory.path,
     skills,
     skillConflicts: conflicts,
     builtinSkillsPath,
@@ -526,9 +574,14 @@ export function buildAgentSystemPrompt(
   const builtinSkills = agent.skills.filter((s) => s.source === "builtin");
   const globalSkills = agent.skills.filter((s) => s.source === "global");
   const selfSkills = agent.skills.filter((s) => s.source === "self");
+  const memorySection =
+    agent.memoryBody != null
+      ? formatMemorySection(agent.memoryBody, agent.memoryPath)
+      : "";
 
   return joinPromptSections(
     body,
+    memorySection,
     formatSkillsSection(
       builtinSkills,
       "Built-in skills",

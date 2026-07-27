@@ -21,6 +21,7 @@ pub enum ClientMessage {
     Skill { name: String },
     Mcp,
     McpAuth { name: String },
+    Reload,
     Resume { agent: String, history: Vec<ConversationTurn> },
 }
 

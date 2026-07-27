@@ -11,6 +11,7 @@ export type ClientMessage =
   | { type: "skill"; name: string }
   | { type: "mcp" }
   | { type: "mcp_auth"; name: string }
+  | { type: "reload" }
   | { type: "resume"; agent: string; history: ConversationTurn[] };
 
 export type McpServerCatalogEntry = {
@@ -76,6 +77,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       return data;
     }
     if (data.type === "mcp_auth" && typeof data.name === "string") {
+      return data;
+    }
+    if (data.type === "reload") {
       return data;
     }
     if (data.type === "resume") {

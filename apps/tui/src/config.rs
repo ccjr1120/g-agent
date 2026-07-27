@@ -10,6 +10,8 @@ const BANNER_FILENAME: &str = "banner.txt";
 const DEFAULT_BANNER: &str =
     include_str!("../../../packages/agent/src/banners/builtin/banner.txt");
 
+/// Server URL precedence: `G_AGENT_SERVER_URL` > `G_AGENT_HOST`/`G_AGENT_PORT`
+/// > config.json `serverUrl` > built-in default.
 pub fn server_url() -> String {
     if let Ok(url) = env::var("G_AGENT_SERVER_URL") {
         let trimmed = url.trim();
@@ -18,15 +20,25 @@ pub fn server_url() -> String {
         }
     }
 
-    let host = env::var("G_AGENT_HOST")
+    let host_override = env::var("G_AGENT_HOST")
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = env::var("G_AGENT_PORT")
+        .filter(|value| !value.trim().is_empty());
+    let port_override = env::var("G_AGENT_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_SERVER_PORT);
+        .filter(|value| *value > 0);
+
+    if host_override.is_none() && port_override.is_none() {
+        if let Ok(Some(url)) = read_config_server_hint() {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+
+    let host = host_override.unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = port_override.unwrap_or(DEFAULT_SERVER_PORT);
 
     format!("ws://{host}:{port}")
 }
@@ -131,6 +143,23 @@ fn banner_paths() -> Vec<PathBuf> {
     paths
 }
 
+fn install_dir_marker_path() -> PathBuf {
+    config_dir().join("install-dir")
+}
+
+fn read_install_dir_marker() -> Option<PathBuf> {
+    let path = install_dir_marker_path();
+    if !path.is_file() {
+        return None;
+    }
+    let raw = fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
+}
+
 pub fn repo_root_from_exe() -> Option<PathBuf> {
     for root in repo_root_candidates() {
         if root.join("apps/server/src/index.ts").is_file() {
@@ -143,12 +172,20 @@ pub fn repo_root_from_exe() -> Option<PathBuf> {
 fn repo_root_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
+    if let Some(root) = option_env!("G_AGENT_BUILD_ROOT") {
+        candidates.push(PathBuf::from(root));
+    }
+
     if let Ok(path) = env::var("G_AGENT_INSTALL_DIR") {
         candidates.push(PathBuf::from(path));
     }
 
     if let Ok(path) = env::var("G_AGENT_HOME") {
         candidates.push(PathBuf::from(path));
+    }
+
+    if let Some(path) = read_install_dir_marker() {
+        candidates.push(path);
     }
 
     if let Some(home) = directories::UserDirs::new() {
