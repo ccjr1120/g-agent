@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::{
     cursor::{MoveTo, SetCursorStyle, Show},
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    },
     execute,
 };
 use ratatui::{
@@ -363,7 +365,6 @@ impl App {
     }
 
     fn finish_turn(&mut self) {
-        let width = self.last_transcript_width;
         if self.cancel_turn {
             self.streaming = None;
             self.streaming_md.reset();
@@ -376,19 +377,7 @@ impl App {
             return;
         }
 
-        if let Some(mut line) = self.streaming.take() {
-            if let Some(start) = self.turn_start {
-                line.duration_ms = Some(start.elapsed().as_millis() as u64);
-            }
-            if !line.text.trim().is_empty() {
-                self.streaming_md.flush(&line.text, assistant_markdown_width(width));
-                self.markdown_cache
-                    .render_static(&line.text, assistant_markdown_width(width));
-            }
-            if !line.text.trim().is_empty() || !line.thinking.trim().is_empty() || !line.tools.is_empty() {
-                self.static_lines.push(line);
-            }
-        }
+        self.commit_streaming_line();
         self.streaming_md.reset();
         self.pending = false;
         self.streaming_flag = false;
@@ -405,23 +394,7 @@ impl App {
         if !self.is_turn_busy() {
             return;
         }
-        let width = self.last_transcript_width;
-        if let Some(mut line) = self.streaming.take() {
-            if let Some(start) = self.turn_start {
-                line.duration_ms = Some(start.elapsed().as_millis() as u64);
-            }
-            if !line.text.trim().is_empty() {
-                self.streaming_md.flush(&line.text, assistant_markdown_width(width));
-                self.markdown_cache
-                    .render_static(&line.text, assistant_markdown_width(width));
-            }
-            if !line.text.trim().is_empty()
-                || !line.thinking.trim().is_empty()
-                || !line.tools.is_empty()
-            {
-                self.static_lines.push(line);
-            }
-        }
+        self.commit_streaming_line();
         self.streaming_md.reset();
         self.pending = false;
         self.streaming_flag = false;
@@ -429,6 +402,59 @@ impl App {
         self.in_flight = None;
         self.error = Some("Connection lost — reconnecting…".into());
         self.persist_session();
+    }
+
+    /// Freeze the in-progress assistant reply into `static_lines`, placing it
+    /// immediately after its user message so queued prompts stay after the
+    /// completed turn instead of trapping the reply at the bottom.
+    fn commit_streaming_line(&mut self) {
+        let width = self.last_transcript_width;
+        let user_index = self.in_flight.as_ref().map(|(index, _, _)| *index);
+        let Some(mut line) = self.streaming.take() else {
+            return;
+        };
+        if let Some(start) = self.turn_start {
+            line.duration_ms = Some(start.elapsed().as_millis() as u64);
+        }
+        if !line.text.trim().is_empty() {
+            self.streaming_md
+                .flush(&line.text, assistant_markdown_width(width));
+            self.markdown_cache
+                .render_static(&line.text, assistant_markdown_width(width));
+        }
+        if line.text.trim().is_empty()
+            && line.thinking.trim().is_empty()
+            && line.tools.is_empty()
+        {
+            return;
+        }
+        match user_index {
+            Some(index) => self.insert_assistant_after_user(index, line),
+            None => self.static_lines.push(line),
+        }
+    }
+
+    fn insert_assistant_after_user(&mut self, user_index: usize, line: ChatLine) {
+        let insert_at = if user_index < self.static_lines.len() {
+            user_index + 1
+        } else {
+            self.static_lines.len()
+        };
+        self.static_lines.insert(insert_at, line);
+        self.shift_line_indices_after_insert(insert_at);
+    }
+
+    fn shift_line_indices_after_insert(&mut self, inserted: usize) {
+        for index in self.send_queue.iter_mut() {
+            if *index >= inserted {
+                *index += 1;
+            }
+        }
+        if let Some((index, _, _)) = &mut self.in_flight {
+            if *index >= inserted {
+                *index += 1;
+            }
+        }
     }
 
     /// After a reconnect the server starts with an empty conversation, so
@@ -467,7 +493,14 @@ impl App {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 self.handle_key(key, transcript_area);
             }
+            Event::Mouse(mouse) => match mouse.kind {
+                // Wheel scrolls the transcript; keyboard ↑/↓ keep prompt recall.
+                MouseEventKind::ScrollUp => self.scroll_history(3, transcript_area),
+                MouseEventKind::ScrollDown => self.scroll_history(-3, transcript_area),
+                _ => {}
+            },
             Event::Paste(text) => {
+                self.input_history.reset_browse();
                 self.composer.insert_paste(&text);
             }
             _ => {}
@@ -536,6 +569,25 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, transcript_area: Rect) {
+        // History browse owns ↑/↓/Enter so slash-looking recalls (e.g. `/resume …`)
+        // never trap keys in the command menu.
+        if self.input_history.is_browsing() {
+            match key.code {
+                KeyCode::Up | KeyCode::Down => {
+                    self.handle_input_history_key(key.code, transcript_area);
+                    return;
+                }
+                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.submit_composer();
+                    return;
+                }
+                _ => {}
+            }
+        } else if matches!(key.code, KeyCode::Up | KeyCode::Down) && !self.composer.menu_open {
+            self.handle_input_history_key(key.code, transcript_area);
+            return;
+        }
+
         if self.composer.menu_open && self.handle_menu_key(key) {
             return;
         }
@@ -569,46 +621,29 @@ impl App {
                 }
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.leave_input_history_browse();
                 self.composer.textarea.insert_str("\n");
                 self.composer.on_text_changed();
             }
             KeyCode::Enter => {
-                let display = self.composer.textarea.text().trim().to_string();
-                if display.is_empty() {
-                    return;
-                }
-                let full = self.composer.expand_message(&display);
-                self.composer.clear();
-                self.submit(display, full);
+                self.submit_composer();
             }
             KeyCode::Backspace => {
+                self.leave_input_history_browse();
                 self.composer.delete_backward();
             }
             KeyCode::Delete if key.modifiers.contains(KeyModifiers::SUPER) => {
+                self.leave_input_history_browse();
                 self.composer.delete_current_line();
             }
             KeyCode::Delete => {
+                self.leave_input_history_browse();
                 self.composer.delete_forward();
             }
             KeyCode::Left => self.composer.textarea.move_left(),
             KeyCode::Right => self.composer.textarea.move_right(),
             KeyCode::Home => self.composer.textarea.move_home(),
             KeyCode::End => self.composer.textarea.move_end(),
-            KeyCode::Up => {
-                let current = self.composer.textarea.text().to_string();
-                if let Some(text) = self.input_history.up(&current) {
-                    self.apply_input_history_text(text);
-                } else if !self.input_history.is_browsing() {
-                    self.scroll_history(1, transcript_area);
-                }
-            }
-            KeyCode::Down => {
-                if let Some(text) = self.input_history.down() {
-                    self.apply_input_history_text(text);
-                } else {
-                    self.scroll_history(-1, transcript_area);
-                }
-            }
             KeyCode::PageUp => {
                 self.scroll_history(10, transcript_area);
             }
@@ -628,11 +663,51 @@ impl App {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) =>
             {
+                self.leave_input_history_browse();
                 self.composer.textarea.insert_str(&ch.to_string());
                 self.composer.on_text_changed();
             }
             _ => {}
         }
+    }
+
+    fn submit_composer(&mut self) {
+        let display = self.composer.textarea.text().trim().to_string();
+        if display.is_empty() {
+            return;
+        }
+        let full = self.composer.expand_message(&display);
+        self.composer.clear();
+        self.submit(display, full);
+    }
+
+    fn handle_input_history_key(&mut self, code: KeyCode, transcript_area: Rect) {
+        match code {
+            KeyCode::Up => {
+                let current = self.composer.textarea.text().to_string();
+                if let Some(text) = self.input_history.up(&current) {
+                    self.apply_input_history_text(text);
+                } else if !self.input_history.is_browsing() {
+                    self.scroll_history(1, transcript_area);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(text) = self.input_history.down() {
+                    self.apply_input_history_text(text);
+                    // Restoring the live draft should reopen the slash menu if needed.
+                    if !self.input_history.is_browsing() {
+                        self.composer.on_text_changed();
+                    }
+                } else if !self.input_history.is_browsing() {
+                    self.scroll_history(-1, transcript_area);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn leave_input_history_browse(&mut self) {
+        self.input_history.reset_browse();
     }
 
     /// If the selected item is a group header (e.g. "/skills" or "/agent"), open the
@@ -672,16 +747,26 @@ impl App {
     fn apply_input_history_text(&mut self, text: String) {
         self.composer.textarea.set_text(text);
         self.composer.textarea.move_end();
-        self.composer.on_text_changed();
+        // Keep the slash menu closed while browsing history so ↑/↓ don't get
+        // trapped by `/resume …` / `/agent …` candidate lists.
+        self.composer.menu_open = false;
+        self.composer.menu_index = 0;
+        self.composer.open_group = None;
     }
 
     fn submit(&mut self, display: String, full: String) {
-        // Prefer the expanded message so recalled prompts include pasted blocks.
-        self.input_history.push(if full.trim().is_empty() {
-            display.clone()
+        // Only remember real chat prompts. Slash commands like `/resume …` would
+        // reopen the command menu and make ↑ history feel broken.
+        let remembered = if full.trim().is_empty() {
+            display.as_str()
         } else {
-            full.clone()
-        });
+            full.as_str()
+        };
+        if should_remember_prompt(remembered) {
+            self.input_history.push(remembered);
+        } else {
+            self.input_history.reset_browse();
+        }
 
         let text = display.as_str();
         if text == "exit" || text == "/quit" || text == "/exit" {
@@ -1351,6 +1436,11 @@ fn copy_to_clipboard(text: &str) -> bool {
     arboard::Clipboard::new()
         .and_then(|mut clip| clip.set_text(text.to_owned()))
         .is_ok()
+}
+
+fn should_remember_prompt(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty() && !trimmed.starts_with('/') && trimmed != "exit"
 }
 
 /// Argument candidates for commands like `/agent <name>`: filter by the

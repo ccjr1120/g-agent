@@ -5,7 +5,6 @@ mod server;
 mod session;
 mod ui;
 
-use std::fmt;
 use std::io::{stdout, Write};
 use std::time::Duration;
 
@@ -13,10 +12,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::{
     cursor::{Hide, Show},
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    Command,
 };
 
 use crate::config::{load_banner_lines, server_url};
@@ -130,34 +130,29 @@ async fn async_main(ws_url: String) -> Result<()> {
 async fn run_tui(server_url: String, banner: Vec<String>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableAlternateScroll, EnableBracketedPaste, Hide)?;
+    // Mouse capture so the wheel scrolls the transcript; ↑/↓ stay for prompt recall.
+    // Hold Shift to select text in most terminals.
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        Hide
+    )?;
 
     let result = App::new(server_url, banner).run().await;
 
-    execute!(stdout, DisableAlternateScroll, DisableBracketedPaste, LeaveAlternateScreen, Show)?;
+    execute!(
+        stdout,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    )?;
     disable_raw_mode()?;
     stdout.flush()?;
 
     result
-}
-
-/// Wheel → cursor up/down in the alternate screen, without capturing mouse clicks/drags.
-#[derive(Debug, Clone, Copy)]
-struct EnableAlternateScroll;
-
-impl Command for EnableAlternateScroll {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1007h")
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DisableAlternateScroll;
-
-impl Command for DisableAlternateScroll {
-    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1007l")
-    }
 }
 
 pub fn sleep_ms(ms: u64) {

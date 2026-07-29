@@ -112,7 +112,9 @@ pub fn build_transcript_lines(
         rendered.push(Line::from(""));
     }
 
-    for line in content.lines {
+    // Keep queued follow-ups after the live turn so order stays
+    // user → reply → queued, not user → queued → reply.
+    for line in content.lines.iter().filter(|line| !line.queued) {
         push_chat_line(&mut rendered, line, width, markdown);
     }
 
@@ -125,6 +127,10 @@ pub fn build_transcript_lines(
         ));
     } else if let Some(line) = content.streaming {
         push_streaming_line(&mut rendered, line, width, markdown, streaming_md);
+    }
+
+    for line in content.lines.iter().filter(|line| line.queued) {
+        push_chat_line(&mut rendered, line, width, markdown);
     }
 
     rendered
@@ -400,6 +406,21 @@ fn tool_icon(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::client::ChatLine;
+    use crate::ui::markdown::{MarkdownCache, StreamingMarkdown};
+    use std::time::Instant;
+
+    fn sample_line(role: &str, text: &str, queued: bool) -> ChatLine {
+        ChatLine {
+            role: role.to_string(),
+            text: text.to_string(),
+            sent_content: None,
+            thinking: String::new(),
+            tools: Vec::new(),
+            duration_ms: None,
+            queued,
+        }
+    }
 
     #[test]
     fn paragraph_scroll_follows_bottom_when_offset_zero() {
@@ -415,5 +436,46 @@ mod tests {
     fn content_width_reserves_left_padding() {
         assert_eq!(content_width(80), 79);
         assert_eq!(content_width(1), 1);
+    }
+
+    #[test]
+    fn queued_messages_render_after_streaming_reply() {
+        let lines = vec![
+            sample_line("user", "first", false),
+            sample_line("user", "queued-second", true),
+        ];
+        let streaming = sample_line("assistant", "reply-to-first", false);
+        let content = TranscriptContent {
+            lines: &lines,
+            streaming: Some(&streaming),
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            width: 80,
+        };
+        let mut markdown = MarkdownCache::new();
+        let streaming_md = StreamingMarkdown::new();
+        let rendered = build_transcript_lines(&content, &mut markdown, &streaming_md);
+        let joined: String = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let first = joined.find("first").expect("first user prompt");
+        let reply = joined.find("reply-to-first").expect("streaming reply");
+        let queued = joined.find("queued-second").expect("queued follow-up");
+        assert!(first < reply, "user should precede its reply");
+        assert!(reply < queued, "queued follow-up should come after the live reply");
     }
 }

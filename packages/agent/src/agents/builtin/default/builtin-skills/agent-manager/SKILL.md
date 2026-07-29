@@ -94,7 +94,7 @@ done
 |------|---------|
 | **name** | 用途的英文翻译，小写、连字符分隔，如 `code-reviewer`、`commit-writer`、`translator` |
 | **description** | 用途的中文一句话，如「专注代码审查的助手」 |
-| **system.md** | 基于用途生成角色设定：身份、能力边界、语气、常用工具偏好。3-8 句话即可，不要冗长。若含 builtin-skills，须体现 Skills first 原则，并在增删 skill 时同步更新 |
+| **system.md** | 基于用途生成角色设定：身份、能力边界、语气、常用工具偏好。3-8 句话即可，不要冗长。若含 builtin-skills，须体现 Skills first 原则，并在增删 skill 时同步更新。执行类 agent 默认应体现 **先规划再实施**（可参考内置 default 的 Plan before act 段落），避免连续试错式调工具 |
 | **skills** | 始终建议包含 `memory-manager`（记住用户偏好等基础能力）。除非用途明确不需要（如纯一次性翻译 agent），否则 memory-manager 是合理默认。每增加一个 builtin-skill，须同步修订 system.md |
 
 > 模板参考：内置 `default` agent 的 system.md 可先 `read` 作为风格参照。memory-manager skill 的内容可先从内置 `default` 的 `builtin-skills/memory-manager/SKILL.md` `read` 取来直接复用。global / self 技能管理走 **skill-manager**。

@@ -360,20 +360,23 @@ impl InputHistory {
         if self.entries.is_empty() {
             return None;
         }
-        match self.index {
+        let start = match self.index {
             None => {
                 self.draft = current.to_string();
-                let idx = self.entries.len() - 1;
-                self.index = Some(idx);
-                Some(self.entries[idx].clone())
+                self.entries.len()
             }
-            Some(0) => None,
-            Some(i) => {
-                let idx = i - 1;
-                self.index = Some(idx);
-                Some(self.entries[idx].clone())
+            Some(0) => return None,
+            Some(i) => i,
+        };
+
+        let Some(idx) = (0..start).rev().find(|&i| is_recallable(&self.entries[i])) else {
+            if self.index.is_none() {
+                self.draft.clear();
             }
-        }
+            return None;
+        };
+        self.index = Some(idx);
+        Some(self.entries[idx].clone())
     }
 
     /// Move toward newer entries / restore the draft. Returns text to show, or
@@ -382,15 +385,24 @@ impl InputHistory {
         let Some(i) = self.index else {
             return None;
         };
-        if i + 1 >= self.entries.len() {
+        let next = i + 1;
+        if next >= self.entries.len() {
             self.index = None;
-            Some(std::mem::take(&mut self.draft))
-        } else {
-            let idx = i + 1;
+            return Some(std::mem::take(&mut self.draft));
+        }
+        if let Some(idx) = (next..self.entries.len()).find(|&j| is_recallable(&self.entries[j])) {
             self.index = Some(idx);
             Some(self.entries[idx].clone())
+        } else {
+            self.index = None;
+            Some(std::mem::take(&mut self.draft))
         }
     }
+}
+
+fn is_recallable(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty() && !trimmed.starts_with('/') && trimmed != "exit"
 }
 
 #[cfg(test)]
@@ -425,5 +437,20 @@ mod input_history_tests {
         history.push("again");
         assert!(!history.is_browsing());
         assert_eq!(history.entries, vec!["hello", "world", "again"]);
+    }
+
+    #[test]
+    fn up_skips_slash_commands_already_in_history() {
+        let mut history = InputHistory::new();
+        history.entries = vec![
+            "hello".into(),
+            "/resume 160c737d-71ef-426a-8a0b-e79612fd1d8a".into(),
+            "world".into(),
+        ];
+
+        assert_eq!(history.up("").as_deref(), Some("world"));
+        assert_eq!(history.up("world").as_deref(), Some("hello"));
+        assert_eq!(history.down().as_deref(), Some("world"));
+        assert_eq!(history.down().as_deref(), Some(""));
     }
 }
