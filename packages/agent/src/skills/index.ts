@@ -20,8 +20,13 @@ export function parseSkillFile(content: string): {
     return { meta: {}, body: content.trim() };
   }
 
-  const meta = Bun.YAML.parse(match[1]) as Record<string, unknown>;
-  return { meta, body: match[2].trim() };
+  try {
+    const meta = Bun.YAML.parse(match[1]) as Record<string, unknown>;
+    return { meta: meta ?? {}, body: match[2].trim() };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`invalid skill frontmatter: ${message}`);
+  }
 }
 
 export async function loadSkillsFromDir(
@@ -41,7 +46,15 @@ export async function loadSkillsFromDir(
 
     const skillDir = dirname(skillPath);
     const content = await readFile(skillPath, "utf8");
-    const { meta, body } = parseSkillFile(content);
+    let meta: Record<string, unknown>;
+    let body: string;
+    try {
+      ({ meta, body } = parseSkillFile(content));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Skipping skill at ${skillPath}: ${message}`);
+      continue;
+    }
 
     skills.push({
       name: String(meta.name ?? entry.name),

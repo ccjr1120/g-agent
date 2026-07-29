@@ -74,6 +74,7 @@ pub struct SkillInfo {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct McpServerInfo {
     pub name: String,
     pub source: String,
@@ -135,6 +136,21 @@ mod tests {
             message,
             Some(ServerMessage::AgentFallback { requested, active })
                 if requested == "missing" && active == "default"
+        ));
+    }
+
+    #[test]
+    fn parses_camel_case_mcp_catalog_from_server() {
+        let message = parse_server_message(
+            r#"{"type":"mcp","servers":[{"name":"knowledge-mcp","source":"agent","transport":"url","target":"http://localhost:7077/mcp","connected":true,"toolCount":2,"tools":[],"oauth":false,"authRequired":false}]}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::Mcp { servers })
+                if servers.len() == 1
+                    && servers[0].name == "knowledge-mcp"
+                    && servers[0].tool_count == 2
+                    && !servers[0].auth_required
         ));
     }
 }

@@ -230,7 +230,9 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
 }
 
 pub fn format_tool_call(name: &str, args: &str) -> String {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
+    let parsed = serde_json::from_str::<serde_json::Value>(args).ok();
+
+    if let Some(parsed) = &parsed {
         if name == "bash" {
             if let Some(command) = parsed.get("command").and_then(|value| value.as_str()) {
                 return truncate(command, 64);
@@ -247,7 +249,53 @@ pub fn format_tool_call(name: &str, args: &str) -> String {
             }
         }
     }
-    "…".to_string()
+
+    // MCP / unknown tools: show a readable name, plus a primary arg when available.
+    let display_name = display_tool_name(name);
+    if let Some(summary) = parsed.as_ref().and_then(primary_arg_summary) {
+        return format!("{} · {}", display_name, truncate(&summary, 48));
+    }
+    truncate(&display_name, 64)
+}
+
+/// `mcp__server__tool` → `server/tool`; otherwise the raw name.
+fn display_tool_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix("mcp__") {
+        if let Some((server, tool)) = rest.split_once("__") {
+            if !server.is_empty() && !tool.is_empty() {
+                return format!("{server}/{tool}");
+            }
+        }
+    }
+    name.to_string()
+}
+
+fn primary_arg_summary(parsed: &serde_json::Value) -> Option<String> {
+    const PREFERRED_KEYS: &[&str] = &[
+        "query", "q", "path", "url", "uri", "name", "message", "text", "prompt", "command",
+        "pattern", "input", "content", "title", "id",
+    ];
+
+    let obj = parsed.as_object()?;
+    for key in PREFERRED_KEYS {
+        if let Some(value) = obj.get(*key).and_then(|value| value.as_str()) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    for value in obj.values() {
+        if let Some(text) = value.as_str() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -265,4 +313,40 @@ fn compact_path(path: &str, max: usize) -> String {
         path.to_string()
     };
     truncate(&short, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_builtin_tools() {
+        assert_eq!(
+            format_tool_call("bash", r#"{"command":"ls -la"}"#),
+            "ls -la"
+        );
+        assert_eq!(
+            format_tool_call("read", r#"{"path":"README.md"}"#),
+            "README.md"
+        );
+    }
+
+    #[test]
+    fn formats_mcp_tool_with_query() {
+        assert_eq!(
+            format_tool_call(
+                "mcp__knowledge-mcp__search_code_knowledge",
+                r#"{"query":"how does auth work"}"#
+            ),
+            "knowledge-mcp/search_code_knowledge · how does auth work"
+        );
+    }
+
+    #[test]
+    fn formats_mcp_tool_without_useful_args() {
+        assert_eq!(
+            format_tool_call("mcp__knowledge-mcp__list_projects", "{}"),
+            "knowledge-mcp/list_projects"
+        );
+    }
 }

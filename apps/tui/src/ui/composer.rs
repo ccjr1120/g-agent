@@ -317,3 +317,113 @@ impl Default for Composer {
         Self::new()
     }
 }
+
+/// Global prompt history for ↑/↓ recall. Survives agent switches and `/new`.
+#[derive(Debug, Default)]
+pub struct InputHistory {
+    entries: Vec<String>,
+    /// `None` means the live draft is active (not browsing history).
+    index: Option<usize>,
+    draft: String,
+}
+
+impl InputHistory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_browsing(&self) -> bool {
+        self.index.is_some()
+    }
+
+    /// Record a submitted prompt. Consecutive duplicates are ignored.
+    pub fn push(&mut self, entry: impl Into<String>) {
+        let entry = entry.into().trim().to_string();
+        if entry.is_empty() {
+            return;
+        }
+        if self.entries.last() == Some(&entry) {
+            self.reset_browse();
+            return;
+        }
+        self.entries.push(entry);
+        self.reset_browse();
+    }
+
+    pub fn reset_browse(&mut self) {
+        self.index = None;
+        self.draft.clear();
+    }
+
+    /// Move to an older entry. Returns the text to show, or `None` if nothing changed.
+    pub fn up(&mut self, current: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        match self.index {
+            None => {
+                self.draft = current.to_string();
+                let idx = self.entries.len() - 1;
+                self.index = Some(idx);
+                Some(self.entries[idx].clone())
+            }
+            Some(0) => None,
+            Some(i) => {
+                let idx = i - 1;
+                self.index = Some(idx);
+                Some(self.entries[idx].clone())
+            }
+        }
+    }
+
+    /// Move toward newer entries / restore the draft. Returns text to show, or
+    /// `None` when not browsing.
+    pub fn down(&mut self) -> Option<String> {
+        let Some(i) = self.index else {
+            return None;
+        };
+        if i + 1 >= self.entries.len() {
+            self.index = None;
+            Some(std::mem::take(&mut self.draft))
+        } else {
+            let idx = i + 1;
+            self.index = Some(idx);
+            Some(self.entries[idx].clone())
+        }
+    }
+}
+
+#[cfg(test)]
+mod input_history_tests {
+    use super::*;
+
+    #[test]
+    fn up_down_recalls_across_entries_and_restores_draft() {
+        let mut history = InputHistory::new();
+        history.push("first");
+        history.push("second");
+
+        assert_eq!(history.up("draft-now").as_deref(), Some("second"));
+        assert_eq!(history.up("second").as_deref(), Some("first"));
+        assert!(history.up("first").is_none());
+        assert_eq!(history.down().as_deref(), Some("second"));
+        assert_eq!(history.down().as_deref(), Some("draft-now"));
+        assert!(!history.is_browsing());
+        assert!(history.down().is_none());
+    }
+
+    #[test]
+    fn push_skips_consecutive_duplicates_and_resets_browse() {
+        let mut history = InputHistory::new();
+        history.push("hello");
+        history.push("hello");
+        assert_eq!(history.entries.len(), 1);
+
+        history.push("world");
+        let _ = history.up("");
+        assert!(history.is_browsing());
+        history.push("again");
+        assert!(!history.is_browsing());
+        assert_eq!(history.entries, vec!["hello", "world", "again"]);
+    }
+}

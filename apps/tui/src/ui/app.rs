@@ -27,7 +27,9 @@ use crate::session::{
     build_session_preview, format_session_age, format_session_label, list_sessions, load_session,
     save_session, SavedSession, SavedSessionSummary, UndoEntry, UndoStack, write_conversation_log,
 };
-use crate::ui::composer::{command_group_id, menu_height, Composer, ComposerWidget, MenuWidget, SlashCommand};
+use crate::ui::composer::{
+    command_group_id, menu_height, Composer, ComposerWidget, InputHistory, MenuWidget, SlashCommand,
+};
 use crate::ui::status::{StatusBar, STATUS_HEIGHT};
 use crate::ui::markdown::{MarkdownCache, StreamingMarkdown};
 use crate::ui::theme::style;
@@ -58,6 +60,8 @@ pub struct App {
     saved_sessions: Vec<SavedSessionSummary>,
 
     composer: Composer,
+    /// Prompt recall for ↑/↓ — global across agent switches and `/new`.
+    input_history: InputHistory,
     commands: Vec<SlashCommand>,
     command_groups: Vec<(String, Vec<SlashCommand>)>,
     menu_groups_raw: Vec<(String, Vec<SlashCommand>)>,
@@ -105,6 +109,7 @@ impl App {
             mcp_servers: Vec::new(),
             saved_sessions: Vec::new(),
             composer: Composer::new(),
+            input_history: InputHistory::new(),
             commands: Vec::new(),
             command_groups: Vec::new(),
             menu_groups_raw: Vec::new(),
@@ -471,7 +476,7 @@ impl App {
 
     /// Handle a key while the command menu is open. Returns true when the
     /// key was consumed; ↑/↓ with no candidates fall through so they keep
-    /// scrolling history.
+    /// recalling prompts / scrolling the transcript.
     fn handle_menu_key(&mut self, key: KeyEvent) -> bool {
         let menu_items = self.current_menu_items();
         let has_items = !menu_items.is_empty();
@@ -590,10 +595,25 @@ impl App {
             KeyCode::Home => self.composer.textarea.move_home(),
             KeyCode::End => self.composer.textarea.move_end(),
             KeyCode::Up => {
-                self.scroll_history(1, transcript_area);
+                let current = self.composer.textarea.text().to_string();
+                if let Some(text) = self.input_history.up(&current) {
+                    self.apply_input_history_text(text);
+                } else if !self.input_history.is_browsing() {
+                    self.scroll_history(1, transcript_area);
+                }
             }
             KeyCode::Down => {
-                self.scroll_history(-1, transcript_area);
+                if let Some(text) = self.input_history.down() {
+                    self.apply_input_history_text(text);
+                } else {
+                    self.scroll_history(-1, transcript_area);
+                }
+            }
+            KeyCode::PageUp => {
+                self.scroll_history(10, transcript_area);
+            }
+            KeyCode::PageDown => {
+                self.scroll_history(-10, transcript_area);
             }
             KeyCode::Char(ch)
                 if key.modifiers.contains(KeyModifiers::CONTROL) && ch == 'y' =>
@@ -615,28 +635,29 @@ impl App {
         }
     }
 
-    /// If the selected item is a group header (e.g. "/skills"), open the
+    /// If the selected item is a group header (e.g. "/skills" or "/agent"), open the
     /// group as a filterable picker instead of running it. Returns true when
     /// it was one.
     fn try_open_command_group(&mut self, item: &SlashCommand) -> bool {
-        if self.composer.open_group.is_none()
-            && self
+        if self.composer.open_group.is_none() {
+            let group = command_group_id(&item.value);
+            if self
                 .command_groups
                 .iter()
-                .any(|(name, _)| command_group_id(name) == command_group_id(&item.value))
-        {
-            self.composer.open_group = Some(command_group_id(&item.value).to_string());
-            self.composer.menu_index = 0;
-            // Clear the input so typing filters the skill list.
-            self.composer.textarea.set_text(String::new());
-            self.composer.menu_open = true;
-            return true;
+                .any(|(name, _)| command_group_id(name) == group)
+            {
+                if group == "mcp" {
+                    self.client.send(ClientMessage::Mcp);
+                }
+                self.enter_command_picker(group);
+                return true;
+            }
         }
         false
     }
 
-    fn enter_skills_picker(&mut self) {
-        self.composer.open_group = Some("skills".into());
+    fn enter_command_picker(&mut self, group: &str) {
+        self.composer.open_group = Some(group.into());
         self.composer.menu_index = 0;
         self.composer.textarea.set_text(String::new());
         self.composer.menu_open = true;
@@ -648,7 +669,20 @@ impl App {
         self.composer.on_text_changed();
     }
 
+    fn apply_input_history_text(&mut self, text: String) {
+        self.composer.textarea.set_text(text);
+        self.composer.textarea.move_end();
+        self.composer.on_text_changed();
+    }
+
     fn submit(&mut self, display: String, full: String) {
+        // Prefer the expanded message so recalled prompts include pasted blocks.
+        self.input_history.push(if full.trim().is_empty() {
+            display.clone()
+        } else {
+            full.clone()
+        });
+
         let text = display.as_str();
         if text == "exit" || text == "/quit" || text == "/exit" {
             self.should_quit = true;
@@ -669,12 +703,12 @@ impl App {
             return;
         }
         if text == "/skills" {
-            self.enter_skills_picker();
+            self.enter_command_picker("skills");
             return;
         }
         if text == "/mcp" {
             self.client.send(ClientMessage::Mcp);
-            self.add_local(self.format_mcp());
+            self.enter_command_picker("mcp");
             return;
         }
         if let Some(name) = text.strip_prefix("/mcp auth ") {
@@ -692,8 +726,39 @@ impl App {
             ));
             return;
         }
+        if let Some(name) = text.strip_prefix("/mcp ") {
+            let server_name = name.trim();
+            let details = self
+                .mcp_servers
+                .iter()
+                .find(|server| server.name == server_name)
+                .map(|server| {
+                    let status = if server.connected {
+                        format!("connected, {} tools", server.tool_count)
+                    } else if server.auth_required {
+                        "auth required".into()
+                    } else {
+                        format!(
+                            "not connected{}",
+                            server
+                                .error
+                                .as_deref()
+                                .map(|error| format!(": {error}"))
+                                .unwrap_or_default()
+                        )
+                    };
+                    format!(
+                        "[{}] {} ({}) — {}",
+                        server.source, server.name, server.transport, status
+                    )
+                });
+            self.add_local(
+                details.unwrap_or_else(|| format!("MCP server not found: {server_name}")),
+            );
+            return;
+        }
         if text == "/agent" {
-            self.add_local(self.format_agents());
+            self.enter_command_picker("agent");
             return;
         }
         if let Some(name) = text.strip_prefix("/agent ") {
@@ -727,17 +792,7 @@ impl App {
             return;
         }
         if text == "/resume" {
-            let sessions: Vec<_> = self
-                .saved_sessions
-                    .iter()
-                    .filter(|session| session.agent == self.active_agent)
-                    .map(format_session_label)
-                    .collect();
-            self.add_local(if sessions.is_empty() {
-                format!("No saved sessions for agent \"{}\".", self.active_agent)
-            } else {
-                sessions.join("\n")
-            });
+            self.enter_command_picker("resume");
             return;
         }
         if let Some(id) = text.strip_prefix("/resume ") {
@@ -979,10 +1034,9 @@ impl App {
     fn rebuild_commands(&mut self) {
         self.commands = vec![
             SlashCommand { value: "/skills".into(), description: "Select and run a skill".into() },
-            SlashCommand { value: "/agent".into(), description: "List agents · add a space to switch".into() },
-            SlashCommand { value: "/resume".into(), description: "List saved sessions · add a space to pick".into() },
-            SlashCommand { value: "/mcp".into(), description: "Browse MCP servers".into() },
-            SlashCommand { value: "/mcp auth ".into(), description: "OAuth sign-in for MCP server".into() },
+            SlashCommand { value: "/agent".into(), description: "Select and switch agent".into() },
+            SlashCommand { value: "/resume".into(), description: "Select and resume a saved session".into() },
+            SlashCommand { value: "/mcp".into(), description: "Select an MCP server".into() },
             SlashCommand { value: "/new".into(), description: "Start a new conversation".into() },
             SlashCommand { value: "/reload".into(), description: "Hot-reload config, agents and skills".into() },
             SlashCommand { value: "/log".into(), description: "Export the full conversation log".into() },
@@ -999,8 +1053,68 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        self.menu_groups_raw = vec![("skills".to_string(), skill_commands.clone())];
-        self.command_groups = vec![("skills".to_string(), skill_commands)];
+        let agent_commands = self
+            .agents
+            .iter()
+            .map(|agent| SlashCommand {
+                value: format!("/agent {}", agent.name),
+                description: format!(
+                    "{}{}",
+                    if agent.active { "current · " } else { "" },
+                    agent.description
+                ),
+            })
+            .collect::<Vec<_>>();
+
+        let resume_commands = self
+            .saved_sessions
+            .iter()
+            .filter(|session| session.agent == self.active_agent)
+            .map(|session| SlashCommand {
+                value: format!("/resume {}", session.id),
+                description: format!(
+                    "{} · {} · {} msgs",
+                    session.preview,
+                    format_session_age(session.updated_at),
+                    session.turn_count
+                ),
+            })
+            .collect::<Vec<_>>();
+
+        let mcp_commands = self
+            .mcp_servers
+            .iter()
+            .map(|server| {
+                let needs_auth = server.auth_required;
+                SlashCommand {
+                    value: if needs_auth {
+                        format!("/mcp auth {}", server.name)
+                    } else {
+                        format!("/mcp {}", server.name)
+                    },
+                    description: if server.connected {
+                        format!("connected · {} tools", server.tool_count)
+                    } else if server.auth_required {
+                        "auth required".into()
+                    } else {
+                        server.error.clone().unwrap_or_else(|| "not connected".into())
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+
+        self.menu_groups_raw = vec![
+            ("skills".to_string(), skill_commands.clone()),
+            ("agent".to_string(), agent_commands.clone()),
+            ("resume".to_string(), resume_commands.clone()),
+            ("mcp".to_string(), mcp_commands.clone()),
+        ];
+        self.command_groups = vec![
+            ("skills".to_string(), skill_commands),
+            ("agent".to_string(), agent_commands),
+            ("resume".to_string(), resume_commands),
+            ("mcp".to_string(), mcp_commands),
+        ];
     }
 
     fn current_menu_items(&self) -> Vec<SlashCommand> {
@@ -1094,57 +1208,12 @@ impl App {
         out.push_str(concat!(
             "\nKeys:\n",
             "  Enter send · Shift+Enter newline · Tab complete command\n",
-            "  ↑/↓ scroll history, or move selection when the menu is open\n",
+            "  ↑/↓ recall previous prompts (shared across agents) · menu when open\n",
+            "  PageUp/PageDown scroll conversation\n",
             "  Esc undo last send / clear input / cancel a running turn\n",
-            "  Ctrl+Y or Cmd+C copy last reply · mouse wheel scroll\n",
+            "  Ctrl+Y or Cmd+C copy last reply\n",
         ));
         out
-    }
-
-    fn format_agents(&self) -> String {
-        if self.agents.is_empty() {
-            return "No agents loaded.".into();
-        }
-        self.agents
-            .iter()
-            .map(|agent| {
-                format!(
-                    "{}{} — {}",
-                    if agent.active { "* " } else { "  " },
-                    agent.name,
-                    agent.description
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn format_mcp(&self) -> String {
-        if self.mcp_servers.is_empty() {
-            return "No MCP servers configured.".into();
-        }
-        self.mcp_servers
-            .iter()
-            .map(|server| {
-                let status = if server.connected {
-                    format!("connected, {} tools", server.tool_count)
-                } else if server.auth_required {
-                    "auth required — use /mcp auth <name>".into()
-                } else {
-                    format!("failed{}", server.error.as_deref().map(|err| format!(": {err}")).unwrap_or_default())
-                };
-                let oauth = if server.oauth { " oauth" } else { "" };
-                format!(
-                    "• [{}] {} ({}{}) — {}",
-                    server.source,
-                    server.name,
-                    server.transport,
-                    oauth,
-                    status
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     fn is_welcome_screen(&self) -> bool {
