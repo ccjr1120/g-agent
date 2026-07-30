@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::protocol::{
-    parse_server_message, AgentInfo, ClientMessage, McpServerInfo, ServerMessage,
+    parse_server_message, AgentInfo, AgentTaskInfo, ClientMessage, McpServerInfo, ServerMessage,
     SkillInfo,
 };
 
@@ -19,25 +19,13 @@ pub enum ConnectionState {
 
 #[derive(Debug, Clone)]
 pub struct ContextUsage {
-    pub used_tokens: u64,
-    pub max_tokens: u64,
     pub percent: u8,
 }
 
 impl Default for ContextUsage {
     fn default() -> Self {
-        Self {
-            used_tokens: 0,
-            max_tokens: 0,
-            percent: 0,
-        }
+        Self { percent: 0 }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentFallback {
-    pub requested: String,
-    pub active: String,
 }
 
 #[derive(Debug, Clone)]
@@ -65,17 +53,26 @@ pub enum AgentEvent {
         active: String,
         model: String,
     },
-    AgentFallback(AgentFallback),
     Skills(Vec<SkillInfo>),
     Mcp(Vec<McpServerInfo>),
     Context(ContextUsage),
     TurnStarted,
     ThinkingDelta(String),
     Delta(String),
-    ToolCall { name: String, args: String },
+    ToolCall {
+        name: String,
+        args: String,
+    },
     TurnDone,
     Error(String),
     Resumed,
+    AgentTasks(Vec<AgentTaskInfo>),
+    AgentSession {
+        slot: Option<u64>,
+        agent: String,
+        model: String,
+        history: Vec<crate::protocol::ConversationTurn>,
+    },
 }
 
 pub struct AgentClient {
@@ -130,10 +127,8 @@ async fn connection_loop(
         // The server may have died with the connection — bring it back up
         // before retrying.
         let url = server_url.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::server::ensure_server_running(&url)
-        })
-        .await;
+        let _ =
+            tokio::task::spawn_blocking(move || crate::server::ensure_server_running(&url)).await;
 
         attempt = attempt.saturating_add(1);
         let delay = (RECONNECT_BASE_MS << attempt.min(4)).min(RECONNECT_MAX_MS);
@@ -181,11 +176,16 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
         ServerMessage::Ready => {
             let _ = events.send(AgentEvent::Connection(ConnectionState::Connected));
         }
-        ServerMessage::Agents { agents, active, model } => {
-            let _ = events.send(AgentEvent::Agents { agents, active, model });
-        }
-        ServerMessage::AgentFallback { requested, active } => {
-            let _ = events.send(AgentEvent::AgentFallback(AgentFallback { requested, active }));
+        ServerMessage::Agents {
+            agents,
+            active,
+            model,
+        } => {
+            let _ = events.send(AgentEvent::Agents {
+                agents,
+                active,
+                model,
+            });
         }
         ServerMessage::Skills { skills } => {
             let _ = events.send(AgentEvent::Skills(skills));
@@ -194,15 +194,11 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
             let _ = events.send(AgentEvent::Mcp(servers));
         }
         ServerMessage::Context {
-            used_tokens,
-            max_tokens,
+            used_tokens: _,
+            max_tokens: _,
             percent,
         } => {
-            let _ = events.send(AgentEvent::Context(ContextUsage {
-                used_tokens,
-                max_tokens,
-                percent,
-            }));
+            let _ = events.send(AgentEvent::Context(ContextUsage { percent }));
         }
         ServerMessage::Start => {
             let _ = events.send(AgentEvent::TurnStarted);
@@ -225,6 +221,22 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
         ServerMessage::Resumed { .. } => {
             let _ = events.send(AgentEvent::Resumed);
         }
+        ServerMessage::AgentTasks { tasks } => {
+            let _ = events.send(AgentEvent::AgentTasks(tasks));
+        }
+        ServerMessage::AgentSession {
+            slot,
+            agent,
+            model,
+            history,
+        } => {
+            let _ = events.send(AgentEvent::AgentSession {
+                slot,
+                agent,
+                model,
+                history,
+            });
+        }
         ServerMessage::SystemPrompt { .. } | ServerMessage::ToolResult { .. } => {}
     }
 }
@@ -246,6 +258,17 @@ pub fn format_tool_call(name: &str, args: &str) -> String {
         if name == "glob" || name == "grep" {
             if let Some(pattern) = parsed.get("pattern").and_then(|value| value.as_str()) {
                 return truncate(pattern, 48);
+            }
+        }
+        if name == "update_plan" {
+            if let Some(steps) = parsed.get("steps").and_then(|value| value.as_array()) {
+                let completed = steps
+                    .iter()
+                    .filter(|step| {
+                        step.get("status").and_then(|value| value.as_str()) == Some("completed")
+                    })
+                    .count();
+                return format!("Plan · {completed}/{}", steps.len());
             }
         }
     }
@@ -302,7 +325,10 @@ fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
-    format!("{}…", text.chars().take(max.saturating_sub(1)).collect::<String>())
+    format!(
+        "{}…",
+        text.chars().take(max.saturating_sub(1)).collect::<String>()
+    )
 }
 
 fn compact_path(path: &str, max: usize) -> String {
@@ -328,6 +354,13 @@ mod tests {
         assert_eq!(
             format_tool_call("read", r#"{"path":"README.md"}"#),
             "README.md"
+        );
+        assert_eq!(
+            format_tool_call(
+                "update_plan",
+                r#"{"steps":[{"step":"Inspect","status":"completed"},{"step":"Verify","status":"in_progress"}]}"#
+            ),
+            "Plan · 1/2"
         );
     }
 

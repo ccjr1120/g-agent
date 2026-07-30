@@ -25,7 +25,12 @@ pub fn format_elapsed(start: Instant) -> String {
     format!("{minutes}m{remainder}s")
 }
 
-pub fn spinner_line(label: &str, clock: Instant, turn_start: Option<Instant>, dim: bool) -> Line<'static> {
+pub fn spinner_line(
+    label: &str,
+    clock: Instant,
+    turn_start: Option<Instant>,
+    dim: bool,
+) -> Line<'static> {
     let frame = SPINNER_FRAMES[spinner_frame(clock)];
     let elapsed = turn_start.map(|start| format_elapsed(start));
     let label_text = match (&elapsed, dim) {
@@ -35,18 +40,12 @@ pub fn spinner_line(label: &str, clock: Instant, turn_start: Option<Instant>, di
     };
 
     if dim {
-        return Line::from(Span::styled(
-            format!("{frame}{label_text}"),
-            style::muted(),
-        ));
+        return Line::from(Span::styled(format!("{frame}{label_text}"), style::muted()));
     }
 
     Line::from(vec![
         Span::styled(frame.to_string(), style::spinner_frame()),
-        Span::styled(
-            format!(" {label_text}"),
-            style::spinner_label(),
-        ),
+        Span::styled(format!(" {label_text}"), style::spinner_label()),
     ])
 }
 

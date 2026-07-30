@@ -14,15 +14,35 @@ pub struct ConversationTurn {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientMessage {
-    Chat { message: String },
+    Chat {
+        message: String,
+    },
     Cancel,
     Reset,
-    Agent { #[serde(skip_serializing_if = "Option::is_none")] name: Option<String> },
-    Skill { name: String },
+    Agent {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    Skill {
+        name: String,
+    },
     Mcp,
-    McpAuth { name: String },
+    McpAuth {
+        name: String,
+    },
     Reload,
-    Resume { agent: String, history: Vec<ConversationTurn> },
+    #[serde(rename = "agent_task")]
+    AgentTask {
+        slot: u64,
+    },
+    #[serde(rename = "agent_tasks")]
+    AgentTasks,
+    #[serde(rename = "agent_back")]
+    AgentBack,
+    Resume {
+        agent: String,
+        history: Vec<ConversationTurn>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -35,10 +55,12 @@ pub enum ServerMessage {
         active: String,
         model: String,
     },
-    #[serde(rename = "agent_fallback")]
-    AgentFallback { requested: String, active: String },
-    Skills { skills: Vec<SkillInfo> },
-    Mcp { servers: Vec<McpServerInfo> },
+    Skills {
+        skills: Vec<SkillInfo>,
+    },
+    Mcp {
+        servers: Vec<McpServerInfo>,
+    },
     Context {
         used_tokens: u64,
         max_tokens: u64,
@@ -46,16 +68,58 @@ pub enum ServerMessage {
     },
     Start,
     #[serde(rename = "system_prompt")]
-    SystemPrompt { text: String },
-    ThinkingDelta { text: String },
-    Delta { text: String },
+    SystemPrompt {
+        text: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
+    Delta {
+        text: String,
+    },
     #[serde(rename = "tool_call")]
-    ToolCall { name: String, args: String },
+    ToolCall {
+        name: String,
+        args: String,
+    },
     #[serde(rename = "tool_result")]
-    ToolResult { name: String, output: String },
+    ToolResult {
+        name: String,
+        output: String,
+    },
     Done,
-    Error { message: String },
-    Resumed { agent: String, turns: u64 },
+    Error {
+        message: String,
+    },
+    Resumed {
+        agent: String,
+        turns: u64,
+    },
+    #[serde(rename = "agent_tasks")]
+    AgentTasks {
+        tasks: Vec<AgentTaskInfo>,
+    },
+    #[serde(rename = "agent_session")]
+    AgentSession {
+        #[serde(default)]
+        slot: Option<u64>,
+        agent: String,
+        model: String,
+        history: Vec<ConversationTurn>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTaskInfo {
+    pub slot: u64,
+    pub agent: String,
+    pub title: String,
+    pub status: String,
+    #[serde(default)]
+    pub activity: Option<String>,
+    pub elapsed_ms: u64,
+    pub unread: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -104,7 +168,9 @@ pub fn parse_server_message(raw: &str) -> Option<ServerMessage> {
 }
 
 pub fn health_check_url(server_url: &str) -> String {
-    server_url.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1)
+    server_url
+        .replacen("ws://", "http://", 1)
+        .replacen("wss://", "https://", 1)
 }
 
 #[allow(dead_code)]
@@ -128,18 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_snake_case_agent_fallback_from_server() {
-        let message = parse_server_message(
-            r#"{"type":"agent_fallback","requested":"missing","active":"default"}"#,
-        );
-        assert!(matches!(
-            message,
-            Some(ServerMessage::AgentFallback { requested, active })
-                if requested == "missing" && active == "default"
-        ));
-    }
-
-    #[test]
     fn parses_camel_case_mcp_catalog_from_server() {
         let message = parse_server_message(
             r#"{"type":"mcp","servers":[{"name":"knowledge-mcp","source":"agent","transport":"url","target":"http://localhost:7077/mcp","connected":true,"toolCount":2,"tools":[],"oauth":false,"authRequired":false}]}"#,
@@ -151,6 +205,50 @@ mod tests {
                     && servers[0].name == "knowledge-mcp"
                     && servers[0].tool_count == 2
                     && !servers[0].auth_required
+        ));
+    }
+
+    #[test]
+    fn parses_background_agent_tasks() {
+        let message = parse_server_message(
+            r#"{"type":"agent_tasks","tasks":[{"slot":1,"agent":"reviewer","title":"检查认证模块","status":"running","activity":"Reading index.ts","elapsedMs":1200,"unread":false}]}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::AgentTasks { tasks })
+                if tasks.len() == 1
+                    && tasks[0].slot == 1
+                    && tasks[0].title == "检查认证模块"
+                    && tasks[0].elapsed_ms == 1200
+        ));
+    }
+
+    #[test]
+    fn serializes_numeric_agent_task_command() {
+        let raw = serde_json::to_string(&ClientMessage::AgentTask { slot: 3 })
+            .expect("serialize agent task command");
+        assert_eq!(raw, r#"{"type":"agent_task","slot":3}"#);
+    }
+
+    #[test]
+    fn serializes_agent_back_command() {
+        let raw = serde_json::to_string(&ClientMessage::AgentBack).expect("serialize agent back");
+        assert_eq!(raw, r#"{"type":"agent_back"}"#);
+    }
+
+    #[test]
+    fn parses_agent_sub_session() {
+        let message = parse_server_message(
+            r#"{"type":"agent_session","slot":2,"agent":"reviewer","model":"openai/test","history":[{"role":"user","content":"check this"}]}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::AgentSession {
+                slot: Some(2),
+                agent,
+                model: _,
+                history,
+            }) if agent == "reviewer" && history.len() == 1
         ));
     }
 }

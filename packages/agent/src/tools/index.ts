@@ -93,6 +93,43 @@ export const builtinTools: ToolDefinition[] = [
       required: ["pattern"],
     },
   },
+  {
+    name: "update_plan",
+    description:
+      "Create or update the execution plan for a multi-step task. Keep exactly one step in progress while work remains, and update the plan after meaningful progress.",
+    parameters: {
+      type: "object",
+      properties: {
+        explanation: {
+          type: "string",
+          description: "Optional short explanation of why the plan changed",
+        },
+        steps: {
+          type: "array",
+          minItems: 2,
+          maxItems: 8,
+          items: {
+            type: "object",
+            properties: {
+              step: {
+                type: "string",
+                description: "Concrete, outcome-oriented task step",
+              },
+              status: {
+                type: "string",
+                enum: ["pending", "in_progress", "completed"],
+              },
+            },
+            required: ["step", "status"],
+            additionalProperties: false,
+          },
+          description: "The complete current plan, not only changed steps",
+        },
+      },
+      required: ["steps"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export function toOpenAITools(tools: ToolDefinition[]): OpenAITool[] {
@@ -269,6 +306,56 @@ async function runGrep(args: Record<string, unknown>): Promise<string> {
   return hits.join("\n");
 }
 
+function updatePlan(args: Record<string, unknown>): string {
+  const rawSteps = args.steps;
+  if (!Array.isArray(rawSteps) || rawSteps.length < 2 || rawSteps.length > 8) {
+    return "Error: steps must contain between 2 and 8 items";
+  }
+
+  const steps: Array<{
+    step: string;
+    status: "pending" | "in_progress" | "completed";
+  }> = [];
+  for (const rawStep of rawSteps) {
+    if (!rawStep || typeof rawStep !== "object") {
+      return "Error: every plan item must be an object";
+    }
+    const item = rawStep as Record<string, unknown>;
+    const step = String(item.step ?? "").trim();
+    const status = String(item.status ?? "");
+    if (!step) {
+      return "Error: every plan item requires a non-empty step";
+    }
+    if (!["pending", "in_progress", "completed"].includes(status)) {
+      return `Error: invalid plan status "${status}"`;
+    }
+    steps.push({
+      step,
+      status: status as "pending" | "in_progress" | "completed",
+    });
+  }
+
+  const activeCount = steps.filter((step) => step.status === "in_progress").length;
+  const hasRemaining = steps.some((step) => step.status !== "completed");
+  if (activeCount > 1) {
+    return "Error: at most one plan item may be in_progress";
+  }
+  if (hasRemaining && activeCount === 0) {
+    return "Error: exactly one plan item must be in_progress while work remains";
+  }
+
+  const icons = {
+    pending: "○",
+    in_progress: "●",
+    completed: "✓",
+  } as const;
+  const explanation = String(args.explanation ?? "").trim();
+  return [
+    ...(explanation ? [explanation, ""] : []),
+    ...steps.map((item) => `${icons[item.status]} ${item.step}`),
+  ].join("\n");
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -285,6 +372,8 @@ export async function executeTool(
         return await runGlob(args);
       case "grep":
         return await runGrep(args);
+      case "update_plan":
+        return updatePlan(args);
       default:
         return `Error: unknown tool "${name}"`;
     }

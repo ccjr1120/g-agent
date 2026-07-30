@@ -6,39 +6,43 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::{
     cursor::{MoveTo, SetCursorStyle, Show},
-    event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
-    },
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
     execute,
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
     Terminal,
 };
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthChar;
 
 use crate::agent::client::{
-    format_tool_call, AgentClient, AgentEvent, AgentFallback, ChatLine, ConnectionState,
-    ContextUsage, ToolCallDisplay,
+    format_tool_call, AgentClient, AgentEvent, ChatLine, ConnectionState, ContextUsage,
+    ToolCallDisplay,
 };
-use crate::protocol::{ClientMessage, ConversationTurn};
+use crate::protocol::{AgentTaskInfo, ClientMessage, ConversationTurn};
 use crate::session::{
     build_session_preview, format_session_age, format_session_label, list_sessions, load_session,
-    save_session, SavedSession, SavedSessionSummary, UndoEntry, UndoStack, write_conversation_log,
+    save_session, write_conversation_log, SavedSession, SavedSessionSummary, UndoEntry, UndoStack,
 };
 use crate::ui::composer::{
     command_group_id, menu_height, Composer, ComposerWidget, InputHistory, MenuWidget, SlashCommand,
 };
-use crate::ui::status::{StatusBar, STATUS_HEIGHT};
 use crate::ui::markdown::{MarkdownCache, StreamingMarkdown};
+use crate::ui::status::{StatusBar, STATUS_HEIGHT};
 use crate::ui::theme::style;
 use crate::ui::transcript::{
-    build_transcript_lines, max_history_scroll, assistant_markdown_width, TranscriptContent,
+    assistant_markdown_width, build_transcript_lines, max_history_scroll, TranscriptContent,
     TranscriptWidget,
 };
+
+enum PendingSessionOpen {
+    Agent(String),
+    Task(u64),
+}
 
 pub struct App {
     banner: Vec<String>,
@@ -51,15 +55,17 @@ pub struct App {
     pending: bool,
     streaming_flag: bool,
     turn_start: Option<Instant>,
-    error: Option<String>,
     skills: Vec<crate::protocol::SkillInfo>,
     agents: Vec<crate::protocol::AgentInfo>,
     active_agent: String,
+    view_agent: String,
+    active_child: Option<u64>,
+    main_lines: Vec<ChatLine>,
     model: String,
     context: ContextUsage,
-    fallback: Option<AgentFallback>,
     mcp_servers: Vec<crate::protocol::McpServerInfo>,
     saved_sessions: Vec<SavedSessionSummary>,
+    agent_tasks: Vec<AgentTaskInfo>,
 
     composer: Composer,
     /// Prompt recall for ↑/↓ — global across agent switches and `/new`.
@@ -77,9 +83,9 @@ pub struct App {
     in_flight: Option<(usize, String, String)>,
     cancel_turn: bool,
     pending_resume: Option<SavedSession>,
+    pending_session_open: Option<PendingSessionOpen>,
     resuming: bool,
     has_connected_once: bool,
-    notice: Option<String>,
     started_at: Instant,
     markdown_cache: MarkdownCache,
     streaming_md: StreamingMarkdown,
@@ -101,15 +107,17 @@ impl App {
             pending: false,
             streaming_flag: false,
             turn_start: None,
-            error: None,
             skills: Vec::new(),
             agents: Vec::new(),
             active_agent: String::new(),
+            view_agent: String::new(),
+            active_child: None,
+            main_lines: Vec::new(),
             model: String::new(),
             context: ContextUsage::default(),
-            fallback: None,
             mcp_servers: Vec::new(),
             saved_sessions: Vec::new(),
+            agent_tasks: Vec::new(),
             composer: Composer::new(),
             input_history: InputHistory::new(),
             commands: Vec::new(),
@@ -124,9 +132,9 @@ impl App {
             in_flight: None,
             cancel_turn: false,
             pending_resume: None,
+            pending_session_open: None,
             resuming: false,
             has_connected_once: false,
-            notice: None,
             started_at: Instant::now(),
             markdown_cache: MarkdownCache::new(),
             streaming_md: StreamingMarkdown::new(),
@@ -167,20 +175,14 @@ impl App {
                 banner: &self.banner,
                 show_welcome,
                 connecting: matches!(self.connection, ConnectionState::Connecting),
-                active_agent: &self.active_agent,
-                fallback: self
-                    .fallback
-                    .as_ref()
-                    .map(|value| (value.requested.as_str(), value.active.as_str())),
+                active_agent: &self.view_agent,
+                fallback: None,
                 clock: self.started_at,
                 turn_start: self.turn_start,
                 width,
             };
-            let transcript_lines = build_transcript_lines(
-                &content,
-                &mut self.markdown_cache,
-                &self.streaming_md,
-            );
+            let transcript_lines =
+                build_transcript_lines(&content, &mut self.markdown_cache, &self.streaming_md);
 
             terminal.draw(|frame| {
                 self.render(frame.area(), frame.buffer_mut(), transcript_lines);
@@ -212,40 +214,41 @@ impl App {
         }
         .render(chunks[0], buf);
 
-        if let Some(notice) = &self.notice {
-            Paragraph::new(notice.clone())
-                .style(style::success())
-                .render(chunks[1], buf);
-        }
         if self.history_scroll > 0 {
             Paragraph::new(format!(
                 "History · {} rows below · scroll down to follow",
                 self.history_scroll
             ))
             .style(style::warning())
-            .render(chunks[2], buf);
+            .render(chunks[1], buf);
         }
-        if let Some(error) = &self.error {
-            Paragraph::new(error.clone())
-                .style(style::error())
-                .render(chunks[3], buf);
+
+        if !self.agent_tasks.is_empty() {
+            Paragraph::new(self.agent_task_lines(chunks[2].width.saturating_sub(2)))
+                .block(
+                    Block::default()
+                        .title(" Sub Agents ")
+                        .borders(Borders::ALL)
+                        .border_style(style::border()),
+                )
+                .render(chunks[2], buf);
         }
 
         let menu_items = self.current_menu_items();
-        MenuWidget::new(&self.composer, &menu_items).render(chunks[4], buf);
+        MenuWidget::new(&self.composer, &menu_items).render(chunks[3], buf);
         StatusBar {
             connection: self.connection,
             model: &self.model,
-            active_agent: &self.active_agent,
+            active_agent: &self.view_agent,
             context: self.context.clone(),
         }
-        .render(chunks[5], buf);
+        .render(chunks[4], buf);
 
         let composer_area = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(style::border());
-        let inner = composer_area.inner(chunks[6]);
-        composer_area.render(chunks[6], buf);
+        let inner = composer_area.inner(chunks[5]);
+        composer_area.render(chunks[5], buf);
         ComposerWidget::new(
             &self.composer,
             !matches!(self.connection, ConnectionState::Connected),
@@ -268,7 +271,7 @@ impl App {
         let chunks = self.layout_chunks(area);
         let inner = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .inner(chunks[6]);
+            .inner(chunks[5]);
         self.composer.cursor_pos(inner, 2)
     }
 
@@ -279,7 +282,6 @@ impl App {
                     self.interrupt_turn_on_disconnect();
                 }
                 if matches!(state, ConnectionState::Connected) {
-                    self.error = None;
                     if self.has_connected_once {
                         self.restore_history_after_reconnect();
                     }
@@ -287,16 +289,19 @@ impl App {
                 }
                 self.connection = state;
             }
-            AgentEvent::Agents { agents, active, model } => {
-                if !self.active_agent.is_empty() && self.active_agent != active && !self.resuming {
-                    self.reset_local_conversation();
-                }
+            AgentEvent::Agents {
+                agents,
+                active,
+                model,
+            } => {
                 self.agents = agents;
                 self.active_agent = active;
+                if self.active_child.is_none() {
+                    self.view_agent = self.active_agent.clone();
+                }
                 self.model = model;
                 self.rebuild_commands();
             }
-            AgentEvent::AgentFallback(fallback) => self.fallback = Some(fallback),
             AgentEvent::Skills(skills) => {
                 self.skills = skills;
                 self.rebuild_commands();
@@ -350,16 +355,26 @@ impl App {
                 }
             }
             AgentEvent::TurnDone => self.finish_turn(),
-            AgentEvent::Error(message) => {
-                self.error = Some(message);
-                self.finish_turn();
-            }
+            AgentEvent::Error(message) => self.finish_turn_with_error(message),
             AgentEvent::Resumed => {
                 if let Some(session) = self.pending_resume.take() {
                     self.apply_session(session);
                 }
                 self.resuming = false;
                 self.try_send_next();
+            }
+            AgentEvent::AgentTasks(tasks) => {
+                self.agent_tasks = tasks;
+                self.restore_active_child_progress();
+                self.rebuild_commands();
+            }
+            AgentEvent::AgentSession {
+                slot,
+                agent,
+                model,
+                history,
+            } => {
+                self.switch_agent_session(slot, agent, model, history);
             }
         }
     }
@@ -373,6 +388,9 @@ impl App {
             self.turn_start = None;
             self.in_flight = None;
             self.cancel_turn = false;
+            if self.open_pending_session() {
+                return;
+            }
             self.try_send_next();
             return;
         }
@@ -384,7 +402,70 @@ impl App {
         self.turn_start = None;
         self.in_flight = None;
         self.persist_session();
+        if self.open_pending_session() {
+            return;
+        }
         self.try_send_next();
+    }
+
+    /// Finish the active turn and keep its error in the transcript at the
+    /// point where it occurred. This must happen before starting a queued
+    /// turn, otherwise the error would appear after later user messages.
+    fn finish_turn_with_error(&mut self, message: String) {
+        if self.cancel_turn {
+            self.finish_turn();
+            return;
+        }
+
+        let user_index = self.in_flight.as_ref().map(|(index, _, _)| *index);
+        self.commit_streaming_line();
+
+        let line = ChatLine {
+            role: "error".to_string(),
+            text: message,
+            sent_content: None,
+            thinking: String::new(),
+            tools: Vec::new(),
+            duration_ms: None,
+            queued: false,
+        };
+        if let Some(user_index) = user_index {
+            let mut insert_at = (user_index + 1).min(self.static_lines.len());
+            while insert_at < self.static_lines.len() && self.static_lines[insert_at].role != "user"
+            {
+                insert_at += 1;
+            }
+            self.static_lines.insert(insert_at, line);
+            self.shift_line_indices_after_insert(insert_at);
+        } else {
+            self.static_lines.push(line);
+        }
+
+        self.streaming_md.reset();
+        self.pending = false;
+        self.streaming_flag = false;
+        self.turn_start = None;
+        self.in_flight = None;
+        self.persist_session();
+        if self.open_pending_session() {
+            return;
+        }
+        self.try_send_next();
+    }
+
+    fn open_pending_session(&mut self) -> bool {
+        let Some(pending) = self.pending_session_open.take() else {
+            return false;
+        };
+        match pending {
+            PendingSessionOpen::Agent(name) => {
+                self.client.send(ClientMessage::Agent { name: Some(name) });
+            }
+            PendingSessionOpen::Task(slot) => {
+                self.client.send(ClientMessage::AgentTask { slot });
+            }
+        }
+        true
     }
 
     /// The connection dropped mid-turn: keep whatever streamed so far as a
@@ -400,7 +481,6 @@ impl App {
         self.streaming_flag = false;
         self.turn_start = None;
         self.in_flight = None;
-        self.error = Some("Connection lost — reconnecting…".into());
         self.persist_session();
     }
 
@@ -422,10 +502,7 @@ impl App {
             self.markdown_cache
                 .render_static(&line.text, assistant_markdown_width(width));
         }
-        if line.text.trim().is_empty()
-            && line.thinking.trim().is_empty()
-            && line.tools.is_empty()
-        {
+        if line.text.trim().is_empty() && line.thinking.trim().is_empty() && line.tools.is_empty() {
             return;
         }
         match user_index {
@@ -463,7 +540,7 @@ impl App {
         let history: Vec<ConversationTurn> = self
             .static_lines
             .iter()
-            .filter(|line| !line.queued)
+            .filter(|line| !line.queued && matches!(line.role.as_str(), "user" | "assistant"))
             .map(|line| ConversationTurn {
                 role: line.role.clone(),
                 content: line
@@ -480,7 +557,7 @@ impl App {
         }
 
         self.resuming = true;
-        self.notice = Some("Reconnected — session restored".into());
+        self.add_status("Reconnected — session restored".into());
         self.client.send(ClientMessage::Resume {
             agent: self.active_agent.clone(),
             history,
@@ -494,7 +571,6 @@ impl App {
                 self.handle_key(key, transcript_area);
             }
             Event::Mouse(mouse) => match mouse.kind {
-                // Wheel scrolls the transcript; keyboard ↑/↓ keep prompt recall.
                 MouseEventKind::ScrollUp => self.scroll_history(3, transcript_area),
                 MouseEventKind::ScrollDown => self.scroll_history(-3, transcript_area),
                 _ => {}
@@ -650,9 +726,7 @@ impl App {
             KeyCode::PageDown => {
                 self.scroll_history(-10, transcript_area);
             }
-            KeyCode::Char(ch)
-                if key.modifiers.contains(KeyModifiers::CONTROL) && ch == 'y' =>
-            {
+            KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) && ch == 'y' => {
                 self.copy_last_reply();
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::SUPER) => {
@@ -779,7 +853,7 @@ impl App {
         }
         if text == "/reload" {
             self.client.send(ClientMessage::Reload);
-            self.notice = Some("Reloading config, agents and skills…".into());
+            self.add_status("Reloading config, agents and skills…".into());
             return;
         }
         if text == "/new" {
@@ -843,10 +917,25 @@ impl App {
             return;
         }
         if text == "/agent" {
-            self.enter_command_picker("agent");
+            self.add_local(
+                self.agents
+                    .iter()
+                    .filter(|agent| agent.name != "default")
+                    .map(|agent| format!("/agent {} — {}", agent.name, agent.description))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
             return;
         }
         if let Some(name) = text.strip_prefix("/agent ") {
+            if self.active_child.is_none() && self.is_turn_busy() {
+                self.pending_session_open =
+                    Some(PendingSessionOpen::Agent(name.trim().to_string()));
+                self.add_local(
+                    "Main agent is still responding; the sub-session will open automatically when it finishes.".into(),
+                );
+                return;
+            }
             self.client.send(ClientMessage::Agent {
                 name: Some(name.trim().to_string()),
             });
@@ -859,10 +948,14 @@ impl App {
             return;
         }
         if text == "/log" {
-            let pairs = self.static_lines.iter().map(|line| (line.role.clone(), line.text.clone())).collect::<Vec<_>>();
+            let pairs = self
+                .static_lines
+                .iter()
+                .map(|line| (line.role.clone(), line.text.clone()))
+                .collect::<Vec<_>>();
             match write_conversation_log(&pairs) {
                 Ok(path) => self.add_local(format!("Log saved to: {}", path.display())),
-                Err(err) => self.error = Some(err.to_string()),
+                Err(err) => self.add_error(err.to_string()),
             }
             return;
         }
@@ -891,6 +984,28 @@ impl App {
             } else {
                 self.add_local(format!("Session not found: {}", id.trim()));
             }
+            return;
+        }
+        if text == "/tasks" {
+            self.client.send(ClientMessage::AgentTasks);
+            return;
+        }
+        if text == "/back" {
+            self.client.send(ClientMessage::AgentBack);
+            return;
+        }
+        if let Some(slot) = text
+            .strip_prefix('/')
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            if self.active_child.is_none() && self.is_turn_busy() {
+                self.pending_session_open = Some(PendingSessionOpen::Task(slot));
+                self.add_local(
+                    "Main agent is still responding; the sub-session will open automatically when it finishes.".into(),
+                );
+                return;
+            }
+            self.client.send(ClientMessage::AgentTask { slot });
             return;
         }
         if let Some(skill) = text.strip_prefix('/') {
@@ -958,8 +1073,7 @@ impl App {
             return;
         }
         let text = self.static_lines[user_index].text.clone();
-        let full = self
-            .static_lines[user_index]
+        let full = self.static_lines[user_index]
             .sent_content
             .clone()
             .unwrap_or_else(|| text.clone());
@@ -1024,7 +1138,7 @@ impl App {
     fn add_local(&mut self, text: String) {
         let line_index = self.static_lines.len();
         self.static_lines.push(ChatLine {
-            role: "assistant".to_string(),
+            role: "local".to_string(),
             text,
             sent_content: None,
             thinking: String::new(),
@@ -1035,15 +1149,39 @@ impl App {
         self.undo.push(UndoEntry::Local { line_index });
     }
 
+    fn add_status(&mut self, text: String) {
+        self.static_lines.push(ChatLine {
+            role: "status".to_string(),
+            text,
+            sent_content: None,
+            thinking: String::new(),
+            tools: Vec::new(),
+            duration_ms: None,
+            queued: false,
+        });
+        self.history_scroll = 0;
+    }
+
+    fn add_error(&mut self, text: String) {
+        self.static_lines.push(ChatLine {
+            role: "error".to_string(),
+            text,
+            sent_content: None,
+            thinking: String::new(),
+            tools: Vec::new(),
+            duration_ms: None,
+            queued: false,
+        });
+        self.history_scroll = 0;
+    }
+
     fn reset_local_conversation(&mut self) {
         self.static_lines.clear();
         self.streaming = None;
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
-        self.error = None;
         self.context = ContextUsage::default();
-        self.fallback = None;
         self.session_id = None;
         self.history_scroll = 0;
         self.markdown_cache.clear();
@@ -1052,6 +1190,97 @@ impl App {
         self.send_queue.clear();
         self.in_flight = None;
         self.cancel_turn = false;
+        self.pending_session_open = None;
+        self.agent_tasks.clear();
+        self.active_child = None;
+        self.main_lines.clear();
+        self.view_agent = self.active_agent.clone();
+        self.rebuild_commands();
+    }
+
+    fn switch_agent_session(
+        &mut self,
+        slot: Option<u64>,
+        agent: String,
+        model: String,
+        history: Vec<ConversationTurn>,
+    ) {
+        self.commit_streaming_line();
+        if self.active_child.is_none() {
+            self.main_lines = std::mem::take(&mut self.static_lines);
+        } else {
+            self.static_lines.clear();
+        }
+
+        self.active_child = slot;
+        self.view_agent = agent;
+        self.model = model;
+        self.static_lines = if slot.is_none() {
+            std::mem::take(&mut self.main_lines)
+        } else {
+            history
+                .into_iter()
+                .map(|turn| ChatLine {
+                    role: turn.role,
+                    text: turn.content.clone(),
+                    sent_content: Some(turn.content),
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    duration_ms: None,
+                    queued: false,
+                })
+                .collect()
+        };
+        self.streaming = None;
+        self.pending = false;
+        self.streaming_flag = false;
+        self.turn_start = None;
+        self.in_flight = None;
+        self.send_queue.clear();
+        self.streaming_md.reset();
+        self.markdown_cache.clear();
+        self.history_scroll = 0;
+        self.restore_active_child_progress();
+        self.rebuild_commands();
+    }
+
+    /// Rebuild the transient progress display when returning to a child that
+    /// kept running in the background. The server remains the source of truth
+    /// for task state; streamed text itself is restored from session history
+    /// once the turn completes.
+    fn restore_active_child_progress(&mut self) {
+        let Some(slot) = self.active_child else {
+            return;
+        };
+        let Some(status) = self
+            .agent_tasks
+            .iter()
+            .find(|task| task.slot == slot)
+            .map(|task| task.status.clone())
+        else {
+            return;
+        };
+
+        match status.as_str() {
+            "queued" | "starting" => {
+                self.pending = true;
+            }
+            status if agent_task_is_running(status) => {
+                self.pending = false;
+                self.streaming_flag = true;
+                self.turn_start.get_or_insert_with(Instant::now);
+                self.streaming.get_or_insert_with(|| ChatLine {
+                    role: "assistant".to_string(),
+                    text: String::new(),
+                    sent_content: None,
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    duration_ms: None,
+                    queued: false,
+                });
+            }
+            _ => {}
+        }
     }
 
     fn apply_session(&mut self, session: SavedSession) {
@@ -1075,16 +1304,19 @@ impl App {
         self.streaming_flag = false;
         self.streaming_md.reset();
         self.markdown_cache.clear();
-        self.error = None;
     }
 
     fn persist_session(&mut self) {
+        if self.active_child.is_some() {
+            return;
+        }
         if self.static_lines.is_empty() || self.active_agent.is_empty() {
             return;
         }
         let history = self
             .static_lines
             .iter()
+            .filter(|line| matches!(line.role.as_str(), "user" | "assistant"))
             .map(|line| ConversationTurn {
                 role: line.role.clone(),
                 content: line
@@ -1118,16 +1350,57 @@ impl App {
 
     fn rebuild_commands(&mut self) {
         self.commands = vec![
-            SlashCommand { value: "/skills".into(), description: "Select and run a skill".into() },
-            SlashCommand { value: "/agent".into(), description: "Select and switch agent".into() },
-            SlashCommand { value: "/resume".into(), description: "Select and resume a saved session".into() },
-            SlashCommand { value: "/mcp".into(), description: "Select an MCP server".into() },
-            SlashCommand { value: "/new".into(), description: "Start a new conversation".into() },
-            SlashCommand { value: "/reload".into(), description: "Hot-reload config, agents and skills".into() },
-            SlashCommand { value: "/log".into(), description: "Export the full conversation log".into() },
-            SlashCommand { value: "/help".into(), description: "Show commands and keyboard shortcuts".into() },
-            SlashCommand { value: "/quit".into(), description: "Exit g-agent".into() },
+            SlashCommand {
+                value: "/skills".into(),
+                description: "Select and run a skill".into(),
+            },
+            SlashCommand {
+                value: "/agent".into(),
+                description: "List agents for a new sub-session".into(),
+            },
+            SlashCommand {
+                value: "/back".into(),
+                description: "Return to the main session".into(),
+            },
+            SlashCommand {
+                value: "/resume".into(),
+                description: "Select and resume a saved session".into(),
+            },
+            SlashCommand {
+                value: "/mcp".into(),
+                description: "Select an MCP server".into(),
+            },
+            SlashCommand {
+                value: "/tasks".into(),
+                description: "Show background agent tasks".into(),
+            },
+            SlashCommand {
+                value: "/new".into(),
+                description: "Start a new conversation".into(),
+            },
+            SlashCommand {
+                value: "/reload".into(),
+                description: "Hot-reload config, agents and skills".into(),
+            },
+            SlashCommand {
+                value: "/log".into(),
+                description: "Export the full conversation log".into(),
+            },
+            SlashCommand {
+                value: "/help".into(),
+                description: "Show commands and keyboard shortcuts".into(),
+            },
+            SlashCommand {
+                value: "/quit".into(),
+                description: "Exit g-agent".into(),
+            },
         ];
+
+        self.commands
+            .extend(self.agent_tasks.iter().map(|task| SlashCommand {
+                value: format!("/{}", task.slot),
+                description: task.title.split_whitespace().collect::<Vec<_>>().join(" "),
+            }));
 
         let skill_commands = self
             .skills
@@ -1141,15 +1414,13 @@ impl App {
         let agent_commands = self
             .agents
             .iter()
+            .filter(|agent| agent.name != "default")
             .map(|agent| SlashCommand {
                 value: format!("/agent {}", agent.name),
-                description: format!(
-                    "{}{}",
-                    if agent.active { "current · " } else { "" },
-                    agent.description
-                ),
+                description: format!("new sub-session · {}", agent.description),
             })
             .collect::<Vec<_>>();
+        self.commands.extend(agent_commands.iter().cloned());
 
         let resume_commands = self
             .saved_sessions
@@ -1182,7 +1453,10 @@ impl App {
                     } else if server.auth_required {
                         "auth required".into()
                     } else {
-                        server.error.clone().unwrap_or_else(|| "not connected".into())
+                        server
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "not connected".into())
                     },
                 }
             })
@@ -1190,13 +1464,11 @@ impl App {
 
         self.menu_groups_raw = vec![
             ("skills".to_string(), skill_commands.clone()),
-            ("agent".to_string(), agent_commands.clone()),
             ("resume".to_string(), resume_commands.clone()),
             ("mcp".to_string(), mcp_commands.clone()),
         ];
         self.command_groups = vec![
             ("skills".to_string(), skill_commands),
-            ("agent".to_string(), agent_commands),
             ("resume".to_string(), resume_commands),
             ("mcp".to_string(), mcp_commands),
         ];
@@ -1227,14 +1499,13 @@ impl App {
 
         if let Some(partial) = text.strip_prefix("/agent ") {
             return filter_argument_items(
-                self.agents.iter().map(|agent| SlashCommand {
-                    value: format!("/agent {}", agent.name),
-                    description: format!(
-                        "{}{}",
-                        if agent.active { "current · " } else { "" },
-                        agent.description
-                    ),
-                }),
+                self.agents
+                    .iter()
+                    .filter(|agent| agent.name != "default")
+                    .map(|agent| SlashCommand {
+                        value: format!("/agent {}", agent.name),
+                        description: agent.description.clone(),
+                    }),
                 partial,
             );
         }
@@ -1284,7 +1555,11 @@ impl App {
     fn format_help(&self) -> String {
         let mut out = String::from("Commands:\n");
         for command in &self.commands {
-            out.push_str(&format!("  {:<12} {}\n", command.value.trim_end(), command.description));
+            out.push_str(&format!(
+                "  {:<12} {}\n",
+                command.value.trim_end(),
+                command.description
+            ));
         }
         out.push_str(&format!(
             "  /<skill>     Run a skill directly ({} loaded)\n",
@@ -1306,7 +1581,17 @@ impl App {
     }
 
     fn waiting_for_reply(&self) -> bool {
-        (self.pending || self.streaming_flag)
+        let server_reports_running = self
+            .active_child
+            .and_then(|slot| {
+                self.agent_tasks
+                    .iter()
+                    .find(|task| task.slot == slot)
+                    .map(|task| agent_task_is_busy(&task.status))
+            })
+            .unwrap_or(false);
+
+        (self.pending || self.streaming_flag || server_reports_running)
             && self.streaming.as_ref().is_none_or(|line| {
                 line.text.trim().is_empty()
                     && line.thinking.trim().is_empty()
@@ -1317,7 +1602,8 @@ impl App {
     fn sync_streaming_markdown(&mut self, width: u16) {
         if let Some(line) = self.streaming.as_ref() {
             if line.role == "assistant" {
-                self.streaming_md.sync(&line.text, assistant_markdown_width(width));
+                self.streaming_md
+                    .sync(&line.text, assistant_markdown_width(width));
             }
         }
     }
@@ -1328,19 +1614,79 @@ impl App {
 
     fn layout_chunks(&self, area: Rect) -> Vec<Rect> {
         let menu_items = self.current_menu_items();
+        let task_height = if self.agent_tasks.is_empty() {
+            0
+        } else {
+            (self.agent_tasks.len().min(3) as u16)
+                .saturating_mul(2)
+                .saturating_add(2)
+        };
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),
-                Constraint::Length(if self.notice.is_some() { 1 } else { 0 }),
                 Constraint::Length(if self.history_scroll > 0 { 1 } else { 0 }),
-                Constraint::Length(if self.error.is_some() { 1 } else { 0 }),
+                Constraint::Length(task_height),
                 Constraint::Length(menu_height(&self.composer, &menu_items)),
                 Constraint::Length(STATUS_HEIGHT),
                 Constraint::Length(self.input_height(area.width)),
             ])
             .split(area)
             .to_vec()
+    }
+
+    fn agent_task_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.agent_tasks
+            .iter()
+            .take(3)
+            .flat_map(|task| {
+                let icon = match task.status.as_str() {
+                    "completed" => "✓",
+                    "failed" => "✗",
+                    "cancelled" => "–",
+                    "queued" => "◌",
+                    "idle" => "○",
+                    _ => "●",
+                };
+                let title = if task.title.trim().is_empty() {
+                    "Waiting for first message".to_string()
+                } else {
+                    task.title.split_whitespace().collect::<Vec<_>>().join(" ")
+                };
+                let prefix = format!("/{} ", task.slot);
+                let title =
+                    truncate_to_width(&title, width.saturating_sub(prefix.len() as u16) as usize);
+                let seconds = task.elapsed_ms / 1_000;
+                let unread = if task.unread { " · unread" } else { "" };
+                let activity = task
+                    .activity
+                    .as_deref()
+                    .map(|value| format!(" · {value}"))
+                    .unwrap_or_default();
+                vec![
+                    Line::from(vec![
+                        Span::styled(prefix, style::brand_bold()),
+                        Span::raw(title),
+                    ]),
+                    Line::from(Span::styled(
+                        format!(
+                            "   {icon} {} · {} · {:02}:{:02}{activity}{unread}",
+                            task.agent,
+                            task.status,
+                            seconds / 60,
+                            seconds % 60,
+                        ),
+                        if task.status == "failed" {
+                            style::error()
+                        } else if task.status == "completed" {
+                            style::success()
+                        } else {
+                            style::muted()
+                        },
+                    )),
+                ]
+            })
+            .collect()
     }
 
     fn clamp_history_scroll(&mut self, width: u16, height: u16) {
@@ -1353,11 +1699,8 @@ impl App {
             banner: &self.banner,
             show_welcome,
             connecting: matches!(self.connection, ConnectionState::Connecting),
-            active_agent: &self.active_agent,
-            fallback: self
-                .fallback
-                .as_ref()
-                .map(|value| (value.requested.as_str(), value.active.as_str())),
+            active_agent: &self.view_agent,
+            fallback: None,
             clock: self.started_at,
             turn_start: self.turn_start,
             width,
@@ -1385,11 +1728,8 @@ impl App {
             banner: &self.banner,
             show_welcome,
             connecting: matches!(self.connection, ConnectionState::Connecting),
-            active_agent: &self.active_agent,
-            fallback: self
-                .fallback
-                .as_ref()
-                .map(|value| (value.requested.as_str(), value.active.as_str())),
+            active_agent: &self.view_agent,
+            fallback: None,
             clock: self.started_at,
             turn_start: self.turn_start,
             width,
@@ -1421,13 +1761,13 @@ impl App {
                     .map(|line| line.text.clone())
             });
         let Some(text) = text.filter(|value| !value.trim().is_empty()) else {
-            self.notice = Some("Nothing to copy".into());
+            self.add_status("Nothing to copy".into());
             return;
         };
         if copy_to_clipboard(&text) {
-            self.notice = Some("Copied last reply".into());
+            self.add_status("Copied last reply".into());
         } else {
-            self.notice = Some("Copy failed".into());
+            self.add_error("Copy failed".into());
         }
     }
 }
@@ -1441,6 +1781,46 @@ fn copy_to_clipboard(text: &str) -> bool {
 fn should_remember_prompt(text: &str) -> bool {
     let trimmed = text.trim();
     !trimmed.is_empty() && !trimmed.starts_with('/') && trimmed != "exit"
+}
+
+fn agent_task_is_running(status: &str) -> bool {
+    matches!(
+        status,
+        "thinking" | "tool_running" | "responding" | "running"
+    )
+}
+
+fn agent_task_is_busy(status: &str) -> bool {
+    matches!(status, "queued" | "starting") || agent_task_is_running(status)
+}
+
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let width = text
+        .chars()
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+        .sum::<usize>();
+    if width <= max_width {
+        return text.to_string();
+    }
+    if max_width == 1 {
+        return "…".into();
+    }
+    let target = max_width - 1;
+    let mut used = 0;
+    let mut output = String::new();
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > target {
+            break;
+        }
+        output.push(ch);
+        used += ch_width;
+    }
+    output.push('…');
+    output
 }
 
 /// Argument candidates for commands like `/agent <name>`: filter by the
@@ -1462,4 +1842,35 @@ fn filter_argument_items(
                 .is_some_and(|arg| arg.to_lowercase().contains(&needle))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{agent_task_is_busy, truncate_to_width};
+
+    #[test]
+    fn truncates_wide_agent_titles_with_ellipsis() {
+        assert_eq!(
+            truncate_to_width("调查大家对 vibe coding 的看法", 12),
+            "调查大家对 …"
+        );
+        assert_eq!(truncate_to_width("short", 12), "short");
+    }
+
+    #[test]
+    fn background_progress_states_keep_the_transcript_waiting() {
+        for status in [
+            "queued",
+            "starting",
+            "thinking",
+            "tool_running",
+            "responding",
+            "running",
+        ] {
+            assert!(agent_task_is_busy(status), "{status}");
+        }
+        for status in ["idle", "completed", "failed", "cancelled"] {
+            assert!(!agent_task_is_busy(status), "{status}");
+        }
+    }
 }

@@ -498,12 +498,30 @@ export async function loadAgents(config?: GAgentConfig): Promise<LoadedAgents> {
     userPath ? loadAgentsFromDir(userPath, "user", globalSkillsConfig) : Promise.resolve([]),
   ]);
 
-  // User agents override builtin agents with the same name.
+  // User agents override builtin agents with the same name. The user-side
+  // `default` directory is an overlay: omitted metadata inherits the bundled
+  // default instead of accidentally disabling newly shipped capabilities.
   const agents = new Map<string, AgentConfig>();
   for (const agent of builtinAgents) {
     agents.set(agent.name, agent);
   }
   for (const agent of userAgents) {
+    const builtin = agents.get(agent.name);
+    if (agent.name === DEFAULT_AGENT_NAME && builtin) {
+      agents.set(agent.name, {
+        ...agent,
+        description: agent.description || builtin.description,
+        systemPromptBody:
+          agent.systemPromptBody ?? builtin.systemPromptBody,
+        systemPromptPath:
+          agent.systemPromptPath ?? builtin.systemPromptPath,
+        provider: agent.provider ?? builtin.provider,
+        providers: agent.providers ?? builtin.providers,
+        mcpServers: agent.mcpServers ?? builtin.mcpServers,
+        source: "user",
+      });
+      continue;
+    }
     agents.set(agent.name, { ...agent, source: "user" });
   }
 

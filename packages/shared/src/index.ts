@@ -12,7 +12,31 @@ export type ClientMessage =
   | { type: "mcp" }
   | { type: "mcp_auth"; name: string }
   | { type: "reload" }
+  | { type: "agent_task"; slot: number }
+  | { type: "agent_tasks" }
+  | { type: "agent_back" }
   | { type: "resume"; agent: string; history: ConversationTurn[] };
+
+export type AgentTaskStatus =
+  | "idle"
+  | "queued"
+  | "starting"
+  | "thinking"
+  | "tool_running"
+  | "responding"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type AgentTaskInfo = {
+  slot: number;
+  agent: string;
+  title: string;
+  status: AgentTaskStatus;
+  activity?: string;
+  elapsedMs: number;
+  unread: boolean;
+};
 
 export type McpServerCatalogEntry = {
   name: string;
@@ -30,7 +54,6 @@ export type McpServerCatalogEntry = {
 export type ServerMessage =
   | { type: "ready" }
   | { type: "agents"; agents: Array<{ name: string; description: string; active: boolean }>; active: string; model: string }
-  | { type: "agent_fallback"; requested: string; active: string }
   | { type: "skills"; skills: Array<{ name: string; description: string; source: "builtin" | "self" | "global" }> }
   | { type: "mcp"; servers: McpServerCatalogEntry[] }
   | { type: "context"; usedTokens: number; maxTokens: number; percent: number }
@@ -42,7 +65,15 @@ export type ServerMessage =
   | { type: "tool_result"; name: string; output: string }
   | { type: "done" }
   | { type: "error"; message: string }
-  | { type: "resumed"; agent: string; turns: number };
+  | { type: "resumed"; agent: string; turns: number }
+  | { type: "agent_tasks"; tasks: AgentTaskInfo[] }
+  | {
+      type: "agent_session";
+      slot?: number;
+      agent: string;
+      model: string;
+      history: ConversationTurn[];
+    };
 
 export const DEFAULT_SERVER_PORT = 3847;
 export const DEFAULT_SERVER_URL = `ws://127.0.0.1:${DEFAULT_SERVER_PORT}`;
@@ -80,6 +111,20 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       return data;
     }
     if (data.type === "reload") {
+      return data;
+    }
+    if (
+      data.type === "agent_task" &&
+      typeof data.slot === "number" &&
+      Number.isInteger(data.slot) &&
+      data.slot > 0
+    ) {
+      return data;
+    }
+    if (data.type === "agent_tasks") {
+      return data;
+    }
+    if (data.type === "agent_back") {
       return data;
     }
     if (data.type === "resume") {

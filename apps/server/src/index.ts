@@ -12,7 +12,6 @@ import {
   type AgentConfig,
   type ConversationMessage,
   type LoadedAgents,
-  type ResolvedAgent,
 } from "@g-agent/agent";
 import {
   formatProviderRef,
@@ -22,21 +21,25 @@ import {
   loadConfig,
   mergeAgentMcpServers,
   mergeAgentProviderOverrides,
-  saveActiveAgent,
   isMcpOAuthEnabled,
   type GAgentConfig,
   type ResolvedProvider,
 } from "@g-agent/config";
 import type { Skill } from "@g-agent/agent";
-import { parseClientMessage, type McpServerCatalogEntry, type ServerMessage } from "@g-agent/shared";
+import {
+  parseClientMessage,
+  type AgentTaskInfo,
+  type AgentTaskStatus,
+  type McpServerCatalogEntry,
+  type ServerMessage,
+} from "@g-agent/shared";
 import type { McpServerConfig } from "@g-agent/config";
 
-const { config, path: configPath } = await loadConfig();
+const initialConfig = await loadConfig();
+let config = initialConfig.config;
+const configPath = initialConfig.path;
 let loadedAgents = await loadAgents(config);
-const { agent: initialAgent, fallback } = resolveActiveAgent(
-  config.agent,
-  loadedAgents,
-);
+const { agent: initialAgent } = resolveActiveAgent(undefined, loadedAgents);
 const host = getServerHost();
 const port = getServerPort();
 
@@ -91,14 +94,70 @@ type WsData = {
   systemPrompt: string;
   /** Effective provider after merging agent-level overrides. */
   effectiveProvider: ResolvedProvider | null;
-  /** Set once per connection from the startup fallback; surfaced to the
-   * client as an `agent_fallback` hint on socket open. */
-  startupFallback?: { requested: string };
   mcpManager: McpManager;
+  agentTasks: BackgroundAgentTask[];
+  nextAgentTaskSlot: number;
+  activeAgentTaskSlot?: number;
+};
+
+type BackgroundAgentTask = {
+  slot: number;
+  agent: AgentConfig;
+  title: string;
+  status: AgentTaskStatus;
+  activity?: string;
+  createdAt: number;
+  completedAt?: number;
+  unread: boolean;
+  mcpManager?: McpManager;
+  history: ConversationMessage[];
+  promptQueue: string[];
+  draining: boolean;
 };
 
 function send(ws: ServerWebSocket<WsData>, message: ServerMessage): void {
   ws.send(JSON.stringify(message));
+}
+
+function agentTaskInfo(task: BackgroundAgentTask): AgentTaskInfo {
+  return {
+    slot: task.slot,
+    agent: task.agent.name,
+    title: task.title,
+    status: task.status,
+    ...(task.activity ? { activity: task.activity } : {}),
+    elapsedMs: Math.max(
+      0,
+      (task.completedAt ?? Date.now()) - task.createdAt,
+    ),
+    unread: task.unread,
+  };
+}
+
+function sendAgentTasks(ws: ServerWebSocket<WsData>): void {
+  send(ws, {
+    type: "agent_tasks",
+    tasks: ws.data.agentTasks.map(agentTaskInfo),
+  });
+}
+
+function summarizeToolActivity(name: string, argsText: string): string {
+  let args: Record<string, unknown> = {};
+  try {
+    args = JSON.parse(argsText) as Record<string, unknown>;
+  } catch {
+    // Tool progress is best-effort and must never affect execution.
+  }
+  if (name === "read" || name === "write") {
+    return `${name === "read" ? "Reading" : "Writing"} ${String(args.path ?? "file")}`;
+  }
+  if (name === "bash") {
+    return "Running a command";
+  }
+  if (name === "glob" || name === "grep") {
+    return "Searching files";
+  }
+  return `Using ${name}`;
 }
 
 function estimateTextTokens(text: string | null | undefined): number {
@@ -248,7 +307,7 @@ const clients = new Set<ServerWebSocket<WsData>>();
 
 async function reloadAgentsCatalog(): Promise<LoadedAgents> {
   const { config: freshConfig } = await loadConfig();
-  Object.assign(config, freshConfig);
+  config = freshConfig;
   clearGlobalSkillsCache();
   loadedAgents = await loadAgents(config);
   ensureReloadWatches();
@@ -264,7 +323,7 @@ function syncActiveAgentConfig(ws: ServerWebSocket<WsData>): AgentConfig {
     return refreshed;
   }
 
-  const { agent } = resolveActiveAgent(config.agent, loadedAgents);
+  const { agent } = resolveActiveAgent(undefined, loadedAgents);
   ws.data.activeAgent = agent;
   ws.data.systemPrompt = buildAgentSystemPrompt(agent, loadedAgents);
   ws.data.effectiveProvider = resolveProvider(agent);
@@ -389,35 +448,24 @@ function buildSkillPrompt(skill: Skill): string {
   ].join("\n");
 }
 
-/** Re-read config.json so reconnecting clients pick up the last-used agent. */
-async function loadStartupAgent(): Promise<ResolvedAgent & { runtimeConfig: GAgentConfig }> {
+/** Re-read the Agent catalog for a new lobby connection. */
+async function loadStartupAgent(): Promise<{ agent: AgentConfig }> {
   await reloadAgentsCatalog();
-  const resolved = resolveActiveAgent(config.agent, loadedAgents);
-  return { ...resolved, runtimeConfig: config };
+  return { agent: resolveActiveAgent(undefined, loadedAgents).agent };
 }
 
 async function applyAgentSwitch(
   ws: ServerWebSocket<WsData>,
   target: AgentConfig,
-  options: { clearHistory: boolean },
+  options: { clearHistory: boolean; reconnectMcp?: boolean },
 ): Promise<void> {
-  if (target.name !== ws.data.activeAgent.name) {
+  const agentChanged = target.name !== ws.data.activeAgent.name;
+  if (agentChanged || options.reconnectMcp) {
     await ws.data.mcpManager.close();
     ws.data.activeAgent = target;
     ws.data.systemPrompt = buildAgentSystemPrompt(target, loadedAgents);
     ws.data.effectiveProvider = resolveProvider(target);
     ws.data.mcpManager = await connectMcpForAgent(target);
-
-    void saveActiveAgent(target.name)
-      .then(() => {
-        config.agent = target.name;
-      })
-      .catch((error) => {
-        console.warn(
-          `Failed to persist active agent "${target.name}" to config:`,
-          error instanceof Error ? error.message : error,
-        );
-      });
   }
 
   ws.data.promptQueue.length = 0;
@@ -428,10 +476,190 @@ async function applyAgentSwitch(
   refreshClient(ws);
 }
 
+/**
+ * Start a clean session without restarting the server process.
+ *
+ * A session boundary is also a resource reload boundary: config, agents and
+ * skills are re-read from disk, and MCP connections are recreated even when
+ * their serialized config did not change (the MCP server implementation or
+ * its advertised tools may have changed).
+ */
+async function restartSession(ws: ServerWebSocket<WsData>): Promise<void> {
+  const currentAgentName = ws.data.activeAgent.name;
+  await reloadAgentsCatalog();
+
+  const target =
+    loadedAgents.agents.get(currentAgentName) ??
+    resolveActiveAgent(undefined, loadedAgents).agent;
+
+  await applyAgentSwitch(ws, target, {
+    clearHistory: true,
+    reconnectMcp: true,
+  });
+  for (const task of ws.data.agentTasks) {
+    await task.mcpManager?.close();
+  }
+  ws.data.agentTasks.length = 0;
+  ws.data.nextAgentTaskSlot = 1;
+  ws.data.activeAgentTaskSlot = undefined;
+  sendAgentTasks(ws);
+}
+
+function sendAgentSession(
+  ws: ServerWebSocket<WsData>,
+  task?: BackgroundAgentTask,
+): void {
+  send(ws, {
+    type: "agent_session",
+    ...(task ? { slot: task.slot } : {}),
+    agent: task?.agent.name ?? ws.data.activeAgent.name,
+    model: task
+      ? modelLabel(resolveProvider(task.agent))
+      : modelLabel(ws.data.effectiveProvider),
+    history: (task?.history ?? ws.data.history).map((message) => ({
+      role: message.role,
+      content: message.content ?? "",
+    })),
+  });
+}
+
+function createAgentSession(
+  ws: ServerWebSocket<WsData>,
+  agent: AgentConfig,
+): BackgroundAgentTask {
+  const task: BackgroundAgentTask = {
+    slot: ws.data.nextAgentTaskSlot++,
+    agent,
+    title: "",
+    status: "idle",
+    activity: "Waiting for first message",
+    createdAt: Date.now(),
+    unread: false,
+    history: [],
+    promptQueue: [],
+    draining: false,
+  };
+  ws.data.agentTasks.push(task);
+  ws.data.activeAgentTaskSlot = task.slot;
+  sendAgentTasks(ws);
+  sendAgentSession(ws, task);
+  return task;
+}
+
+async function runAgentSessionPrompt(
+  ws: ServerWebSocket<WsData>,
+  task: BackgroundAgentTask,
+  prompt: string,
+): Promise<void> {
+  if (!task.title) {
+    task.title = prompt;
+    task.createdAt = Date.now();
+  }
+  if (!task.mcpManager) {
+    task.status = "starting";
+    task.activity = "Starting";
+    sendAgentTasks(ws);
+    task.mcpManager = await connectMcpForAgent(task.agent);
+  }
+
+  task.status = "thinking";
+  task.activity = "Analyzing";
+  task.completedAt = undefined;
+  task.unread = false;
+  const isVisible = () => ws.data.activeAgentTaskSlot === task.slot;
+  const priorHistory = [...task.history];
+  task.history.push({ role: "user", content: prompt });
+  if (isVisible()) {
+    send(ws, { type: "start" });
+  }
+  sendAgentTasks(ws);
+
+  let assistantText = "";
+  let failed = false;
+  await runAgent(
+    prompt,
+    (event) => {
+      const wasStatus = task.status;
+      const wasActivity = task.activity;
+      if (event.type === "thinking_delta") {
+        task.status = "thinking";
+        task.activity = "Analyzing";
+        if (isVisible()) send(ws, { type: "thinkingDelta", text: event.text });
+      } else if (event.type === "tool_call") {
+        task.status = "tool_running";
+        task.activity = summarizeToolActivity(event.name, event.args);
+        if (isVisible()) {
+          send(ws, { type: "tool_call", name: event.name, args: event.args });
+        }
+      } else if (event.type === "tool_result") {
+        if (isVisible()) {
+          send(ws, {
+            type: "tool_result",
+            name: event.name,
+            output: event.output,
+          });
+        }
+      } else if (event.type === "delta") {
+        task.status = "responding";
+        task.activity = "Writing response";
+        assistantText += event.text;
+        if (isVisible()) send(ws, { type: "delta", text: event.text });
+      } else if (event.type === "error") {
+        failed = true;
+        task.status = "failed";
+        task.activity = "Failed";
+        task.completedAt = Date.now();
+        task.unread = !isVisible();
+        if (isVisible()) send(ws, { type: "error", message: event.message });
+      } else if (event.type === "done") {
+        if (!failed) {
+          if (assistantText.trim()) {
+            task.history.push({ role: "assistant", content: assistantText });
+          }
+          task.status = "completed";
+          task.activity = "Ready";
+          task.completedAt = Date.now();
+          task.unread = !isVisible();
+        }
+        if (isVisible()) send(ws, { type: "done" });
+      }
+      if (
+        task.status !== wasStatus ||
+        task.activity !== wasActivity ||
+        event.type === "done" ||
+        event.type === "error"
+      ) {
+        sendAgentTasks(ws);
+      }
+    },
+    resolveProvider(task.agent),
+    buildAgentSystemPrompt(task.agent, loadedAgents),
+    priorHistory,
+    { mcpManager: task.mcpManager },
+  );
+}
+
+async function drainAgentSessionQueue(
+  ws: ServerWebSocket<WsData>,
+  task: BackgroundAgentTask,
+): Promise<void> {
+  if (task.draining) return;
+  task.draining = true;
+  try {
+    while (task.promptQueue.length > 0) {
+      const prompt = task.promptQueue.shift();
+      if (prompt) await runAgentSessionPrompt(ws, task, prompt);
+    }
+  } finally {
+    task.draining = false;
+  }
+}
+
 async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<void> {
   trimHistoryForPrompt(ws, prompt);
   sendContextUsage(ws, prompt);
-  send(ws, { type: "start" });
+  const isVisible = () => ws.data.activeAgentTaskSlot === undefined;
+  if (isVisible()) send(ws, { type: "start" });
 
   let assistantText = "";
   let failed = false;
@@ -440,42 +668,46 @@ async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<v
     prompt,
     (event) => {
       if (event.type === "system_prompt") {
-        send(ws, { type: "system_prompt", text: event.text });
+        if (isVisible()) send(ws, { type: "system_prompt", text: event.text });
         return;
       }
 
       if (event.type === "thinking_delta") {
-        send(ws, { type: "thinkingDelta", text: event.text });
+        if (isVisible()) send(ws, { type: "thinkingDelta", text: event.text });
         return;
       }
 
       if (event.type === "delta") {
         assistantText += event.text;
-        send(ws, { type: "delta", text: event.text });
+        if (isVisible()) send(ws, { type: "delta", text: event.text });
         return;
       }
 
       if (event.type === "tool_call") {
-        send(ws, {
-          type: "tool_call",
-          name: event.name,
-          args: event.args,
-        });
+        if (isVisible()) {
+          send(ws, {
+            type: "tool_call",
+            name: event.name,
+            args: event.args,
+          });
+        }
         return;
       }
 
       if (event.type === "tool_result") {
-        send(ws, {
-          type: "tool_result",
-          name: event.name,
-          output: event.output,
-        });
+        if (isVisible()) {
+          send(ws, {
+            type: "tool_result",
+            name: event.name,
+            output: event.output,
+          });
+        }
         return;
       }
 
       if (event.type === "error") {
         failed = true;
-        send(ws, { type: "error", message: event.message });
+        if (isVisible()) send(ws, { type: "error", message: event.message });
         return;
       }
 
@@ -490,7 +722,7 @@ async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<v
         }
       }
       sendContextUsage(ws);
-      send(ws, { type: "done" });
+      if (isVisible()) send(ws, { type: "done" });
     },
     ws.data.effectiveProvider,
     ws.data.systemPrompt,
@@ -538,8 +770,9 @@ Bun.serve<WsData>({
           activeAgent: initialAgent,
           systemPrompt: buildAgentSystemPrompt(initialAgent, loadedAgents),
           effectiveProvider: resolveProvider(initialAgent),
-          startupFallback: fallback,
           mcpManager: new McpManager(),
+          agentTasks: [],
+          nextAgentTaskSlot: 1,
         } satisfies WsData,
       })
     ) {
@@ -554,27 +787,22 @@ Bun.serve<WsData>({
     open(ws) {
       clients.add(ws);
       void (async () => {
-        const { agent, fallback, runtimeConfig } = await loadStartupAgent();
+        const { agent } = await loadStartupAgent();
         ws.data.activeAgent = agent;
         ws.data.systemPrompt = buildAgentSystemPrompt(agent, loadedAgents);
-        ws.data.effectiveProvider = resolveProvider(agent, runtimeConfig);
-        ws.data.startupFallback = fallback;
-        ws.data.mcpManager = await connectMcpForAgent(agent, runtimeConfig);
+        ws.data.effectiveProvider = resolveProvider(agent);
+        ws.data.mcpManager = await connectMcpForAgent(agent);
 
         send(ws, { type: "ready" });
-        if (ws.data.startupFallback) {
-          send(ws, {
-            type: "agent_fallback",
-            requested: ws.data.startupFallback.requested,
-            active: ws.data.activeAgent.name,
-          });
-        }
         refreshClient(ws);
       })();
     },
     close(ws) {
       clients.delete(ws);
       void ws.data.mcpManager.close();
+      for (const task of ws.data.agentTasks) {
+        void task.mcpManager?.close();
+      }
     },
     message(ws, raw) {
       const text = typeof raw === "string" ? raw : raw.toString();
@@ -586,15 +814,55 @@ Bun.serve<WsData>({
       }
 
       if (message.type === "reset") {
-        ws.data.promptQueue.length = 0;
-        ws.data.cancelRequested = false;
-        ws.data.history.length = 0;
-        send(ws, { type: "system_prompt", text: ws.data.systemPrompt });
-        sendContextUsage(ws);
+        void restartSession(ws).catch((error) => {
+          send(ws, {
+            type: "error",
+            message:
+              error instanceof Error ? error.message : "Session restart failed",
+          });
+        });
+        return;
+      }
+
+      if (message.type === "agent_tasks") {
+        sendAgentTasks(ws);
+        return;
+      }
+
+      if (message.type === "agent_task") {
+        const task = ws.data.agentTasks.find(
+          (candidate) => candidate.slot === message.slot,
+        );
+        if (!task) {
+          send(ws, {
+            type: "error",
+            message: `Unknown agent task /${message.slot}`,
+          });
+          return;
+        }
+        ws.data.activeAgentTaskSlot = task.slot;
+        task.unread = false;
+        sendAgentSession(ws, task);
+        sendAgentTasks(ws);
+        return;
+      }
+
+      if (message.type === "agent_back") {
+        ws.data.activeAgentTaskSlot = undefined;
+        sendAgentSession(ws);
         return;
       }
 
       if (message.type === "cancel") {
+        const activeTask = ws.data.activeAgentTaskSlot
+          ? ws.data.agentTasks.find(
+              (task) => task.slot === ws.data.activeAgentTaskSlot,
+            )
+          : undefined;
+        if (activeTask) {
+          activeTask.promptQueue.length = 0;
+          return;
+        }
         ws.data.cancelRequested = true;
         ws.data.promptQueue.length = 0;
         return;
@@ -647,15 +915,13 @@ Bun.serve<WsData>({
             send(ws, { type: "error", message: `Unknown agent "${targetName}"` });
             return;
           }
-
-          // Switching to the currently active agent is a no-op apart from
-          // re-sending the catalog so the client stays in sync.
-          if (target.name === ws.data.activeAgent.name) {
-            sendAgentsCatalog(ws);
+          if (target.name === loadedAgents.defaultName) {
+            ws.data.activeAgentTaskSlot = undefined;
+            sendAgentSession(ws);
             return;
           }
 
-          await applyAgentSwitch(ws, target, { clearHistory: true });
+          createAgentSession(ws, target);
         })();
         return;
       }
@@ -744,19 +1010,47 @@ Bun.serve<WsData>({
         return;
       }
 
-      const prompt = message.message.trim();
-      if (!prompt) {
+      const rawPrompt = message.message;
+      if (!rawPrompt.trim()) {
         send(ws, { type: "error", message: "Empty message" });
         return;
       }
 
-      ws.data.promptQueue.push(prompt);
+      const activeTask = ws.data.activeAgentTaskSlot
+        ? ws.data.agentTasks.find(
+            (task) => task.slot === ws.data.activeAgentTaskSlot,
+          )
+        : undefined;
+      if (activeTask) {
+        activeTask.status = "queued";
+        activeTask.activity = "Queued";
+        activeTask.promptQueue.push(rawPrompt);
+        sendAgentTasks(ws);
+        void drainAgentSessionQueue(ws, activeTask);
+        return;
+      }
+
+      ws.data.promptQueue.push(rawPrompt.trim());
       void drainPromptQueue(ws);
     },
   },
 });
 
 ensureReloadWatches();
+
+setInterval(() => {
+  for (const ws of clients) {
+    if (
+      ws.data.agentTasks.some((task) =>
+        ["queued", "starting", "thinking", "tool_running", "responding"].includes(
+          task.status,
+        ),
+      )
+    ) {
+      sendAgentTasks(ws);
+    }
+  }
+}, 1_000);
 
 const startupProvider = resolveProvider(initialAgent);
 const providerLabel = startupProvider ? formatProviderRef(startupProvider) : "echo";

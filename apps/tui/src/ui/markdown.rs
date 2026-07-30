@@ -84,12 +84,7 @@ impl StreamingMarkdown {
     }
 
     fn rerender(&mut self, width: u16) {
-        self.rendered = render_with(
-            &self.events,
-            &Theme::default(),
-            width.max(1) as usize,
-        )
-        .lines;
+        self.rendered = render_with(&self.events, &Theme::default(), width.max(1) as usize).lines;
     }
 }
 

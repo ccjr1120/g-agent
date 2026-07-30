@@ -55,7 +55,6 @@ g-agent server restart
 
 - `provider` — 默认 provider，形如 `openai/gpt-4o-mini`
 - `providers` — provider 清单（baseUrl / apiKeyEnv / models）
-- `agent` — 可选；指定启动时加载哪个 agent。未设置或指向不存在的 agent 时回退到内置 `default`（见下）。运行时切换 agent 会自动写回此字段，下次启动沿用上次的 agent
 
 `G_AGENT_PROVIDER` 环境变量可临时覆盖 `provider`。
 
@@ -119,20 +118,25 @@ agent 目录从以下路径查找：`$G_AGENT_AGENTS_DIR` → `$G_AGENT_HOME/age
 
   - `global: false` — 该 agent 不加载任何 global skills
   - `loadAgentsSkills` / `skipPaths` — 仅对该 agent 生效，与全局配置合并
+
 - self skills：`<agent>/skills/<skill>/SKILL.md`
 
 同名技能按 `self > global > built-in` 的优先级覆盖。启动时如果发现同名冲突，会在 server 日志中输出被选中的来源和所有候选路径。
 
 内置 `default` agent 已含 `memory-manager`、`skill-manager`、`agent-manager`、`mcp-manager` 等内置技能与基础 system prompt，无需配置即可用。
 
-#### 运行时切换
+#### default 主会话与 Agent 子会话
 
 TUI 内：
 
-- `/agent` — 列出所有 agent（`*` 标记当前）
-- `/agent <name>` — 切换到指定 agent（清空当前对话、重载技能与 system prompt）
+- `/agent` — 在消息列表中列出所有可创建子会话的 Agent
+- `/agent <name>` — 创建并进入一个新的独立 Agent 子会话；命令在一级 `/` 菜单中平铺展示
+- `/<编号>` — 重新进入已有子会话
+- `/back` — 返回 `default` 主会话
+- `/new` — 启动新会话，同时从磁盘重新加载配置、Agent 与 Skill，并重建当前 Agent 的 MCP 连接；添加或修改 MCP/Skill 后无需重启 server
+- `/reload` — 不清空当前对话，立即重新加载配置、Agent 与 Skill；仅在 MCP 配置发生变化时重建连接
 
-`config.json` 的可选 `agent` 字段决定启动时加载哪个 agent；未设置或指向不存在的 agent 时回退到内置 `default`。在 TUI 中切换 agent 后会自动更新该字段，下次启动默认使用上次在用的 agent。
+启动后默认进入内置 `default` 主会话。`default` 不显示在 Sub Agents 区域，也不负责调用其他 Agent。只有用户执行 `/agent <name>` 时才创建独立编号子会话；消息直接发送给所选 Agent，不经过 `default` 改写或转发。子会话的第一条用户消息会原样发送，并作为固定标题。
 
 ## 开发
 

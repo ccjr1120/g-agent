@@ -144,7 +144,10 @@ fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
-    format!("{}…", text.chars().take(max.saturating_sub(1)).collect::<String>())
+    format!(
+        "{}…",
+        text.chars().take(max.saturating_sub(1)).collect::<String>()
+    )
 }
 
 pub fn write_conversation_log(lines: &[(String, String)]) -> Result<PathBuf> {
@@ -157,10 +160,10 @@ pub fn write_conversation_log(lines: &[(String, String)]) -> Result<PathBuf> {
     let path = log_dir.join(filename);
     let mut output = String::from("# Conversation Log\n\n");
     for (role, content) in lines {
-        let heading = if role == "user" {
-            "## User"
-        } else {
-            "## Assistant"
+        let heading = match role.as_str() {
+            "user" => "## User",
+            "error" => "## Error",
+            _ => "## Assistant",
         };
         output.push_str(heading);
         output.push_str("\n\n");
@@ -183,13 +186,8 @@ pub fn format_session_label(summary: &SavedSessionSummary) -> String {
 
 #[derive(Debug, Clone)]
 pub enum UndoEntry {
-    Chat {
-        user_index: usize,
-        text: String,
-    },
-    Local {
-        line_index: usize,
-    },
+    Chat { user_index: usize, text: String },
+    Local { line_index: usize },
 }
 
 pub struct UndoStack {

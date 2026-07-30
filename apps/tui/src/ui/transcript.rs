@@ -1,8 +1,8 @@
 use std::time::Instant;
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::buffer::Buffer;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 
@@ -41,10 +41,7 @@ fn center_line_with_offset(text: &str, viewport_width: u16, left_offset: u16) ->
 
 fn assistant_leading_spans() -> Vec<Span<'static>> {
     vec![
-        Span::styled(
-            ASSISTANT_BULLET.to_string(),
-            style::assistant_bullet(),
-        ),
+        Span::styled(ASSISTANT_BULLET.to_string(), style::assistant_bullet()),
         Span::raw(" "),
     ]
 }
@@ -90,14 +87,14 @@ pub fn build_transcript_lines(
             rendered.push(spinner_line("Connecting…", content.clock, None, false));
         } else {
             rendered.push(Line::from(vec![Span::styled(
-                format!(
-                    "Active agent: {}. Enter to send, / for commands, Esc to revert last send, Ctrl+Y or Cmd+C to copy.",
-                    if content.active_agent.is_empty() {
-                        "—"
-                    } else {
+                if content.active_agent.is_empty() {
+                    "Choose an agent with /agent <name>. Use / for commands.".to_string()
+                } else {
+                    format!(
+                        "Agent: {}. Enter to send, /back to return, / for commands.",
                         content.active_agent
-                    }
-                ),
+                    )
+                },
                 style::welcome(),
             )]));
             if let Some((requested, active)) = content.fallback {
@@ -175,10 +172,7 @@ pub fn max_history_scroll(
 }
 
 fn line_count(lines: &[Line<'_>], width: u16) -> u16 {
-    lines
-        .iter()
-        .map(|line| line_row_count(line, width))
-        .sum()
+    lines.iter().map(|line| line_row_count(line, width)).sum()
 }
 
 fn line_row_count(line: &Line<'_>, width: u16) -> u16 {
@@ -248,14 +242,23 @@ fn push_chat_line(
     width: u16,
     markdown: &mut MarkdownCache,
 ) {
-    if line.role == "user" {
-        push_user_text(lines, &line.text, line.queued);
-    } else {
-        for tool in &line.tools {
-            lines.push(tool_line(tool));
+    match line.role.as_str() {
+        "user" => push_user_text(lines, &line.text, line.queued),
+        "error" => {
+            for chunk in line.text.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("! {chunk}"),
+                    style::error(),
+                )));
+            }
         }
-        push_thinking_text(lines, &line.thinking);
-        push_assistant_body(lines, &line.text, width, markdown);
+        _ => {
+            for tool in &line.tools {
+                lines.push(tool_line(tool));
+            }
+            push_thinking_text(lines, &line.thinking);
+            push_assistant_body(lines, &line.text, width, markdown);
+        }
     }
 
     if let Some(duration) = line.duration_ms {
@@ -287,7 +290,11 @@ fn push_user_text(lines: &mut Vec<Line<'static>>, text: &str, queued: bool) {
     }
     for (index, chunk) in text.lines().enumerate() {
         let prefix = if index == 0 {
-            if queued { "⏳ " } else { USER_PREFIX }
+            if queued {
+                "⏳ "
+            } else {
+                USER_PREFIX
+            }
         } else {
             USER_CONTINUATION
         };
@@ -300,7 +307,11 @@ fn push_user_text(lines: &mut Vec<Line<'static>>, text: &str, queued: bool) {
     }
 }
 
-fn user_line_spans(chunk: &str, prefix: &str, base_style: ratatui::style::Style) -> Vec<Span<'static>> {
+fn user_line_spans(
+    chunk: &str,
+    prefix: &str,
+    base_style: ratatui::style::Style,
+) -> Vec<Span<'static>> {
     const MARKER: &str = "[Pasted text #";
     let mut spans = vec![Span::styled(prefix.to_string(), base_style)];
     if let Some(start) = chunk.find(MARKER) {
@@ -476,6 +487,83 @@ mod tests {
         let reply = joined.find("reply-to-first").expect("streaming reply");
         let queued = joined.find("queued-second").expect("queued follow-up");
         assert!(first < reply, "user should precede its reply");
-        assert!(reply < queued, "queued follow-up should come after the live reply");
+        assert!(
+            reply < queued,
+            "queued follow-up should come after the live reply"
+        );
+    }
+
+    #[test]
+    fn error_renders_in_transcript_order_before_queued_message() {
+        let lines = vec![
+            sample_line("user", "first", false),
+            sample_line("error", "The operation timed out.", false),
+            sample_line("user", "queued-second", true),
+        ];
+        let content = TranscriptContent {
+            lines: &lines,
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            width: 80,
+        };
+        let mut markdown = MarkdownCache::new();
+        let rendered = build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+        let joined = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let first = joined.find("first").expect("first prompt");
+        let error = joined.find("The operation timed out.").expect("turn error");
+        let queued = joined.find("queued-second").expect("queued prompt");
+        assert!(first < error);
+        assert!(error < queued);
+    }
+
+    #[test]
+    fn local_feedback_renders_in_message_order() {
+        let lines = vec![
+            sample_line("user", "before-command", false),
+            sample_line("local", "sub-session opened", false),
+            sample_line("user", "after-command", false),
+        ];
+        let content = TranscriptContent {
+            lines: &lines,
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            width: 80,
+        };
+        let mut markdown = MarkdownCache::new();
+        let rendered = build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+        let joined = rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        let before = joined.find("before-command").expect("first message");
+        let feedback = joined.find("sub-session opened").expect("local feedback");
+        let after = joined.find("after-command").expect("last message");
+        assert!(before < feedback && feedback < after);
     }
 }

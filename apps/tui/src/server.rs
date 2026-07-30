@@ -106,7 +106,10 @@ pub fn run_server_foreground() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let err = Command::new(bun_binary()).current_dir(&root).arg(entry).exec();
+        let err = Command::new(bun_binary())
+            .current_dir(&root)
+            .arg(entry)
+            .exec();
         Err(anyhow!("failed to exec bun: {err}"))
     }
     #[cfg(not(unix))]
@@ -202,9 +205,7 @@ fn find_listener_pids(port: u16) -> Result<Vec<u32>> {
 fn stop_pid(pid: u32) {
     let _ = Command::new("kill").arg(pid.to_string()).status();
     if !wait_for_pid_exit(pid, 30) {
-        let _ = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status();
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
         let _ = wait_for_pid_exit(pid, 20);
     }
 }
@@ -228,7 +229,11 @@ fn is_server_up(health_url: &str) -> Result<bool> {
     let client = Client::builder()
         .timeout(Duration::from_millis(300))
         .build()?;
-    Ok(client.get(health_url).send().map(|resp| resp.status().is_success()).unwrap_or(false))
+    Ok(client
+        .get(health_url)
+        .send()
+        .map(|resp| resp.status().is_success())
+        .unwrap_or(false))
 }
 
 fn has_live_server_lock() -> Result<bool> {
@@ -404,8 +409,7 @@ pub fn enable_autostart() -> Result<()> {
         .stderr(Stdio::null())
         .status();
 
-    fs::write(&plist_path, plist)
-        .with_context(|| format!("write {}", plist_path.display()))?;
+    fs::write(&plist_path, plist).with_context(|| format!("write {}", plist_path.display()))?;
 
     // The launchd job owns the server now — stop any manually spawned one so
     // they don't fight over the port.
@@ -417,7 +421,10 @@ pub fn enable_autostart() -> Result<()> {
         .status()
         .context("run launchctl load")?;
     if !status.success() {
-        return Err(anyhow!("launchctl load failed for {}", plist_path.display()));
+        return Err(anyhow!(
+            "launchctl load failed for {}",
+            plist_path.display()
+        ));
     }
 
     println!("g-agent: autostart enabled ({})", plist_path.display());
@@ -443,8 +450,7 @@ pub fn disable_autostart() -> Result<()> {
             plist_path.display()
         );
     }
-    fs::remove_file(&plist_path)
-        .with_context(|| format!("remove {}", plist_path.display()))?;
+    fs::remove_file(&plist_path).with_context(|| format!("remove {}", plist_path.display()))?;
     println!("g-agent: autostart disabled");
     Ok(())
 }

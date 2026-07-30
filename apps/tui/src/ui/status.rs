@@ -96,33 +96,38 @@ impl StatusBar<'_> {
     }
 
     fn metadata_line(&self) -> Line<'static> {
+        if self.model.is_empty() && self.active_agent.is_empty() {
+            return Line::default();
+        }
         let model = display_model(self.model);
-        let agent = if self.active_agent.is_empty() {
-            "—".to_string()
-        } else {
-            self.active_agent.to_string()
-        };
+        let agent = self.active_agent.to_string();
         let percent = self.context.percent.min(100);
-
-        Line::from(vec![
-            Span::styled(ICON_MODEL, style::status_label()),
-            Span::raw(" "),
-            Span::styled(model, style::status_meta()),
-            Span::raw(SECTION_GAP),
-            Span::styled(ICON_AGENT, style::status_label()),
-            Span::raw(" "),
-            Span::styled(agent, style::status_meta()),
-            Span::raw(SECTION_GAP),
-            Span::styled(format!("{percent}%"), style::status_meta()),
-        ])
+        let mut spans = Vec::new();
+        if !model.is_empty() {
+            spans.extend([
+                Span::styled(ICON_MODEL, style::status_label()),
+                Span::raw(" "),
+                Span::styled(model, style::status_meta()),
+            ]);
+        }
+        if !agent.is_empty() {
+            if !spans.is_empty() {
+                spans.push(Span::raw(SECTION_GAP));
+            }
+            spans.extend([
+                Span::styled(ICON_AGENT, style::status_label()),
+                Span::raw(" "),
+                Span::styled(agent, style::status_meta()),
+            ]);
+        }
+        spans.push(Span::raw(SECTION_GAP));
+        spans.push(Span::styled(format!("{percent}%"), style::status_meta()));
+        Line::from(spans)
     }
 }
 
 fn line_width(line: &Line<'_>) -> usize {
-    line.spans
-        .iter()
-        .map(|span| span.content.width())
-        .sum()
+    line.spans.iter().map(|span| span.content.width()).sum()
 }
 
 struct ContextRing {
@@ -217,11 +222,7 @@ fn context_style(percent: u8) -> Style {
 }
 
 fn display_model(model: &str) -> String {
-    model
-        .rsplit('/')
-        .next()
-        .unwrap_or(model)
-        .to_string()
+    model.rsplit('/').next().unwrap_or(model).to_string()
 }
 
 #[cfg(test)]
@@ -231,11 +232,6 @@ mod tests {
     #[test]
     fn compact_ring_renders_without_panic() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
-        ContextRing::new(ContextUsage {
-            used_tokens: 50_000,
-            max_tokens: 100_000,
-            percent: 50,
-        })
-        .render(Rect::new(0, 0, 1, 1), &mut buf);
+        ContextRing::new(ContextUsage { percent: 50 }).render(Rect::new(0, 0, 1, 1), &mut buf);
     }
 }

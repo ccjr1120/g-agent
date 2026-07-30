@@ -1,7 +1,7 @@
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::buffer::Buffer;
 use ratatui::widgets::Widget;
 
 use crate::ui::paste::{
@@ -94,7 +94,8 @@ impl Composer {
     }
 
     pub fn delete_backward(&mut self) {
-        if let Some((range, id)) = find_placeholder_at(self.textarea.text(), self.textarea.cursor()) {
+        if let Some((range, id)) = find_placeholder_at(self.textarea.text(), self.textarea.cursor())
+        {
             self.textarea.replace_range(range);
             self.pastes.retain(|block| block.id != id);
             self.on_text_changed();
@@ -106,7 +107,9 @@ impl Composer {
 
     pub fn delete_forward(&mut self) {
         let cursor = self.textarea.cursor();
-        if let Some((range, id)) = find_placeholder_at(self.textarea.text(), cursor.saturating_add(1)) {
+        if let Some((range, id)) =
+            find_placeholder_at(self.textarea.text(), cursor.saturating_add(1))
+        {
             if range.start == cursor || range.contains(&cursor) {
                 self.textarea.replace_range(range);
                 self.pastes.retain(|block| block.id != id);
@@ -158,8 +161,7 @@ impl Composer {
                             return true;
                         }
                         let name = command_group_id(&command.value).to_lowercase();
-                        name.contains(&query)
-                            || command.description.to_lowercase().contains(&query)
+                        name.contains(&query) || command.description.to_lowercase().contains(&query)
                     })
                     .collect();
             }
@@ -221,13 +223,7 @@ impl Widget for ComposerWidget<'_> {
             style::composer_active()
         };
 
-        TextAreaWidget::new(
-            &self.composer.textarea,
-            "> ",
-            style,
-            !self.disabled,
-        )
-        .render(area, buf);
+        TextAreaWidget::new(&self.composer.textarea, "> ", style, !self.disabled).render(area, buf);
     }
 }
 

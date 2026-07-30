@@ -1,7 +1,7 @@
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::buffer::Buffer;
 use ratatui::widgets::Widget;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -27,10 +27,6 @@ impl TextArea {
 
     pub fn text(&self) -> &str {
         &self.text
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
     }
 
     pub fn set_text(&mut self, value: String) {
@@ -278,7 +274,8 @@ impl Widget for TextAreaWidget<'_> {
                 break;
             }
             let prefix = if row == 0 { self.prefix } else { "  " };
-            let line_text = &self.textarea.text[wrapped.start..wrapped.end.min(self.textarea.text.len())];
+            let line_text =
+                &self.textarea.text[wrapped.start..wrapped.end.min(self.textarea.text.len())];
             let display = line_text.replace('\t', "    ");
             let mut spans = vec![Span::styled(prefix, self.style)];
             if self.show_cursor && Some(row) == cursor_line {
@@ -304,7 +301,10 @@ impl Widget for TextAreaWidget<'_> {
                 if !before.is_empty() {
                     spans.push(Span::styled(before, self.style));
                 }
-                spans.push(Span::styled(at, self.style.add_modifier(Modifier::REVERSED)));
+                spans.push(Span::styled(
+                    at,
+                    self.style.add_modifier(Modifier::REVERSED),
+                ));
                 if !after.is_empty() {
                     spans.push(Span::styled(after, self.style));
                 }

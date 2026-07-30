@@ -12,9 +12,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::{
     cursor::{Hide, Show},
-    event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    },
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -130,8 +128,6 @@ async fn async_main(ws_url: String) -> Result<()> {
 async fn run_tui(server_url: String, banner: Vec<String>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
-    // Mouse capture so the wheel scrolls the transcript; ↑/↓ stay for prompt recall.
-    // Hold Shift to select text in most terminals.
     execute!(
         stdout,
         EnterAlternateScreen,
@@ -157,14 +153,4 @@ async fn run_tui(server_url: String, banner: Vec<String>) -> Result<()> {
 
 pub fn sleep_ms(ms: u64) {
     std::thread::sleep(Duration::from_millis(ms));
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::config::default_ws_url;
-
-    #[test]
-    fn default_url_is_valid() {
-        assert!(default_ws_url().starts_with("ws://"));
-    }
 }

@@ -7,8 +7,7 @@ use anyhow::{Context, Result};
 use crate::protocol::{DEFAULT_SERVER_PORT, DEFAULT_SERVER_URL};
 
 const BANNER_FILENAME: &str = "banner.txt";
-const DEFAULT_BANNER: &str =
-    include_str!("../../../packages/agent/src/banners/builtin/banner.txt");
+const DEFAULT_BANNER: &str = include_str!("../../../packages/agent/src/banners/builtin/banner.txt");
 
 /// Server URL precedence: `G_AGENT_SERVER_URL` > `G_AGENT_HOST`/`G_AGENT_PORT`
 /// > config.json `serverUrl` > built-in default.
@@ -35,6 +34,7 @@ pub fn server_url() -> String {
                 return trimmed.to_string();
             }
         }
+        return DEFAULT_SERVER_URL.to_string();
     }
 
     let host = host_override.unwrap_or_else(|| "127.0.0.1".to_string());
@@ -68,9 +68,7 @@ pub fn config_candidates() -> Vec<PathBuf> {
 }
 
 pub fn resolve_config_path() -> Option<PathBuf> {
-    config_candidates()
-        .into_iter()
-        .find(|path| path.is_file())
+    config_candidates().into_iter().find(|path| path.is_file())
 }
 
 pub fn load_banner_lines() -> Vec<String> {
@@ -119,17 +117,13 @@ fn banner_paths() -> Vec<PathBuf> {
     paths.push(config_dir().join("banners/banner.txt"));
 
     if let Some(root) = repo_root_from_exe() {
-        paths.push(
-            root.join("packages/agent/src/banners/builtin/banner.txt"),
-        );
+        paths.push(root.join("packages/agent/src/banners/builtin/banner.txt"));
     }
 
     if let Ok(exe) = env::current_exe() {
         if let Some(mut dir) = exe.parent().map(Path::to_path_buf) {
             for _ in 0..8 {
-                paths.push(
-                    dir.join("packages/agent/src/banners/builtin/banner.txt"),
-                );
+                paths.push(dir.join("packages/agent/src/banners/builtin/banner.txt"));
                 if dir.join("apps/server/src/index.ts").is_file() {
                     break;
                 }
@@ -213,21 +207,13 @@ pub fn read_config_server_hint() -> Result<Option<String>> {
     let Some(path) = resolve_config_path() else {
         return Ok(None);
     };
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("read config at {}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("read config at {}", path.display()))?;
     let value: serde_json::Value = serde_json::from_str(&raw)?;
     Ok(value
         .get("serverUrl")
         .and_then(|item| item.as_str())
         .map(str::to_string))
-}
-
-pub fn default_ws_url() -> String {
-    read_config_server_hint()
-        .ok()
-        .flatten()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
 }
 
 #[cfg(test)]

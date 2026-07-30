@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    let manifest = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
-    );
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let repo_root = manifest.join("../..");
     let server_entry = repo_root.join("apps/server/src/index.ts");
 
