@@ -1,265 +1,131 @@
 ---
 name: agent-manager
-description: Agent 生命周期管理：创建、编辑、删除、列出 agent，以及编写/优化 agent 的 system.md 提示词。当用户要求「创建/新建/加一个 agent」、「修改/编辑/删除 agent」、「列出/查看 agent」、「优化/改进 xxx agent 的提示词/system prompt/system.md」时启用。
+description: Agent 生命周期管理：通过参数化脚本创建、查询、编辑、删除用户 agent，管理 agent.json、system.md 和 builtin-skills。当用户要求创建、修改、删除、列出、查看 agent，或优化 agent 提示词、模型、技能时使用。
 ---
 
-## 本 skill 的定位
+# Agent Manager
 
-| 项 | 说明 |
-|----|------|
-| **类型** | 内置 skill（builtin），随内置 `default` agent 分发 |
-| **skill 文件位置** | g-agent 包内 `builtin/default/builtin-skills/agent-manager/`；**安装时不复制**到 `~/.config/g-agent/` |
-| **LLM 如何获知** | 系统提示词 `## Built-in skills` 中仅列 name、description 与路径；任务匹配时用 `read` 加载本 SKILL.md |
-| **脚本路径** | `{{skill_dir}}/scripts/`（加载时已替换为磁盘实际路径） |
-| **本 skill 写入的数据** | 仅 `~/.config/g-agent/agents/<name>/` 下的用户 agent（见下文） |
-
----
-
-管理 g-agent 的用户 agent。用户 agent 统一放在：
-
-```
-~/.config/g-agent/agents/<name>/
-  agent.json              # 必需，{ "description": "..." }；可选 provider/providers、skills
-  system.md               # 可选，该 agent 的 system prompt；缺失则继承内置 default 的
-  builtin-skills/         # 可选，该 agent 的内置技能
-    <skill>/SKILL.md
-  skills/                 # 可选，该 agent 的用户技能
-    <skill>/SKILL.md
-```
-
-> 路径中的 `~` 会由 `write` 工具自动展开到家目录并创建所需父目录，直接写 `~/.config/g-agent/agents/<name>/...` 即可，无需先 `mkdir`。
-
-同名时用户 agent 会覆盖内置同名 agent（加载期 `loadAgents()` 中 user 覆盖 builtin）。
-
-**技能三层（创建 agent 时须区分）：**
-
-| 层级 | 放哪里 | 何时用 |
-|------|--------|--------|
-| **builtin（内置）** | 本 agent 的 `builtin-skills/` | 随 agent 分发、该 agent 专属的基础能力 → **本 skill 管理** |
-| **global（全局）** | `~/.agent/skills/` | 所有 agent 都要用 → **skill-manager** |
-| **self（专属）** | 本 agent 的 `skills/` | 仅这一个 agent 用、不共享 → **skill-manager** |
-
-创建 agent 时默认往 `builtin-skills/` 放 `memory-manager` 等；不要误把应全局共享的技能写进 builtin。
-
----
-
-## 触发
-
-| 用户意图 | 触发词示例 |
-|---------|-----------|
-| 创建 agent | 「创建/新建/加一个 agent」「帮我做一个 xxx agent」 |
-| 编辑 agent | 「修改/编辑 xxx agent」「给 xxx 加个技能」「去掉 xxx 的技能」 |
-| 优化提示词 | 「优化/改进 xxx agent 的提示词」「给 xxx 写 system.md」「优化 system prompt」「让 xxx 更擅长 xxx」 |
-| 删除 agent | 「删除/移除 xxx agent」 |
-| 列出 agent | 「有哪些 agent」「列出/查看 agent」「我的 agent」 |
-
-普通对话、改全局 config.json、加全局技能但不涉及某个 agent 等不触发。
-
-**提示词优化也属于编辑 agent**：写/改 `system.md` 走「二、编辑 agent → 修改 system prompt」流程，不要跳过 skill 直接用 write。
-
----
-
-## 第零步：列出已有 agent（所有操作前必做）
-
-执行任何操作前，先用 `bash` 列出用户已有 agent，并告知内置 agent 情况：
+管理 `~/.config/g-agent/agents/<name>/` 下的用户 agent。所有读取和变更必须通过：
 
 ```bash
-for d in ~/.config/g-agent/agents/*/; do
-  [ -d "$d" ] || continue
-  name=$(basename "$d")
-  desc=$(python3 -c "import sys,json; print(json.load(sys.stdin).get('description',''))" 2>/dev/null < "$d/agent.json" || echo "")
-  echo "$name — $desc"
-done
+node "{{skill_dir}}/scripts/agent.mjs" <command> [arguments]
 ```
 
-> 若 `~/.config/g-agent/agents/` 下为空目录，说明还没有用户创建的 agent。内置 agent（如 `default`、`agent-manager`）始终可用，不需要列出文件。
+`{{skill_dir}}` 由加载器替换为实际路径。
 
-用简洁的自然语言告诉用户当前有哪些用户 agent，然后进入具体操作。
+## 强制约束
 
----
+- **只调用 `agent.mjs`，禁止用 `read`、`write`、`bash cat`、`ls`、`rm` 或临时脚本直接操作 agent 文件。**
+- 先调用 `list --json` 或 `get <name> --json` 获取现状；不要自行探测目录。
+- 创建、修改、删除前先向用户展示预览并确认；收到确认后才调用写命令。
+- 删除必须在用户明确确认后传 `--yes`。脚本拒绝删除 `default` 用户覆盖。
+- 只管理用户 agent，不修改仓库内置 agent。要覆盖内置 agent 时创建同名用户 agent。
+- `builtin-skills` 由本脚本管理；global/self skills 交给 `skill-manager`。
+- 增删 builtin skill 时，同时用 `update --system` 同步 system prompt 中的 Skills first 原则和技能清单。
+- 不修改全局 `config.json` 的默认 agent。
 
-## 一、创建 agent
+## 命令
 
-### 1. 先问用途，再推导一切
+```text
+agent.mjs paths [--json]
+agent.mjs list [--json]
+agent.mjs get <name> [--json]
 
-**只问一个问题**：这个 agent 用来做什么？（一句话描述用途）
+agent.mjs create <name>
+  --description <text>
+  [--system <markdown>]
+  [--provider <provider/model>]
+  [--providers-json <json>]
+  [--skills-json <json>]
+  [--mcp-servers-json <json>]
+  [--json]
 
-用户只需说「用来做代码审查」「帮我写 commit message」「翻译中英文」这类一句，不要一开始就要求填四样。
+agent.mjs update <name>
+  [--description <text>]
+  [--system <markdown> | --remove-system]
+  [--provider <provider/model> | --remove-provider]
+  [--providers-json <json> | --remove-providers]
+  [--skills-json <json> | --remove-skills-config]
+  [--mcp-servers-json <json> | --remove-mcp-servers]
+  [--json]
 
-### 2. 从用途推导四项内容
+agent.mjs remove <name> --yes [--json]
 
-基于用途，自动生成以下四项的草案，**一次性全部展示**给用户确认：
-
-| 要素 | 推导方式 |
-|------|---------|
-| **name** | 用途的英文翻译，小写、连字符分隔，如 `code-reviewer`、`commit-writer`、`translator` |
-| **description** | 用途的中文一句话，如「专注代码审查的助手」 |
-| **system.md** | 基于用途生成角色设定：身份、能力边界、语气、常用工具偏好。3-8 句话即可，不要冗长。若含 builtin-skills，须体现 Skills first 原则，并在增删 skill 时同步更新。执行类 agent 默认应体现 **先规划再实施**（可参考内置 default 的 Plan before act 段落），避免连续试错式调工具 |
-| **skills** | 始终建议包含 `memory-manager`（记住用户偏好等基础能力）。除非用途明确不需要（如纯一次性翻译 agent），否则 memory-manager 是合理默认。每增加一个 builtin-skill，须同步修订 system.md |
-
-> 模板参考：内置 `default` agent 的 system.md 可先 `read` 作为风格参照。memory-manager skill 的内容可先从内置 `default` 的 `builtin-skills/memory-manager/SKILL.md` `read` 取来直接复用。global / self 技能管理走 **skill-manager**。
-
-**`provider` / `providers`（可选）**：
-
-agent.json 可选的 `provider` 和 `providers` 与 config.json 结构一致。当 agent 需要不同的模型或 API 后端时使用：
-
-- `provider` — 覆盖全局的 provider/model 引用。格式 `"provider名/model名"`（如 `"openai/gpt-4o"`）。比如代码审查 agent 可能需要更强的模型。
-- `providers` — 追加或覆盖全局 providers 配置。例如 agent 使用了 config.json 里没有的第三方 API。
-
-**默认不填**，除非用户明确说「这个 agent 要用另一个模型」。填了就只影响该 agent，不影响其他 agent。
-
-**`skills`（可选）** — 控制该 agent 如何加载 global skills：
-
-```json
-{
-  "description": "...",
-  "skills": {
-    "global": false,
-    "loadAgentsSkills": false,
-    "skipPaths": ["~/.agents/skills"]
-  }
-}
+agent.mjs builtin-skill list <agent> [--json]
+agent.mjs builtin-skill get <agent> <skill> [--json]
+agent.mjs builtin-skill add <agent> <skill>
+  --description <text> [--body <markdown>] [--json]
+agent.mjs builtin-skill set <agent> <skill>
+  [--description <text>] [--body <markdown>] [--json]
+agent.mjs builtin-skill remove <agent> <skill> --yes [--json]
 ```
 
-- `global: false` — 完全不加载 global skills（仅 builtin + self）
-- `loadAgentsSkills: false` — 跳过 `~/.agents/skills`（Cursor 技能目录）
-- `skipPaths` — 额外跳过的目录，与全局 `config.json` 的 `skills.skipPaths` 合并
+所有正文和 JSON 都作为单个参数传入。调用 shell 工具时用独立参数安全传递，不把用户内容拼接为可执行命令。
 
-全局默认在 `~/.config/g-agent/config.json` 的 `skills` 字段配置；agent 级可覆盖。
+## 工作流
 
-将四项内容整理为预览，清楚列出将要创建的文件和内容：
+### 列出或查看
 
-```
-将要创建 agent「<name>」，文件结构：
-
-~/.config/g-agent/agents/<name>/
-├── agent.json          （1 个文件）
-├── system.md           （如果提供）
-└── builtin-skills/     （如果提供）
-    └── memory-manager/SKILL.md
-
---- agent.json ---
-{
-  "description": "...",
-  "provider": "...",        // （可选）覆盖全局 provider，格式 "provider名/model名"
-  "providers": { ... }      // （可选）追加或覆盖全局 providers
-}
-
---- system.md ---
-（展示完整内容）
-
---- builtin-skills/memory-manager/SKILL.md ---
-（展示完整内容，或注明「复用内置 default 的 memory-manager skill」）
-```
-
-预览后询问用户：
-- 「这样可以吗？可以直接确认，也可以修改其中任何一项。」
-- 若用户要改某个要素（如「name 改短一点」「system prompt 太长了」），只改那一项后重新展示。
-
-### 4. name 冲突检查
-
-若用户目录下已存在同名 agent，在预览中标注 `⚠️ 将覆盖已有 agent「<name>」`，确认后再写。
-
-### 5. 写文件
-
-用户确认后用 `write` 依次创建文件。写完后进入验证交付（见下文）。
-
----
-
-## 二、编辑 agent
-
-### 1. 确定目标
-
-用户提到要编辑某个 agent 时，先确认名称。若名称不明确，从第零步的列表中帮用户定位。
-
-### 2. 读取现状
+直接执行：
 
 ```bash
-cat ~/.config/g-agent/agents/<name>/agent.json
-cat ~/.config/g-agent/agents/<name>/system.md
-ls ~/.config/g-agent/agents/<name>/builtin-skills/
-ls ~/.config/g-agent/agents/<name>/skills/
+node "{{skill_dir}}/scripts/agent.mjs" list --json
+node "{{skill_dir}}/scripts/agent.mjs" get <name> --json
 ```
 
-用 `read` 读取相关文件，向用户展示当前内容。
+`get` 一次返回 config、完整 system prompt、builtin skills 和 self skills，无需再读文件。
 
-### 3. 编辑操作
+### 创建
 
-**修改 / 优化 system prompt**（含「优化提示词」「写 system.md」「没有 system.md 需要新建」）：
-- 第零步列出 agent → 读取 agent.json、system.md（若不存在则说明将新建）→ 结合 agent 用途与已有 MCP/技能分析缺口
-- 用户描述优化方向（或从用途推导）→ 生成新版 system.md → 预览 → 确认 → `write`
-- 若 agent 没有 system.md，按创建流程生成完整内容，写入同一路径即可
+1. 调用 `list --json` 检查重名。
+2. 只问 agent 用途；从用途推导 name、description、system prompt 和建议技能。
+3. 默认建议 `memory-manager`，纯一次性用途可不加。执行类 agent 的 system prompt 默认要求先规划再实施。
+4. 展示完整预览并等待确认。
+5. 确认后调用 `create`，再按需调用 `builtin-skill add`。
+6. 最后调用 `get --json` 验证结果。
 
-**增删技能**：
-- 添加技能：用户描述技能用途 → 生成 SKILL.md → **同步检查并更新 system.md**（补充 Skills first、能力边界或与新 skill 相关的说明；builtin-skills 正文通过渐进式加载，原则性描述仍须在 system.md 中维护）→ 预览 → 确认 → `write` 到对应目录
-- 删除技能：用户指定技能名 → **同步更新 system.md**（移除对该 skill 的引用或相关能力说明）→ 确认 → `bash rm -rf ~/.config/g-agent/agents/<name>/builtin-skills/<skill>`
-- 若该 agent 没有 `memory-manager` 且用户需要，从内置 default 复制
-
-**修改 description**：
-- 展示当前 → 用户给新的 → 预览 → 确认 → `write` agent.json
-
-**修改 provider / providers**：
-- 展示当前 agent.json → 用户说「这个 agent 换成 xxx 模型」→ 更新 `provider` 字段 → 预览 → 确认 → `write` agent.json
-- 用户说「加一个 provider 配置」→ 更新 `providers` 字段 → 预览 → 确认 → `write` agent.json
-
-### 4. 约束
-
-- 只编辑 `~/.config/g-agent/agents/` 下的用户 agent，不碰仓库源码中的内置 agent
-- 若用户要调整内置 agent 的行为，引导其创建同名用户 agent 来覆盖
-
----
-
-## 三、删除 agent
-
-### 1. 确认目标
-
-用户说「删除 xxx agent」时，先确认名称。若名称模糊，列出候选。
-
-### 2. 展示将被删除的内容
+示例：
 
 ```bash
-ls -R ~/.config/g-agent/agents/<name>
+node "{{skill_dir}}/scripts/agent.mjs" create code-reviewer \
+  --description "专注代码审查的助手" \
+  --system "<完整 system prompt>" \
+  --json
 ```
 
-展示完整文件结构，并提示「此操作不可撤销」。
+### 编辑或优化提示词
 
-### 3. 二次确认
+1. 调用 `get <name> --json`。
+2. 根据用户要求生成新版字段或 system prompt。
+3. 展示差异并等待确认。
+4. 使用一次 `update` 传入所有变更。
+5. 再次调用 `get --json` 验证。
 
-明确问「确认删除 agent「<name>」及其所有文件？」——用户必须明确说「确认」「是」「删」等肯定词才执行。
+未传入的字段保持不变；删除可选字段必须使用对应的 `--remove-*` 参数。
 
-### 4. 执行
+### 管理 builtin skill
 
-```bash
-rm -rf ~/.config/g-agent/agents/<name>
-```
+1. 调用 `builtin-skill list/get` 获取现状。
+2. 生成 description、body 和同步后的 system prompt。
+3. 展示两者的变更并等待确认。
+4. 调用 `builtin-skill add/set/remove`，随后调用 `update --system`。
+5. 调用 `get --json` 验证。
 
-删除后告知用户结果。若该 agent 正被设为默认（`config.json` 中 `agent` 字段指向它），额外提示：
-> ⚠️ config.json 中 `agent` 字段当前为「<name>」，该 agent 已删除。下次启动将回退到 default agent，或你可手动修改 config.json。
+`builtin-skill add/set` 自动生成规范的 `SKILL.md` frontmatter，LLM 只传 description 与正文。
 
-### 5. 约束
+### 删除
 
-- 不删除仓库源码中的内置 agent
-- 不删除名为 `default` 的用户 agent（会解除对内置 default 的覆盖），提示 `default` 是基础 fallback
+1. 调用 `get <name> --json` 展示将删除的全部内容。
+2. 明确询问是否删除且说明不可恢复。
+3. 用户确认后调用 `remove <name> --yes --json`。
 
----
+## Agent 配置字段
 
-## 验证与交付
+- `description`：必需，一句话说明用途。
+- `provider`：可选，格式为 `provider/model`。
+- `providers`：可选，agent 级 provider 配置对象。
+- `skills`：可选，global skills 加载策略。
+- `mcpServers`：可选，agent 级 MCP 配置。
+- `system.md`：可选；缺失时继承内置 default system prompt。
 
-任何操作完成后：
-
-1. **文件确认**：用 `bash ls -R ~/.config/g-agent/agents/<name>`（创建/编辑后）列出结果
-2. **切换指引**：
-   - TUI 中直接输入 `/agent <name>` 即时切换（清空当前对话、重载技能与 system prompt）
-   - 或在 `config.json` 里把 `agent` 设为 `<name>` 使其成为默认 agent
-3. **技能提示**：简述该 agent 自带的技能清单，并提醒「激活该 agent 时只加载它自己的技能，不读全局技能目录」
-
----
-
-## 全局约束
-
-- 只在 `~/.config/g-agent/agents/` 下创建/编辑/删除，不碰仓库源码目录
-- 不修改 `config.json` 的 `agent` 字段（交给用户决定）；若用户要求修改，提示该字段决定启动时加载哪个 agent
-- 不为 skill 正文中的 `{{skill_dir}}` 占位符做替换——加载期由 g-agent 自动处理，原样保留
-- 预览先于写入：任何写操作前先让用户确认内容，不要直接写
-- 不删除内置 agent，不编辑内置 agent（引导用户创建同名用户 agent 覆盖即可）
-- **增删 builtin-skills 时必须同步更新 system.md**（原则性说明与 skill 清单保持一致；skill 正文通过渐进式加载，system.md 仍须人工维护）
+交付时说明可在 TUI 使用 `/agent <name>` 打开该 agent；配置和技能目录会热重载。

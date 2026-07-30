@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,6 +44,17 @@ enum PendingSessionOpen {
     Task(u64),
 }
 
+#[derive(Debug, Clone)]
+struct PlanStep {
+    text: String,
+    status: String,
+}
+
+#[derive(Debug, Clone)]
+struct PlanDisplay {
+    steps: Vec<PlanStep>,
+}
+
 pub struct App {
     banner: Vec<String>,
     client: Arc<AgentClient>,
@@ -66,6 +77,8 @@ pub struct App {
     mcp_servers: Vec<crate::protocol::McpServerInfo>,
     saved_sessions: Vec<SavedSessionSummary>,
     agent_tasks: Vec<AgentTaskInfo>,
+    agent_tasks_updated_at: Instant,
+    plans: HashMap<u64, PlanDisplay>,
 
     composer: Composer,
     /// Prompt recall for ↑/↓ — global across agent switches and `/new`.
@@ -118,6 +131,8 @@ impl App {
             mcp_servers: Vec::new(),
             saved_sessions: Vec::new(),
             agent_tasks: Vec::new(),
+            agent_tasks_updated_at: Instant::now(),
+            plans: HashMap::new(),
             composer: Composer::new(),
             input_history: InputHistory::new(),
             commands: Vec::new(),
@@ -224,10 +239,26 @@ impl App {
         }
 
         if !self.agent_tasks.is_empty() {
-            Paragraph::new(self.agent_task_lines(chunks[2].width.saturating_sub(2)))
+            Paragraph::new(self.agent_task_lines(chunks[3].width.saturating_sub(2)))
                 .block(
                     Block::default()
                         .title(" Sub Agents ")
+                        .borders(Borders::ALL)
+                        .border_style(style::border()),
+                )
+                .render(chunks[3], buf);
+        }
+
+        if let Some(plan) = self.active_plan() {
+            let completed = plan
+                .steps
+                .iter()
+                .filter(|step| step.status == "completed")
+                .count();
+            Paragraph::new(self.plan_lines(plan, chunks[2].width.saturating_sub(2)))
+                .block(
+                    Block::default()
+                        .title(format!(" Plan {completed}/{} ", plan.steps.len()))
                         .borders(Borders::ALL)
                         .border_style(style::border()),
                 )
@@ -235,20 +266,20 @@ impl App {
         }
 
         let menu_items = self.current_menu_items();
-        MenuWidget::new(&self.composer, &menu_items).render(chunks[3], buf);
+        MenuWidget::new(&self.composer, &menu_items).render(chunks[4], buf);
         StatusBar {
             connection: self.connection,
             model: &self.model,
             active_agent: &self.view_agent,
             context: self.context.clone(),
         }
-        .render(chunks[4], buf);
+        .render(chunks[5], buf);
 
         let composer_area = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(style::border());
-        let inner = composer_area.inner(chunks[5]);
-        composer_area.render(chunks[5], buf);
+        let inner = composer_area.inner(chunks[6]);
+        composer_area.render(chunks[6], buf);
         ComposerWidget::new(
             &self.composer,
             !matches!(self.connection, ConnectionState::Connected),
@@ -271,7 +302,7 @@ impl App {
         let chunks = self.layout_chunks(area);
         let inner = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .inner(chunks[5]);
+            .inner(chunks[6]);
         self.composer.cursor_pos(inner, 2)
     }
 
@@ -349,6 +380,12 @@ impl App {
                 if self.cancel_turn {
                     return;
                 }
+                if name == "update_plan" {
+                    if let Some(plan) = parse_plan(&args) {
+                        self.plans.insert(self.active_plan_key(), plan);
+                        return;
+                    }
+                }
                 let label = format_tool_call(&name, &args);
                 if let Some(line) = &mut self.streaming {
                     line.tools.push(ToolCallDisplay { name, label });
@@ -365,6 +402,7 @@ impl App {
             }
             AgentEvent::AgentTasks(tasks) => {
                 self.agent_tasks = tasks;
+                self.agent_tasks_updated_at = Instant::now();
                 self.restore_active_child_progress();
                 self.rebuild_commands();
             }
@@ -645,6 +683,17 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, transcript_area: Rect) {
+        if matches!(key.code, KeyCode::Char('0'))
+            && key
+                .modifiers
+                .intersects(KeyModifiers::SUPER | KeyModifiers::ALT)
+        {
+            if self.active_child.is_some() {
+                self.client.send(ClientMessage::AgentBack);
+            }
+            return;
+        }
+
         // History browse owns ↑/↓/Enter so slash-looking recalls (e.g. `/resume …`)
         // never trap keys in the command menu.
         if self.input_history.is_browsing() {
@@ -990,7 +1039,7 @@ impl App {
             self.client.send(ClientMessage::AgentTasks);
             return;
         }
-        if text == "/back" {
+        if text == "/back" || text == "/0" {
             self.client.send(ClientMessage::AgentBack);
             return;
         }
@@ -1192,6 +1241,7 @@ impl App {
         self.cancel_turn = false;
         self.pending_session_open = None;
         self.agent_tasks.clear();
+        self.plans.clear();
         self.active_child = None;
         self.main_lines.clear();
         self.view_agent = self.active_agent.clone();
@@ -1252,23 +1302,27 @@ impl App {
         let Some(slot) = self.active_child else {
             return;
         };
-        let Some(status) = self
-            .agent_tasks
-            .iter()
-            .find(|task| task.slot == slot)
-            .map(|task| task.status.clone())
-        else {
+        let Some(task) = self.agent_tasks.iter().find(|task| task.slot == slot) else {
             return;
         };
+        let status = task.status.clone();
+        let elapsed = Duration::from_millis(task.elapsed_ms).saturating_add(
+            agent_task_is_busy(&status)
+                .then(|| self.agent_tasks_updated_at.elapsed())
+                .unwrap_or_default(),
+        );
 
         match status.as_str() {
             "queued" | "starting" => {
                 self.pending = true;
+                self.turn_start = Instant::now().checked_sub(elapsed);
             }
             status if agent_task_is_running(status) => {
                 self.pending = false;
                 self.streaming_flag = true;
-                self.turn_start.get_or_insert_with(Instant::now);
+                // Reconstruct the original turn start from the server snapshot
+                // so switching away and back does not reset the visible timer.
+                self.turn_start = Instant::now().checked_sub(elapsed);
                 self.streaming.get_or_insert_with(|| ChatLine {
                     role: "assistant".to_string(),
                     text: String::new(),
@@ -1360,7 +1414,7 @@ impl App {
             },
             SlashCommand {
                 value: "/back".into(),
-                description: "Return to the main session".into(),
+                description: "Return to the main session (⌘0 / Alt+0 / /0)".into(),
             },
             SlashCommand {
                 value: "/resume".into(),
@@ -1570,6 +1624,7 @@ impl App {
             "  Enter send · Shift+Enter newline · Tab complete command\n",
             "  ↑/↓ recall previous prompts (shared across agents) · menu when open\n",
             "  PageUp/PageDown scroll conversation\n",
+            "  Cmd+0 or Alt+0 return to the main agent\n",
             "  Esc undo last send / clear input / cancel a running turn\n",
             "  Ctrl+Y or Cmd+C copy last reply\n",
         ));
@@ -1614,6 +1669,10 @@ impl App {
 
     fn layout_chunks(&self, area: Rect) -> Vec<Rect> {
         let menu_items = self.current_menu_items();
+        let plan_height = self
+            .active_plan()
+            .map(|plan| plan.steps.len().min(5) as u16 + 2)
+            .unwrap_or(0);
         let task_height = if self.agent_tasks.is_empty() {
             0
         } else {
@@ -1626,6 +1685,7 @@ impl App {
             .constraints([
                 Constraint::Min(3),
                 Constraint::Length(if self.history_scroll > 0 { 1 } else { 0 }),
+                Constraint::Length(plan_height),
                 Constraint::Length(task_height),
                 Constraint::Length(menu_height(&self.composer, &menu_items)),
                 Constraint::Length(STATUS_HEIGHT),
@@ -1633,6 +1693,44 @@ impl App {
             ])
             .split(area)
             .to_vec()
+    }
+
+    fn active_plan_key(&self) -> u64 {
+        self.active_child.unwrap_or(0)
+    }
+
+    fn active_plan(&self) -> Option<&PlanDisplay> {
+        self.plans.get(&self.active_plan_key())
+    }
+
+    fn plan_lines(&self, plan: &PlanDisplay, width: u16) -> Vec<Line<'static>> {
+        let visible = plan.steps.len().min(5);
+        let active_index = plan
+            .steps
+            .iter()
+            .position(|step| step.status == "in_progress")
+            .unwrap_or_else(|| plan.steps.len().saturating_sub(1));
+        let start = active_index
+            .saturating_sub(2)
+            .min(plan.steps.len().saturating_sub(visible));
+
+        plan.steps
+            .iter()
+            .skip(start)
+            .take(visible)
+            .map(|step| {
+                let (icon, step_style) = match step.status.as_str() {
+                    "completed" => ("✓", style::success()),
+                    "in_progress" => ("●", style::brand_bold()),
+                    _ => ("○", style::muted()),
+                };
+                let text = truncate_to_width(&step.text, width.saturating_sub(3) as usize);
+                Line::from(vec![
+                    Span::styled(format!(" {icon} "), step_style),
+                    Span::styled(text, step_style),
+                ])
+            })
+            .collect()
     }
 
     fn agent_task_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -1656,7 +1754,12 @@ impl App {
                 let prefix = format!("/{} ", task.slot);
                 let title =
                     truncate_to_width(&title, width.saturating_sub(prefix.len() as u16) as usize);
-                let seconds = task.elapsed_ms / 1_000;
+                let live_elapsed_ms = task.elapsed_ms.saturating_add(
+                    agent_task_is_busy(&task.status)
+                        .then(|| self.agent_tasks_updated_at.elapsed().as_millis() as u64)
+                        .unwrap_or_default(),
+                );
+                let seconds = live_elapsed_ms / 1_000;
                 let unread = if task.unread { " · unread" } else { "" };
                 let activity = task
                     .activity
@@ -1794,6 +1897,28 @@ fn agent_task_is_busy(status: &str) -> bool {
     matches!(status, "queued" | "starting") || agent_task_is_running(status)
 }
 
+fn parse_plan(args: &str) -> Option<PlanDisplay> {
+    let value = serde_json::from_str::<serde_json::Value>(args).ok()?;
+    let steps = value
+        .get("steps")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| {
+            let text = item.get("step")?.as_str()?.trim();
+            let status = item.get("status")?.as_str()?;
+            if text.is_empty() || !matches!(status, "pending" | "in_progress" | "completed") {
+                return None;
+            }
+            Some(PlanStep {
+                text: text.to_string(),
+                status: status.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    (!steps.is_empty()).then_some(PlanDisplay { steps })
+}
+
 fn truncate_to_width(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
@@ -1846,7 +1971,7 @@ fn filter_argument_items(
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_task_is_busy, truncate_to_width};
+    use super::{agent_task_is_busy, parse_plan, truncate_to_width};
 
     #[test]
     fn truncates_wide_agent_titles_with_ellipsis() {
@@ -1872,5 +1997,17 @@ mod tests {
         for status in ["idle", "completed", "failed", "cancelled"] {
             assert!(!agent_task_is_busy(status), "{status}");
         }
+    }
+
+    #[test]
+    fn parses_structured_plan_for_the_dedicated_panel() {
+        let plan = parse_plan(
+            r#"{"explanation":"Starting","steps":[{"step":"Inspect UI","status":"completed"},{"step":"Build panel","status":"in_progress"},{"step":"Test","status":"pending"}]}"#,
+        )
+        .expect("valid plan");
+
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps[1].text, "Build panel");
+        assert_eq!(plan.steps[1].status, "in_progress");
     }
 }

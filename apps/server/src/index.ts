@@ -551,9 +551,12 @@ async function runAgentSessionPrompt(
   task: BackgroundAgentTask,
   prompt: string,
 ): Promise<void> {
+  // elapsedMs describes the current (or most recently completed) turn, not
+  // the lifetime of the reusable child session.
+  task.createdAt = Date.now();
+  task.completedAt = undefined;
   if (!task.title) {
     task.title = prompt;
-    task.createdAt = Date.now();
   }
   if (!task.mcpManager) {
     task.status = "starting";
@@ -564,7 +567,6 @@ async function runAgentSessionPrompt(
 
   task.status = "thinking";
   task.activity = "Analyzing";
-  task.completedAt = undefined;
   task.unread = false;
   const isVisible = () => ws.data.activeAgentTaskSlot === task.slot;
   const priorHistory = [...task.history];
