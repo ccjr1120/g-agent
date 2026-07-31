@@ -89,6 +89,7 @@ type WsData = {
   promptQueue: string[];
   draining: boolean;
   cancelRequested: boolean;
+  abortController?: AbortController;
   history: ConversationMessage[];
   activeAgent: AgentConfig;
   systemPrompt: string;
@@ -113,6 +114,7 @@ type BackgroundAgentTask = {
   history: ConversationMessage[];
   promptQueue: string[];
   draining: boolean;
+  abortController?: AbortController;
 };
 
 function send(ws: ServerWebSocket<WsData>, message: ServerMessage): void {
@@ -578,67 +580,82 @@ async function runAgentSessionPrompt(
 
   let assistantText = "";
   let failed = false;
-  await runAgent(
-    prompt,
-    (event) => {
-      const wasStatus = task.status;
-      const wasActivity = task.activity;
-      if (event.type === "thinking_delta") {
-        task.status = "thinking";
-        task.activity = "Analyzing";
-        if (isVisible()) send(ws, { type: "thinkingDelta", text: event.text });
-      } else if (event.type === "tool_call") {
-        task.status = "tool_running";
-        task.activity = summarizeToolActivity(event.name, event.args);
-        if (isVisible()) {
-          send(ws, { type: "tool_call", name: event.name, args: event.args });
-        }
-      } else if (event.type === "tool_result") {
-        if (isVisible()) {
-          send(ws, {
-            type: "tool_result",
-            name: event.name,
-            output: event.output,
-          });
-        }
-      } else if (event.type === "delta") {
-        task.status = "responding";
-        task.activity = "Writing response";
-        assistantText += event.text;
-        if (isVisible()) send(ws, { type: "delta", text: event.text });
-      } else if (event.type === "error") {
-        failed = true;
-        task.status = "failed";
-        task.activity = "Failed";
-        task.completedAt = Date.now();
-        task.unread = !isVisible();
-        if (isVisible()) send(ws, { type: "error", message: event.message });
-      } else if (event.type === "done") {
-        if (!failed) {
-          if (assistantText.trim()) {
-            task.history.push({ role: "assistant", content: assistantText });
+  const abortController = new AbortController();
+  task.abortController = abortController;
+  try {
+    await runAgent(
+      prompt,
+      (event) => {
+        const wasStatus = task.status;
+        const wasActivity = task.activity;
+        if (event.type === "thinking_delta") {
+          task.status = "thinking";
+          task.activity = "Analyzing";
+          if (isVisible()) send(ws, { type: "thinkingDelta", text: event.text });
+        } else if (event.type === "tool_call") {
+          task.status = "tool_running";
+          task.activity = summarizeToolActivity(event.name, event.args);
+          if (isVisible()) {
+            send(ws, { type: "tool_call", name: event.name, args: event.args });
           }
-          task.status = "completed";
-          task.activity = "Ready";
+        } else if (event.type === "tool_result") {
+          if (isVisible()) {
+            send(ws, {
+              type: "tool_result",
+              name: event.name,
+              output: event.output,
+            });
+          }
+        } else if (event.type === "delta") {
+          task.status = "responding";
+          task.activity = "Writing response";
+          assistantText += event.text;
+          if (isVisible()) send(ws, { type: "delta", text: event.text });
+        } else if (event.type === "error") {
+          failed = true;
+          task.status = "failed";
+          task.activity = "Failed";
           task.completedAt = Date.now();
           task.unread = !isVisible();
+          if (isVisible()) send(ws, { type: "error", message: event.message });
+        } else if (event.type === "cancelled") {
+          failed = true;
+          task.history = priorHistory;
+          task.status = "cancelled";
+          task.activity = "Cancelled";
+          task.completedAt = Date.now();
+          if (isVisible()) send(ws, { type: "done" });
+        } else if (event.type === "done") {
+          if (!failed) {
+            if (assistantText.trim()) {
+              task.history.push({ role: "assistant", content: assistantText });
+            }
+            task.status = "completed";
+            task.activity = "Ready";
+            task.completedAt = Date.now();
+            task.unread = !isVisible();
+          }
+          if (isVisible()) send(ws, { type: "done" });
         }
-        if (isVisible()) send(ws, { type: "done" });
-      }
-      if (
-        task.status !== wasStatus ||
-        task.activity !== wasActivity ||
-        event.type === "done" ||
-        event.type === "error"
-      ) {
-        sendAgentTasks(ws);
-      }
-    },
-    resolveProvider(task.agent),
-    buildAgentSystemPrompt(task.agent, loadedAgents),
-    priorHistory,
-    { mcpManager: task.mcpManager },
-  );
+        if (
+          task.status !== wasStatus ||
+          task.activity !== wasActivity ||
+          event.type === "done" ||
+          event.type === "error"
+        ) {
+          sendAgentTasks(ws);
+        }
+      },
+      resolveProvider(task.agent),
+      buildAgentSystemPrompt(task.agent, loadedAgents),
+      priorHistory,
+      { mcpManager: task.mcpManager, signal: abortController.signal },
+    );
+  } finally {
+    if (task.abortController === abortController) {
+      task.abortController = undefined;
+    }
+  }
 }
 
 async function drainAgentSessionQueue(
@@ -665,10 +682,13 @@ async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<v
 
   let assistantText = "";
   let failed = false;
+  const abortController = new AbortController();
+  ws.data.abortController = abortController;
 
-  await runAgent(
-    prompt,
-    (event) => {
+  try {
+    await runAgent(
+      prompt,
+      (event) => {
       if (event.type === "system_prompt") {
         if (isVisible()) send(ws, { type: "system_prompt", text: event.text });
         return;
@@ -713,6 +733,14 @@ async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<v
         return;
       }
 
+      if (event.type === "cancelled") {
+        failed = true;
+        ws.data.cancelRequested = false;
+        sendContextUsage(ws);
+        if (isVisible()) send(ws, { type: "done" });
+        return;
+      }
+
       if (!failed) {
         if (!ws.data.cancelRequested) {
           ws.data.history.push({ role: "user", content: prompt });
@@ -725,12 +753,17 @@ async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Promise<v
       }
       sendContextUsage(ws);
       if (isVisible()) send(ws, { type: "done" });
-    },
-    ws.data.effectiveProvider,
-    ws.data.systemPrompt,
-    ws.data.history,
-    { mcpManager: ws.data.mcpManager },
-  );
+      },
+      ws.data.effectiveProvider,
+      ws.data.systemPrompt,
+      ws.data.history,
+      { mcpManager: ws.data.mcpManager, signal: abortController.signal },
+    );
+  } finally {
+    if (ws.data.abortController === abortController) {
+      ws.data.abortController = undefined;
+    }
+  }
 }
 
 async function drainPromptQueue(ws: ServerWebSocket<WsData>): Promise<void> {
@@ -863,10 +896,12 @@ Bun.serve<WsData>({
           : undefined;
         if (activeTask) {
           activeTask.promptQueue.length = 0;
+          activeTask.abortController?.abort();
           return;
         }
-        ws.data.cancelRequested = true;
+        ws.data.cancelRequested = ws.data.abortController !== undefined;
         ws.data.promptQueue.length = 0;
+        ws.data.abortController?.abort();
         return;
       }
 

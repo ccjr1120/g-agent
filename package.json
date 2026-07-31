@@ -10,6 +10,8 @@
     "dev:server": "pnpm --filter @g-agent/server dev",
     "dev:tui": "cargo run -p g-agent-tui",
     "start": "cargo run --release -p g-agent-tui",
+    "test": "pnpm test:agent && pnpm test:tui",
+    "test:agent": "pnpm --filter @g-agent/agent test",
     "test:tui": "cargo test -p g-agent-tui"
   },
   "engines": {

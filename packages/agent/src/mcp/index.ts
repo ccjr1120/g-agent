@@ -59,21 +59,25 @@ export function decodeMcpToolName(
   };
 }
 
-function formatToolResult(result: {
-  content?: Array<{ type?: string; text?: string }>;
-  structuredContent?: unknown;
-  isError?: boolean;
-}): string {
+function formatToolResult(result: unknown): string {
+  const value =
+    typeof result === "object" && result !== null
+      ? (result as {
+          content?: Array<{ type?: string; text?: string }>;
+          structuredContent?: unknown;
+          isError?: boolean;
+        })
+      : {};
   const parts: string[] = [];
 
-  for (const item of result.content ?? []) {
+  for (const item of value.content ?? []) {
     if (item.type === "text" && item.text) {
       parts.push(item.text);
     }
   }
 
-  if (parts.length === 0 && result.structuredContent !== undefined) {
-    parts.push(JSON.stringify(result.structuredContent, null, 2));
+  if (parts.length === 0 && value.structuredContent !== undefined) {
+    parts.push(JSON.stringify(value.structuredContent, null, 2));
   }
 
   if (parts.length === 0) {
@@ -81,7 +85,7 @@ function formatToolResult(result: {
   }
 
   const text = parts.join("\n").trimEnd();
-  return result.isError ? `Error: ${text}` : text;
+  return value.isError ? `Error: ${text}` : text;
 }
 
 async function buildRegisteredTools(
@@ -130,7 +134,9 @@ async function connectHttpClient(
 
     await client.close().catch(() => undefined);
     const sseClient = new Client({ name: "g-agent", version: "0.1.0" });
-    const sse = new SSEClientTransport(url, transportOptions.requestInit);
+    const sse = new SSEClientTransport(url, {
+      requestInit: transportOptions.requestInit,
+    });
     await sseClient.connect(sse);
     return buildRegisteredTools(serverName, sseClient);
   }

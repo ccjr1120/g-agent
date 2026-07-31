@@ -29,6 +29,8 @@ export type { ResolvedProvider } from "@g-agent/config";
 
 export type AgentRunOptions = {
   mcpManager?: McpManager | null;
+  /** Cancels an in-flight model request. */
+  signal?: AbortSignal;
 };
 
 export type AgentStreamEvent =
@@ -37,6 +39,7 @@ export type AgentStreamEvent =
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "tool_result"; name: string; output: string }
+  | { type: "cancelled" }
   | { type: "done" }
   | { type: "error"; message: string };
 
@@ -57,6 +60,9 @@ type ChatMessage =
   | { role: "tool"; tool_call_id: string; content: string };
 
 const MAX_TOOL_ROUNDS = 25;
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_RETRIES = 2;
+const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504]);
 
 export type ConversationMessage = Extract<
   ChatMessage,
@@ -82,6 +88,10 @@ export async function runAgent(
     }
     onEvent({ type: "done" });
   } catch (error) {
+    if (isAbortError(error) || options.signal?.aborted) {
+      onEvent({ type: "cancelled" });
+      return;
+    }
     onEvent({
       type: "error",
       message: error instanceof Error ? error.message : "Agent failed",
@@ -122,7 +132,6 @@ async function streamEcho(
     `You said: ${prompt}`;
   for (const char of reply) {
     onEvent({ type: "delta", text: char });
-    await sleep(12);
   }
 }
 
@@ -155,21 +164,25 @@ async function runOpenAI(
   const model = provider.modelName ?? provider.model;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await fetch(`${provider.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${provider.apiKey}`,
-        "Content-Type": "application/json",
+    const response = await fetchWithRetry(
+      `${provider.baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${provider.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...provider.requestBody,
+          model,
+          stream: false,
+          messages,
+          tools,
+          tool_choice: "auto",
+        }),
       },
-      body: JSON.stringify({
-        ...provider.requestBody,
-        model,
-        stream: false,
-        messages,
-        tools,
-        tool_choice: "auto",
-      }),
-    });
+      options.signal,
+    );
 
     if (!response.ok) {
       const body = await response.text();
@@ -252,12 +265,79 @@ async function streamText(
   onEvent: (event: AgentStreamEvent) => void,
   eventType: "delta" | "thinking_delta" = "delta",
 ): Promise<void> {
-  for (const char of text) {
-    onEvent({ type: eventType, text: char });
-    await sleep(4);
+  onEvent({ type: eventType, text });
+}
+
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const timeoutMs = positiveEnvNumber(
+    "G_AGENT_REQUEST_TIMEOUT_MS",
+    DEFAULT_REQUEST_TIMEOUT_MS,
+  );
+  const maxRetries = positiveEnvNumber(
+    "G_AGENT_MAX_RETRIES",
+    DEFAULT_MAX_RETRIES,
+    true,
+  );
+
+  for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted();
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const requestSignal = signal
+      ? AbortSignal.any([signal, timeout])
+      : timeout;
+
+    try {
+      const response = await fetch(url, { ...init, signal: requestSignal });
+      if (!RETRYABLE_STATUS.has(response.status) || attempt >= maxRetries) {
+        return response;
+      }
+      await response.body?.cancel().catch(() => undefined);
+    } catch (error) {
+      if (signal?.aborted || attempt >= maxRetries || !isRetryableError(error)) {
+        throw error;
+      }
+    }
+
+    await abortableDelay(Math.min(250 * 2 ** attempt, 2_000), signal);
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function positiveEnvNumber(
+  name: string,
+  fallback: number,
+  allowZero = false,
+): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && (allowZero ? value >= 0 : value > 0)
+    ? Math.floor(value)
+    : fallback;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function isRetryableError(error: unknown): boolean {
+  return (
+    error instanceof TypeError ||
+    (error instanceof DOMException && error.name === "TimeoutError")
+  );
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
 }

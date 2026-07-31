@@ -6,6 +6,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "test": "bun test"
+  },
   "dependencies": {
     "@g-agent/config": "workspace:*",
     "@g-agent/shared": "workspace:*",

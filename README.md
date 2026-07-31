@@ -146,8 +146,13 @@ TUI 内：
 pnpm install
 pnpm dev          # 启动 server + Rust TUI
 pnpm dev:tui      # 仅 TUI（server 需已运行或由 TUI 自动拉起）
+pnpm test         # Agent 单元测试 + TUI 测试
 cargo test -p g-agent-tui
 ```
+
+模型请求默认 120 秒超时，并对 408/409/429/5xx 等瞬时错误最多重试 2
+次。可通过 `G_AGENT_REQUEST_TIMEOUT_MS` 和 `G_AGENT_MAX_RETRIES` 调整；在
+TUI 中取消当前回复会立即中止进行中的模型请求。
 
 终端性能的后续优化计划见
 [docs/terminal-performance-todo.md](docs/terminal-performance-todo.md)。

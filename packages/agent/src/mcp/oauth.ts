@@ -217,7 +217,7 @@ function startOAuthCallbackServer(redirectUrl: string): Promise<CallbackServer> 
 }
 
 class FileOAuthClientProvider implements OAuthClientProvider {
-  private state: StoredOAuthState;
+  private storedState: StoredOAuthState;
 
   constructor(
     private readonly serverName: string,
@@ -225,7 +225,7 @@ class FileOAuthClientProvider implements OAuthClientProvider {
     private readonly redirectUri: string,
     initialState: StoredOAuthState = {},
   ) {
-    this.state = { ...initialState };
+    this.storedState = { ...initialState };
   }
 
   get redirectUrl(): string {
@@ -252,23 +252,23 @@ class FileOAuthClientProvider implements OAuthClientProvider {
         ...(clientSecret ? { client_secret: clientSecret } : {}),
       };
     }
-    return this.state.clientInformation;
+    return this.storedState.clientInformation;
   }
 
   async saveClientInformation(
     clientInformation: OAuthClientInformationMixed,
   ): Promise<void> {
-    this.state.clientInformation = clientInformation;
-    await writeOAuthState(this.serverName, this.state);
+    this.storedState.clientInformation = clientInformation;
+    await writeOAuthState(this.serverName, this.storedState);
   }
 
   async tokens(): Promise<OAuthTokens | undefined> {
-    return this.state.tokens;
+    return this.storedState.tokens;
   }
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
-    this.state.tokens = tokens;
-    await writeOAuthState(this.serverName, this.state);
+    this.storedState.tokens = tokens;
+    await writeOAuthState(this.serverName, this.storedState);
   }
 
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
@@ -277,12 +277,12 @@ class FileOAuthClientProvider implements OAuthClientProvider {
   }
 
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
-    this.state.codeVerifier = codeVerifier;
-    await writeOAuthState(this.serverName, this.state);
+    this.storedState.codeVerifier = codeVerifier;
+    await writeOAuthState(this.serverName, this.storedState);
   }
 
   async codeVerifier(): Promise<string> {
-    const verifier = this.state.codeVerifier;
+    const verifier = this.storedState.codeVerifier;
     if (!verifier) {
       throw new Error("OAuth code verifier missing; restart authorization");
     }
@@ -290,29 +290,29 @@ class FileOAuthClientProvider implements OAuthClientProvider {
   }
 
   async saveDiscoveryState(state: OAuthDiscoveryState): Promise<void> {
-    this.state.discoveryState = state;
-    await writeOAuthState(this.serverName, this.state);
+    this.storedState.discoveryState = state;
+    await writeOAuthState(this.serverName, this.storedState);
   }
 
   async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
-    return this.state.discoveryState;
+    return this.storedState.discoveryState;
   }
 
   async invalidateCredentials(
     scope: "all" | "client" | "tokens" | "verifier" | "discovery",
   ): Promise<void> {
     if (scope === "all") {
-      this.state = {};
+      this.storedState = {};
     } else if (scope === "client") {
-      delete this.state.clientInformation;
+      delete this.storedState.clientInformation;
     } else if (scope === "tokens") {
-      delete this.state.tokens;
+      delete this.storedState.tokens;
     } else if (scope === "verifier") {
-      delete this.state.codeVerifier;
+      delete this.storedState.codeVerifier;
     } else if (scope === "discovery") {
-      delete this.state.discoveryState;
+      delete this.storedState.discoveryState;
     }
-    await writeOAuthState(this.serverName, this.state);
+    await writeOAuthState(this.serverName, this.storedState);
   }
 }
 

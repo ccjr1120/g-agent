@@ -67,6 +67,9 @@ export function isMcpOAuthEnabled(config: McpServerConfig): boolean {
   if (config.oauth === true) {
     return true;
   }
+  if (config.oauth === false) {
+    return false;
+  }
   return config.oauth.enabled !== false;
 }
 
@@ -79,7 +82,7 @@ export function resolveMcpOAuthConfig(
   if (config.oauth === true) {
     return { enabled: true };
   }
-  return config.oauth;
+  return config.oauth || undefined;
 }
 
 type RawProviderConfig = Omit<ProviderConfig, "models"> & {
