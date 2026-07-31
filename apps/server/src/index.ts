@@ -420,8 +420,17 @@ function ensureReloadWatches(): void {
   if (loadedAgents.userPath) {
     watchPathForReload(loadedAgents.userPath, { recursive: true });
   }
-  if (loadedAgents.globalSkillsPath) {
-    watchPathForReload(loadedAgents.globalSkillsPath, { recursive: true });
+  if (loadedAgents.skillWatchPaths.length > 0) {
+    for (const path of loadedAgents.skillWatchPaths) {
+      watchPathForReload(path, { recursive: true });
+    }
+  } else {
+    if (loadedAgents.sharedSkillsPath) {
+      watchPathForReload(loadedAgents.sharedSkillsPath, { recursive: true });
+    }
+    if (loadedAgents.gagentSkillsPath) {
+      watchPathForReload(loadedAgents.gagentSkillsPath, { recursive: true });
+    }
   }
   if (configPath) {
     watchPathForReload(dirname(configPath), { filterFile: basename(configPath) });
@@ -1094,10 +1103,12 @@ const providerLabel = startupProvider ? formatProviderRef(startupProvider) : "ec
 const configLabel = configPath ?? "none";
 const agentsLabel = `${loadedAgents.list.length}${loadedAgents.userPath ? ` (user: ${loadedAgents.userPath})` : ""}`;
 const builtinCount = initialAgent.skills.filter((s) => s.source === "builtin").length;
-const globalCount = initialAgent.skills.filter((s) => s.source === "global").length;
+const sharedCount = initialAgent.skills.filter((s) => s.source === "shared").length;
+const gagentCount = initialAgent.skills.filter((s) => s.source === "gagent").length;
 const selfCount = initialAgent.skills.filter((s) => s.source === "self").length;
-const globalLabel = loadedAgents.globalSkillsPath ?? "none";
-const skillsLabel = `built-in=${builtinCount} global=${globalCount} self=${selfCount} global-path=${globalLabel}`;
+const sharedLabel = loadedAgents.sharedSkillsPath ?? "none";
+const gagentLabel = loadedAgents.gagentSkillsPath ?? "none";
+const skillsLabel = `built-in=${builtinCount} shared=${sharedCount} gagent=${gagentCount} self=${selfCount} shared-path=${sharedLabel} gagent-path=${gagentLabel}`;
 const mcpCount = Object.keys(mergedMcpServers(initialAgent)).length;
 console.log(
   `G-Agent server ws://${host}:${port} · agent=${initialAgent.name} · provider=${providerLabel} · config=${configLabel} · agents=${agentsLabel} · skills=${skillsLabel} · tools=${builtinTools.length} · mcp=${mcpCount}`,

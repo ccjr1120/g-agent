@@ -90,20 +90,24 @@ type RawProviderConfig = Omit<ProviderConfig, "models"> & {
 };
 
 export type SkillsConfig = {
-  /** When false, exclude ~/.agents/skills (Cursor) from global skill discovery. Default: true. */
-  loadAgentsSkills?: boolean;
-  /** Paths to skip during global skill auto-discovery. Supports ~ for home. */
+  /** When false, skip shared global (~/.agents/skills) for all agents unless overridden in agent.json. Default: true. */
+  shared?: boolean;
+  /** When false, skip g-agent global (~/.config/g-agent/skills) for all agents unless overridden. Default: true. */
+  gagent?: boolean;
+  /** Paths to skip during shared global skill discovery. Supports ~ for home. */
   skipPaths?: string[];
-  /** Explicit global skill directories. When set, replaces auto-discovery (first existing wins). */
+  /** Explicit shared global skill directories. Replaces auto-discovery when set. */
   paths?: string[];
 };
 
 /** Per-agent skill loading overrides in agent.json. */
 export type AgentSkillsConfig = {
-  /** When false, this agent does not load any global skills. Default: true. */
+  /** When false, skip shared global (~/.agents/skills). Default: true. */
+  shared?: boolean;
+  /** @deprecated Use `shared`. When false, skip shared global only. */
   global?: boolean;
-  /** Per-agent override of skills.loadAgentsSkills from config.json. */
-  loadAgentsSkills?: boolean;
+  /** When false, skip g-agent global (~/.config/g-agent/skills). Default: true. */
+  gagent?: boolean;
   /** Extra paths to skip for this agent. Merged with global skipPaths. */
   skipPaths?: string[];
 };
@@ -437,15 +441,17 @@ function normalizeSkillsConfig(value: unknown): SkillsConfig | undefined {
   }
 
   const raw = value as Record<string, unknown>;
-  const loadAgentsSkills = normalizeBoolean(
-    raw.loadAgentsSkills,
-    "skills.loadAgentsSkills",
-  );
+  let shared = normalizeBoolean(raw.shared, "skills.shared");
+  if (shared === undefined && raw.loadAgentsSkills === false) {
+    shared = false;
+  }
+  const gagent = normalizeBoolean(raw.gagent, "skills.gagent");
   const skipPaths = normalizeStringList(raw.skipPaths, "skills.skipPaths");
   const paths = normalizeStringList(raw.paths, "skills.paths");
 
   if (
-    loadAgentsSkills === undefined &&
+    shared === undefined &&
+    gagent === undefined &&
     skipPaths === undefined &&
     paths === undefined
   ) {
@@ -453,7 +459,8 @@ function normalizeSkillsConfig(value: unknown): SkillsConfig | undefined {
   }
 
   return {
-    ...(loadAgentsSkills !== undefined ? { loadAgentsSkills } : {}),
+    ...(shared !== undefined ? { shared } : {}),
+    ...(gagent !== undefined ? { gagent } : {}),
     ...(skipPaths ? { skipPaths } : {}),
     ...(paths ? { paths } : {}),
   };

@@ -9,22 +9,24 @@ All skills use **progressive loading**: only name, description, and path appear 
 
 Do not skip skills and reach for `bash` / `write` / other tools directly when one already covers the task.
 
-### Three skill layers
+### Four skill layers
 
-Skills are listed in three separate sections below. They differ in **scope**, **location**, and **who manages them**:
+Skills are listed in four separate sections below. They differ in **scope**, **location**, and **who manages them**:
 
-| Layer | Scope | Typical location | Manage with | Precedence |
-|-------|-------|------------------|-------------|------------|
-| **Built-in** | Bundled with this agent; always available when this agent is active | g-agent package `builtin/default/builtin-skills/`, or `~/.config/g-agent/agents/<name>/builtin-skills/` for **custom** agents (not `default`) | **agent-manager** | Lowest — overridden by global or self with the same name |
-| **Global** | Shared across agents (unless this agent disables global skills) | `~/.agent/skills/` (legacy: `~/.config/g-agent/skills/`, etc.) | **skill-manager** | Middle — overrides built-in; overridden by self |
-| **Self** (agent-exclusive) | Only the **current agent**; other agents never see these | `~/.config/g-agent/agents/<name>/skills/` | **skill-manager** | Highest — wins on name conflicts |
+| Layer | Scope | Path | Manage with | Precedence |
+|-------|-------|------|-------------|------------|
+| **Built-in** | Bundled with this agent | package or agent `builtin-skills/` | **agent-manager** | Lowest |
+| **Shared global** | All agents + Cursor/other tools | `~/.agents/skills/` | **skill-manager** (`shared`) | Low |
+| **g-agent global** | g-agent install-wide, all agents | `~/.config/g-agent/skills/` | **skill-manager** (`gagent`) | Middle |
+| **Self** | Current agent only | `~/.config/g-agent/agents/<name>/skills/` | **skill-manager** (`self`) | Highest |
 
-**Name conflicts:** if the same skill name exists in multiple layers, the effective version is **self > global > built-in**. Only one version is active; check the section it appears in to know its scope.
+**Name conflicts:** **self > gagent > shared > built-in**.
 
 **Do not confuse layers when editing:**
-- User asks to add a skill for **all agents** → global (`skill-manager`)
-- User asks to add a skill for **one agent only** → self (`skill-manager`)
-- User asks to add a skill **bundled with an agent** (ships when the agent is shared) → built-in (`agent-manager`, under that agent's `builtin-skills/`)
+- Shared with Cursor / all tools → **shared** (`~/.agents/skills/`)
+- g-agent only, all agents → **gagent** (`~/.config/g-agent/skills/`)
+- One agent only → **self**
+- Bundled with agent → **built-in** (**agent-manager**)
 
 Built-in managers (`agent-manager`, `skill-manager`, `mcp-manager`, `memory-manager`) are themselves **built-in skills**. They manage user data under `~/.config/g-agent/`; their skill files stay in the package.
 

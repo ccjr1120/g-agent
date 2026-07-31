@@ -54,7 +54,7 @@ export type McpServerCatalogEntry = {
 export type ServerMessage =
   | { type: "ready" }
   | { type: "agents"; agents: Array<{ name: string; description: string; active: boolean }>; active: string; model: string }
-  | { type: "skills"; skills: Array<{ name: string; description: string; source: "builtin" | "self" | "global" }> }
+  | { type: "skills"; skills: Array<{ name: string; description: string; source: "builtin" | "shared" | "gagent" | "self" }> }
   | { type: "mcp"; servers: McpServerCatalogEntry[] }
   | { type: "context"; usedTokens: number; maxTokens: number; percent: number }
   | { type: "start" }

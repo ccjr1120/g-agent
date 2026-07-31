@@ -37,7 +37,8 @@ if [ ! -f "$EXAMPLE_CONFIG" ]; then
 fi
 
 mkdir -p "$CONFIG_DIR"
-mkdir -p "$HOME/.agent/skills"
+mkdir -p "$HOME/.agents/skills"
+mkdir -p "$CONFIG_DIR/skills"
 
 # --- Ensure config.json exists ---
 ensure_config() {
@@ -57,5 +58,6 @@ ensure_config
 echo ""
 echo "Done. Config directory: $CONFIG_DIR"
 echo "  config.json       — edit providers/provider as needed"
-echo "  ~/.agent/skills/  — global skills (shared across agents)"
+echo "  ~/.agents/skills/       — shared global skills (Cursor-compatible)"
+echo "  $CONFIG_DIR/skills/     — g-agent global skills"
 echo "Run 'g-agent' to start."

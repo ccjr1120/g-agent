@@ -75,53 +75,38 @@ g-agent server restart
 
 agent 目录从以下路径查找：`$G_AGENT_AGENTS_DIR` → `$G_AGENT_HOME/agents` → `~/.config/g-agent/agents` → `~/.local/share/g-agent/agents`。同名时用户目录下的 agent 覆盖内置同名 agent。
 
-内置 `default` agent 的用户目录（`~/.config/g-agent/agents/default/`）是**叠加层**：可放 `memory.md`、可选 `system.md` 与 `skills/`（专属技能），但**不会**读取其中的 `builtin-skills/`——内置 skill 始终来自 g-agent 包内。自定义 skill（如 weekly-report）请放到 `skills/`（仅 default 可用）或 global 目录（`~/.agent/skills/` 等）。
+内置 `default` agent 的用户目录（`~/.config/g-agent/agents/default/`）是**叠加层**：可放 `memory.md`、可选 `system.md` 与 `skills/`（专属技能），但**不会**读取其中的 `builtin-skills/`——内置 skill 始终来自 g-agent 包内。自定义 skill（如 weekly-report）请放到 `skills/`（仅 default 可用）或 global 目录（`~/.agents/skills/` 等）。
 
-每个 agent 会加载三类技能（均为**渐进式加载**：系统提示词仅列 name、description 与路径，匹配时用 `read` 加载 `SKILL.md` 全文）：
+每个 agent 会加载**四类**技能（均为**渐进式加载**：系统提示词仅列 name、description 与路径，匹配时用 `read` 加载 `SKILL.md` 全文）：
 
-| 层级 | 作用范围 | 典型路径 | 管理入口 |
-|------|---------|---------|---------|
-| **built-in（内置）** | 随 agent 分发，该 agent 激活时始终可用 | 包内 `builtin-skills/`；自定义 agent 可用 `~/.config/g-agent/agents/<name>/builtin-skills/`（**不含 default**） | agent-manager |
-| **global（全局）** | 所有 agent 共享（可被单个 agent 关闭） | `~/.agent/skills/` | skill-manager |
-| **self（专属）** | 仅当前 agent，其他 agent 不可见 | `~/.config/g-agent/agents/<name>/skills/` | skill-manager |
+| 层级 | 作用范围 | 典型路径 | skill-manager scope | 管理入口 |
+|------|---------|---------|---------------------|---------|
+| **built-in（内置）** | 随 agent 分发 | 包内 `builtin-skills/`；自定义 agent 可用 `agents/<name>/builtin-skills/`（**不含 default**） | —（只读） | agent-manager |
+| **shared global（共享全局）** | 所有 agent + Cursor 等工具 | `~/.agents/skills/` | `shared`（`global` 为兼容别名） | skill-manager |
+| **g-agent global（g-agent 全局）** | 仅 g-agent 安装范围、所有 agent | `~/.config/g-agent/skills/` | `gagent` | skill-manager |
+| **self（专属）** | 仅当前 agent | `~/.config/g-agent/agents/<name>/skills/` | `self` | skill-manager |
 
-同名时优先级：**self > global > built-in**。
+同名时优先级：**self > gagent > shared > built-in**。
 
-- built-in skills：`<agent>/builtin-skills/<skill>/SKILL.md`
-- global skills：`$G_AGENT_GLOBAL_SKILLS_DIR` → `$G_AGENT_HOME/skills` → `~/.agent/skills` → `~/.agents/skills` → `~/.config/g-agent/skills` → `~/.local/share/g-agent/skills`（按顺序取第一个存在的目录；新建 global skill 默认写入 `~/.agent/skills`）
-
-  可在 `config.json` 中通过 `skills` 控制全局技能发现：
-
-  ```json
-  {
-    "skills": {
-      "loadAgentsSkills": false
-    }
-  }
-  ```
-
-  - `loadAgentsSkills: false` — 跳过 `~/.agents/skills`（常见于 Cursor 的技能目录）
-  - `skipPaths` — 额外跳过的目录，支持 `~` 前缀
-  - `paths` — 显式指定全局技能目录（替换自动发现，仍取第一个存在的目录）
-
-  单个 agent 可在 `agent.json` 中覆盖：
-
-  ```json
-  {
-    "description": "隔离环境的 agent",
-    "skills": {
-      "global": false,
-      "loadAgentsSkills": false
-    }
-  }
-  ```
-
-  - `global: false` — 该 agent 不加载任何 global skills
-  - `loadAgentsSkills` / `skipPaths` — 仅对该 agent 生效，与全局配置合并
-
+- shared global：`~/.agents/skills/<skill>/SKILL.md`（`skill-manager add shared`）
+- g-agent global：`~/.config/g-agent/skills/<skill>/SKILL.md`（`skill-manager add gagent`）
 - self skills：`<agent>/skills/<skill>/SKILL.md`
 
-同名技能按 `self > global > built-in` 的优先级覆盖。启动时如果发现同名冲突，会在 server 日志中输出被选中的来源和所有候选路径。
+  **两层全局 skill 独立开关**（`config.json` 全局默认，`agent.json` 可覆盖）：
+
+  ```json
+  {
+    "skills": {
+      "shared": false,
+      "gagent": true
+    }
+  }
+  ```
+
+  - `shared: false` — 跳过 shared global（`~/.agents/skills`）；旧字段 `global: false` 等同
+  - `gagent: false` — 跳过 g-agent global（`~/.config/g-agent/skills/`）
+  - `skipPaths` / `paths` — 仅影响 shared global 的目录发现
+  - 已移除 `loadAgentsSkills`；旧配置里 `loadAgentsSkills: false` 会自动当作 `shared: false`
 
 内置 `default` agent 已含 `memory-manager`、`skill-manager`、`agent-manager`、`mcp-manager` 等内置技能与基础 system prompt，无需配置即可用。
 

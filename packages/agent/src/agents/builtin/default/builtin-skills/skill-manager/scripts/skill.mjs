@@ -12,20 +12,21 @@ const bundledDefaultAgentDir = join(scriptDir, "..", "..", "..");
 function usage(exitCode = 0) {
   const text = `Usage:
   skill.mjs paths [--json]
-  skill.mjs list [--agent <name>] [--global-only] [--json]
+  skill.mjs list [--agent <name>] [--shared-only | --global-only | --gagent-only] [--json]
   skill.mjs resolve <name> [--agent <name>] [--json]
-  skill.mjs get global <name> [--json]
-  skill.mjs get self <agent> <name> [--json]
-  skill.mjs add global <name> --description "<desc>" [--body "<markdown>"] [--json]
-  skill.mjs add self <agent> <name> --description "<desc>" [--body "<markdown>"] [--json]
-  skill.mjs set global <name> --description "<desc>" [--body "<markdown>"] [--json]
-  skill.mjs set self <agent> <name> --description "<desc>" [--body "<markdown>"] [--json]
-  skill.mjs remove global <name> [--json]
-  skill.mjs remove self <agent> <name> [--json]
-  skill.mjs config get global [--json]
-  skill.mjs config get agent <name> [--json]
-  skill.mjs config set global [--skills-json '<skills>'] [--load-agents-skills true|false] [--skip-path <path>...] [--paths <path>...]
-  skill.mjs config set agent <name> [--skills-json '<skills>'] [--global true|false] [--load-agents-skills true|false] [--skip-path <path>...]`;
+  skill.mjs get shared|gagent|self ... [--json]
+  skill.mjs add shared|gagent|self ... --description "<desc>" [--body "<markdown>"] [--json]
+  skill.mjs set shared|gagent|self ... --description "<desc>" [--body "<markdown>"] [--json]
+  skill.mjs remove shared|gagent|self ... [--json]
+  skill.mjs config get global|agent <name> [--json]
+  skill.mjs config set global [--skills-json '<skills>'] [--shared true|false] [--gagent true|false] [--skip-path <path>...] [--paths <path>...]
+  skill.mjs config set agent <name> [--skills-json '<skills>'] [--shared true|false] [--gagent true|false] [--global true|false] [--skip-path <path>...]
+
+Scopes:
+  shared  — ~/.agents/skills/ (shared with Cursor; global is a legacy alias)
+  gagent  — ~/.config/g-agent/skills/ (g-agent install-wide)
+  self    — ~/.config/g-agent/agents/<name>/skills/
+  builtin — read-only; use agent-manager`;
   console.log(text);
   process.exit(exitCode);
 }
@@ -56,12 +57,37 @@ function agentsDirCandidates() {
   return [...new Set(candidates)];
 }
 
-function agentsSkillsDir() {
+function sharedGlobalSkillsDir() {
   return join(homedir(), ".agents", "skills");
 }
 
-function defaultGlobalSkillsDir() {
-  return join(homedir(), ".agent", "skills");
+function gAgentGlobalSkillsDir() {
+  return join(homedir(), ".config", "g-agent", "skills");
+}
+
+function resolveSharedGlobalSkillsWriteDir(options) {
+  if (options.paths?.length) return expandHome(options.paths[0]);
+  return sharedGlobalSkillsDir();
+}
+
+/** `global` is a legacy alias for shared global (~/.agents/skills). */
+function normalizeSkillScope(scope) {
+  if (scope === "global") return "shared";
+  return scope;
+}
+
+function isSharedGlobalEnabled(globalSkills, agentSkills) {
+  if (agentSkills?.shared === false || agentSkills?.global === false) return false;
+  if (globalSkills?.shared === false) return false;
+  if (agentSkills?.loadAgentsSkills === false) return false;
+  if (globalSkills?.loadAgentsSkills === false) return false;
+  return true;
+}
+
+function isGagentGlobalEnabled(globalSkills, agentSkills) {
+  if (agentSkills?.gagent === false) return false;
+  if (globalSkills?.gagent === false) return false;
+  return true;
 }
 
 function resolveConfigPath(forWrite = false) {
@@ -185,76 +211,82 @@ async function loadSkillsFromDir(dir, source) {
   return skills.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function resolveGlobalSkillsLoadOptions(config, agentConfig) {
+function resolveSharedGlobalSkillsLoadOptions(config, agentConfig) {
   const globalSkills = config.skills ?? {};
   const agentSkills = agentConfig?.skills ?? {};
   return {
-    loadAgentsSkills:
-      agentSkills.loadAgentsSkills ?? globalSkills.loadAgentsSkills ?? true,
     skipPaths: [...(globalSkills.skipPaths ?? []), ...(agentSkills.skipPaths ?? [])],
     paths: globalSkills.paths,
   };
 }
 
-function globalSkillsDirCandidates(options) {
-  const home = homedir();
-  let candidates;
-
+function sharedGlobalSkillsDirCandidates(options) {
   if (options.paths?.length) {
-    candidates = options.paths.map(expandHome);
-  } else {
-    candidates = [];
-    if (process.env.G_AGENT_GLOBAL_SKILLS_DIR) {
-      candidates.push(process.env.G_AGENT_GLOBAL_SKILLS_DIR);
-    }
-    if (process.env.G_AGENT_HOME) {
-      candidates.push(join(process.env.G_AGENT_HOME, "skills"));
-    }
-    candidates.push(defaultGlobalSkillsDir());
-    candidates.push(agentsSkillsDir());
-    candidates.push(join(home, ".config", "g-agent", "skills"));
-    candidates.push(join(home, ".local", "share", "g-agent", "skills"));
+    return options.paths.map(expandHome);
   }
 
-  const skip = new Set(options.skipPaths.map(expandHome));
-  if (!options.loadAgentsSkills) skip.add(agentsSkillsDir());
+  const candidates = [];
+  if (process.env.G_AGENT_GLOBAL_SKILLS_DIR) {
+    candidates.push(process.env.G_AGENT_GLOBAL_SKILLS_DIR);
+  }
+  candidates.push(sharedGlobalSkillsDir());
 
+  const skip = new Set(options.skipPaths.map(expandHome));
   return [...new Set(candidates.map(expandHome))].filter((path) => !skip.has(path));
 }
 
-function resolveGlobalSkillsDir(options, forWrite = false) {
-  for (const path of globalSkillsDirCandidates(options)) {
-    if (existsSync(path)) return path;
+async function loadSharedGlobalSkills(options) {
+  const merged = new Map();
+  for (const path of sharedGlobalSkillsDirCandidates(options)) {
+    if (!existsSync(path)) continue;
+    for (const skill of await loadSkillsFromDir(path, "shared")) {
+      merged.set(skill.name, skill);
+    }
   }
-  if (forWrite) {
-    if (options.paths?.length) return expandHome(options.paths[0]);
-    return defaultGlobalSkillsDir();
+  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function loadGagentGlobalSkills() {
+  const dir = gAgentGlobalSkillsDir();
+  return existsSync(dir) ? loadSkillsFromDir(dir, "gagent") : [];
+}
+
+function findSkillPath(scope, name, options) {
+  const normalized = normalizeSkillScope(scope);
+  if (normalized === "shared") {
+    for (const path of sharedGlobalSkillsDirCandidates(options)) {
+      const skillPath = join(path, name, "SKILL.md");
+      if (existsSync(skillPath)) return skillPath;
+    }
+    return null;
+  }
+  if (normalized === "gagent") {
+    const skillPath = join(gAgentGlobalSkillsDir(), name, "SKILL.md");
+    return existsSync(skillPath) ? skillPath : null;
   }
   return null;
 }
 
-function allGlobalSkillsDirCandidates() {
-  const home = homedir();
-  const candidates = [];
-  if (process.env.G_AGENT_GLOBAL_SKILLS_DIR) candidates.push(process.env.G_AGENT_GLOBAL_SKILLS_DIR);
-  if (process.env.G_AGENT_HOME) candidates.push(join(process.env.G_AGENT_HOME, "skills"));
-  candidates.push(defaultGlobalSkillsDir());
-  candidates.push(agentsSkillsDir());
-  candidates.push(join(home, ".config", "g-agent", "skills"));
-  candidates.push(join(home, ".local", "share", "g-agent", "skills"));
-  return [...new Set(candidates.map(expandHome))];
+function skillRootDir(scope, options) {
+  const normalized = normalizeSkillScope(scope);
+  if (normalized === "shared") return resolveSharedGlobalSkillsWriteDir(options);
+  if (normalized === "gagent") return gAgentGlobalSkillsDir();
+  return null;
 }
 
 function parseFlagOptions(args) {
   const values = [];
   const options = {
     json: false,
+    sharedOnly: false,
     globalOnly: false,
+    gagentOnly: false,
     agent: null,
     description: null,
     body: null,
-    loadAgentsSkills: undefined,
+    shared: undefined,
     global: undefined,
+    gagent: undefined,
     skipPath: [],
     paths: [],
     configJson: null,
@@ -266,8 +298,13 @@ function parseFlagOptions(args) {
       options.json = true;
       continue;
     }
-    if (arg === "--global-only") {
+    if (arg === "--shared-only" || arg === "--global-only") {
+      options.sharedOnly = true;
       options.globalOnly = true;
+      continue;
+    }
+    if (arg === "--gagent-only") {
+      options.gagentOnly = true;
       continue;
     }
     if (arg === "--agent") {
@@ -285,12 +322,12 @@ function parseFlagOptions(args) {
       if (options.body === undefined) throw new Error("--body requires a value");
       continue;
     }
-    if (arg === "--load-agents-skills") {
+    if (arg === "--shared") {
       const value = args[++i];
       if (value !== "true" && value !== "false") {
-        throw new Error("--load-agents-skills requires true or false");
+        throw new Error("--shared requires true or false");
       }
-      options.loadAgentsSkills = value === "true";
+      options.shared = value === "true";
       continue;
     }
     if (arg === "--global") {
@@ -299,6 +336,14 @@ function parseFlagOptions(args) {
         throw new Error("--global requires true or false");
       }
       options.global = value === "true";
+      continue;
+    }
+    if (arg === "--gagent") {
+      const value = args[++i];
+      if (value !== "true" && value !== "false") {
+        throw new Error("--gagent requires true or false");
+      }
+      options.gagent = value === "true";
       continue;
     }
     if (arg === "--skip-path") {
@@ -334,14 +379,15 @@ function printResult(result, json) {
 
 const BUILTIN_READONLY_ERROR =
   'Built-in skills cannot be created, modified, or deleted via skill-manager. ' +
-  "Ask the user to choose global or self instead, or use agent-manager for an agent's builtin-skills/.";
+  "Ask the user to choose global, gagent, or self instead, or use agent-manager for an agent's builtin-skills/.";
 
 function assertWritableScope(scope, command) {
-  if (scope === "builtin") {
+  const normalized = normalizeSkillScope(scope);
+  if (normalized === "builtin") {
     throw new Error(BUILTIN_READONLY_ERROR);
   }
-  if (scope !== "global" && scope !== "self") {
-    throw new Error(`${command} requires scope "global" or "self"`);
+  if (normalized !== "shared" && normalized !== "gagent" && normalized !== "self") {
+    throw new Error(`${command} requires scope "shared", "gagent", or "self" (global is a legacy alias for shared)`);
   }
 }
 
@@ -379,12 +425,12 @@ async function resolveAgentSkillSources(agentName) {
     agentConfig = await readJson(join(userAgentDir, "agent.json"), {});
   }
 
-  const loadOptions = resolveGlobalSkillsLoadOptions(config, agentConfig);
-  const globalEnabled = agentConfig.skills?.global !== false;
+  const loadOptions = resolveSharedGlobalSkillsLoadOptions(config, agentConfig);
+  const sharedEnabled = isSharedGlobalEnabled(config.skills, agentConfig.skills);
+  const gagentEnabled = isGagentGlobalEnabled(config.skills, agentConfig.skills);
 
   let builtinDir;
   if (agentName === "default") {
-    // Built-in default agent skills always ship with the package.
     builtinDir = join(resolveBundledDefaultAgentDir(), "builtin-skills");
   } else if (userAgentDir && existsSync(join(userAgentDir, "builtin-skills"))) {
     builtinDir = join(userAgentDir, "builtin-skills");
@@ -395,36 +441,39 @@ async function resolveAgentSkillSources(agentName) {
   }
 
   const selfDir = userAgentDir ? join(userAgentDir, "skills") : null;
-  const globalDir = globalEnabled
-    ? resolveGlobalSkillsDir(loadOptions)
-    : null;
 
-  const [builtin, global, self] = await Promise.all([
+  const [builtin, shared, gagent, self] = await Promise.all([
     loadSkillsFromDir(builtinDir, "builtin"),
-    globalDir ? loadSkillsFromDir(globalDir, "global") : Promise.resolve([]),
+    sharedEnabled ? loadSharedGlobalSkills(loadOptions) : Promise.resolve([]),
+    gagentEnabled ? loadGagentGlobalSkills() : Promise.resolve([]),
     selfDir ? loadSkillsFromDir(selfDir, "self") : Promise.resolve([]),
   ]);
 
   const merged = new Map();
   for (const skill of builtin) merged.set(skill.name, skill);
-  for (const skill of global) merged.set(skill.name, skill);
+  for (const skill of shared) merged.set(skill.name, skill);
+  for (const skill of gagent) merged.set(skill.name, skill);
   for (const skill of self) merged.set(skill.name, skill);
 
   return {
     agent: agentName,
     userAgentDir,
-    globalEnabled,
-    globalDir,
+    sharedEnabled,
+    gagentEnabled,
+    sharedDir: sharedGlobalSkillsDir(),
+    gagentDir: gAgentGlobalSkillsDir(),
+    sharedWriteDir: resolveSharedGlobalSkillsWriteDir(loadOptions),
     builtinDir,
     selfDir,
     loadOptions,
     builtin: builtin.map((skill) =>
       summarizeSkill(skill, { readOnly: true, managedBy: "agent-manager" }),
     ),
-    global,
+    shared,
+    gagent,
     self,
     effective: [...merged.values()].sort((a, b) => a.name.localeCompare(b.name)),
-    writableLayers: ["global", "self"],
+    writableLayers: ["shared", "gagent", "self"],
   };
 }
 
@@ -436,7 +485,8 @@ async function cmdResolve(values, options) {
   const view = await resolveAgentSkillSources(agentName);
   const layers = {
     builtin: view.builtin.find((item) => item.name === name) ?? null,
-    global: view.global.find((item) => item.name === name) ?? null,
+    shared: view.shared.find((item) => item.name === name) ?? null,
+    gagent: view.gagent.find((item) => item.name === name) ?? null,
     self: view.self.find((item) => item.name === name) ?? null,
   };
   const effective = view.effective.find((item) => item.name === name);
@@ -446,18 +496,26 @@ async function cmdResolve(values, options) {
     agent: agentName,
     layers: {
       builtin: layers.builtin,
-      global: layers.global ? summarizeSkill(layers.global) : null,
+      shared: layers.shared ? summarizeSkill(layers.shared) : null,
+      gagent: layers.gagent ? summarizeSkill(layers.gagent) : null,
       self: layers.self ? summarizeSkill(layers.self) : null,
     },
     effective: effective?.source ?? null,
-    skillManagerWritable: Boolean(layers.global || layers.self),
+    skillManagerWritable: Boolean(layers.shared || layers.gagent || layers.self),
     skillManagerOptions: {
-      global: {
-        label: "global（全局）",
-        description: "All agents can use it (unless disabled per agent)",
-        add: `add global ${name}`,
-        set: `set global ${name}`,
-        remove: `remove global ${name}`,
+      shared: {
+        label: "shared（共享全局）",
+        description: "~/.agents/skills/ — shared with Cursor",
+        add: `add shared ${name}`,
+        set: `set shared ${name}`,
+        remove: `remove shared ${name}`,
+      },
+      gagent: {
+        label: "gagent（g-agent 全局）",
+        description: "~/.config/g-agent/skills/ — g-agent install-wide",
+        add: `add gagent ${name}`,
+        set: `set gagent ${name}`,
+        remove: `remove gagent ${name}`,
       },
       self: {
         label: "self（专属）",
@@ -483,15 +541,19 @@ async function cmdResolve(values, options) {
     console.log(`    path: ${layers.builtin.path}`);
     console.log(`    managed by: agent-manager (not skill-manager)`);
   }
-  if (layers.global) {
-    console.log(`  [global] writable — ${layers.global.description}`);
-    console.log(`    path: ${layers.global.path}`);
+  if (layers.shared) {
+    console.log(`  [shared] writable — ${layers.shared.description}`);
+    console.log(`    path: ${layers.shared.path}`);
+  }
+  if (layers.gagent) {
+    console.log(`  [gagent] writable — ${layers.gagent.description}`);
+    console.log(`    path: ${layers.gagent.path}`);
   }
   if (layers.self) {
     console.log(`  [self] writable — ${layers.self.description}`);
     console.log(`    path: ${layers.self.path}`);
   }
-  if (!layers.builtin && !layers.global && !layers.self) {
+  if (!layers.builtin && !layers.shared && !layers.gagent && !layers.self) {
     console.log("  (not found in any layer for this agent)");
   }
   console.log(`Effective source: ${result.effective ?? "(none)"}`);
@@ -503,16 +565,16 @@ async function cmdResolve(values, options) {
 async function cmdPaths(options) {
   const configPath = resolveConfigPath();
   const { config } = configPath ? await loadGlobalConfig() : { config: {} };
-  const loadOptions = resolveGlobalSkillsLoadOptions(config, {});
+  const loadOptions = resolveSharedGlobalSkillsLoadOptions(config, {});
   const result = {
     configPath,
     configWritePath: resolveConfigPath(true),
     agentsDir: resolveAgentsDir(),
     agentsWriteDir: resolveAgentsDir(true),
-    globalSkillsDir: resolveGlobalSkillsDir(loadOptions),
-    globalWriteDir: resolveGlobalSkillsDir(loadOptions, true),
-    globalCandidates: globalSkillsDirCandidates(loadOptions),
-    allGlobalCandidates: allGlobalSkillsDirCandidates(),
+    sharedSkillsDir: sharedGlobalSkillsDir(),
+    gagentSkillsDir: gAgentGlobalSkillsDir(),
+    sharedWriteDir: resolveSharedGlobalSkillsWriteDir(loadOptions),
+    sharedGlobalCandidates: sharedGlobalSkillsDirCandidates(loadOptions),
     bundledDefaultAgentDir: resolveBundledDefaultAgentDir(),
     skillsConfig: config.skills ?? {},
   };
@@ -525,39 +587,60 @@ async function cmdPaths(options) {
   console.log(`config: ${result.configPath ?? "(none)"}`);
   console.log(`config (write): ${result.configWritePath}`);
   console.log(`agents: ${result.agentsDir ?? "(none)"}`);
-  console.log(`global skills: ${result.globalSkillsDir ?? "(none)"}`);
-  console.log(`global skills (write): ${result.globalWriteDir}`);
+  console.log(`shared global: ${result.sharedSkillsDir}`);
+  console.log(`g-agent global: ${result.gagentSkillsDir}`);
+  console.log(`shared (write): ${result.sharedWriteDir}`);
   console.log(`bundled default agent: ${result.bundledDefaultAgentDir}`);
 }
 
-async function cmdListGlobalOnly(options) {
+async function cmdListSharedOnly(options) {
   const { config, path } = await loadGlobalConfig();
-  const loadOptions = resolveGlobalSkillsLoadOptions(config, {});
-  const globalDir = resolveGlobalSkillsDir(loadOptions);
-  const global = globalDir
-    ? await loadSkillsFromDir(globalDir, "global")
-    : [];
+  const loadOptions = resolveSharedGlobalSkillsLoadOptions(config, {});
+  const shared = await loadSharedGlobalSkills(loadOptions);
 
   if (options.json) {
     console.log(
-      JSON.stringify({ configPath: path, globalDir, skills: global }, null, 2),
+      JSON.stringify({ configPath: path, dir: sharedGlobalSkillsDir(), skills: shared }, null, 2),
     );
     return;
   }
 
-  if (global.length === 0) {
-    console.log(`(empty) global skills dir: ${globalDir ?? "(none)"}`);
+  if (shared.length === 0) {
+    console.log(`(empty) shared global skills dir: ${sharedGlobalSkillsDir()}`);
     return;
   }
-  for (const skill of global) {
-    console.log(`[global] ${skill.name} — ${skill.description}`);
+  for (const skill of shared) {
+    console.log(`[shared] ${skill.name} — ${skill.description}`);
   }
-  console.log(`dir: ${globalDir}`);
+  console.log(`dir: ${sharedGlobalSkillsDir()}`);
+}
+
+async function cmdListGagentOnly(options) {
+  const gagent = await loadGagentGlobalSkills();
+  const dir = gAgentGlobalSkillsDir();
+
+  if (options.json) {
+    console.log(JSON.stringify({ dir, skills: gagent }, null, 2));
+    return;
+  }
+
+  if (gagent.length === 0) {
+    console.log(`(empty) g-agent global skills dir: ${dir}`);
+    return;
+  }
+  for (const skill of gagent) {
+    console.log(`[gagent] ${skill.name} — ${skill.description}`);
+  }
+  console.log(`dir: ${dir}`);
 }
 
 async function cmdList(values, options) {
-  if (options.globalOnly) {
-    await cmdListGlobalOnly(options);
+  if (options.sharedOnly || options.globalOnly) {
+    await cmdListSharedOnly(options);
+    return;
+  }
+  if (options.gagentOnly) {
+    await cmdListGagentOnly(options);
     return;
   }
 
@@ -569,43 +652,62 @@ async function cmdList(values, options) {
   }
 
   console.log(`Agent: ${agentName}`);
-  console.log(`Global enabled: ${view.globalEnabled}`);
+  console.log(`Shared global enabled: ${view.sharedEnabled}`);
+  console.log(`g-agent global enabled: ${view.gagentEnabled}`);
   console.log("Builtin:");
   if (view.builtin.length === 0) console.log("  (empty)");
   for (const skill of view.builtin) {
     console.log(`  [builtin] ${skill.name} — ${skill.description} (read-only, use agent-manager)`);
   }
-  console.log("Global:");
-  if (view.global.length === 0) console.log("  (empty)");
-  for (const skill of view.global) {
-    console.log(`  [global] ${skill.name} — ${skill.description}`);
+  console.log("Shared global:");
+  if (view.shared.length === 0) console.log("  (empty)");
+  for (const skill of view.shared) {
+    console.log(`  [shared] ${skill.name} — ${skill.description}`);
+  }
+  console.log("g-agent global:");
+  if (view.gagent.length === 0) console.log("  (empty)");
+  for (const skill of view.gagent) {
+    console.log(`  [gagent] ${skill.name} — ${skill.description}`);
   }
   console.log("Self:");
   if (view.self.length === 0) console.log("  (empty)");
   for (const skill of view.self) {
     console.log(`  [self] ${skill.name} — ${skill.description}`);
   }
-  console.log("Effective merge (self > global > builtin):");
+  console.log("Effective merge (self > gagent > shared > builtin):");
   for (const skill of view.effective) {
     console.log(`  [${skill.source}] ${skill.name} — ${skill.description}`);
   }
 }
 
 async function cmdGet(scope, values, options) {
-  if (scope === "global") {
+  const normalized = normalizeSkillScope(scope);
+  if (normalized === "shared") {
     const [name] = values;
     const { config } = await loadGlobalConfig();
-    const loadOptions = resolveGlobalSkillsLoadOptions(config, {});
-    const globalDir = resolveGlobalSkillsDir(loadOptions);
-    if (!globalDir) throw new Error("global skills directory not found");
-    const skills = await loadSkillsFromDir(globalDir, "global");
+    const loadOptions = resolveSharedGlobalSkillsLoadOptions(config, {});
+    const skills = await loadSharedGlobalSkills(loadOptions);
     const skill = skills.find((item) => item.name === name);
-    if (!skill) throw new Error(`global skill not found: ${name}`);
+    if (!skill) throw new Error(`shared skill not found: ${name}`);
     if (options.json) {
-      console.log(JSON.stringify({ scope: "global", dir: globalDir, skill }, null, 2));
+      console.log(JSON.stringify({ scope: "shared", dir: sharedGlobalSkillsDir(), skill }, null, 2));
       return;
     }
-    console.log(`[global] ${skill.name} — ${skill.description}`);
+    console.log(`[shared] ${skill.name} — ${skill.description}`);
+    console.log(`path: ${skill.path}`);
+    return;
+  }
+
+  if (normalized === "gagent") {
+    const [name] = values;
+    const skills = await loadGagentGlobalSkills();
+    const skill = skills.find((item) => item.name === name);
+    if (!skill) throw new Error(`gagent skill not found: ${name}`);
+    if (options.json) {
+      console.log(JSON.stringify({ scope: "gagent", dir: gAgentGlobalSkillsDir(), skill }, null, 2));
+      return;
+    }
+    console.log(`[gagent] ${skill.name} — ${skill.description}`);
     console.log(`path: ${skill.path}`);
     return;
   }
@@ -628,16 +730,18 @@ async function writeSkill(scope, mode, values, options) {
     throw new Error("--description is required");
   }
 
-  if (scope === "global") {
+  if (scope === "shared" || scope === "global" || scope === "gagent") {
+    const normalized = normalizeSkillScope(scope);
     const [name] = values;
-    const { path, config } = await loadGlobalConfig(true);
-    const loadOptions = resolveGlobalSkillsLoadOptions(config, {});
-    const globalDir = resolveGlobalSkillsDir(loadOptions, true);
-    const skillDir = join(globalDir, name);
+    const { config } = await loadGlobalConfig(true);
+    const loadOptions = resolveSharedGlobalSkillsLoadOptions(config, {});
+    const rootDir = skillRootDir(normalized, loadOptions);
+    const existingPath = findSkillPath(normalized, name, loadOptions);
+    const skillDir = existingPath ? dirname(dirname(existingPath)) : join(rootDir, name);
     const skillPath = join(skillDir, "SKILL.md");
 
-    if (mode === "add" && existsSync(skillPath)) {
-      throw new Error(`global skill already exists: ${name}`);
+    if (mode === "add" && existingPath) {
+      throw new Error(`${normalized} skill already exists: ${name}`);
     }
 
     let body = options.body ?? "";
@@ -651,11 +755,11 @@ async function writeSkill(scope, mode, values, options) {
     printResult(
       {
         ok: true,
-        scope: "global",
+        scope: normalized,
         mode,
         path: skillPath,
         name,
-        message: `${mode === "add" ? "Added" : "Updated"} global skill "${name}" at ${skillPath}`,
+        message: `${mode === "add" ? "Added" : "Updated"} ${normalized} skill "${name}" at ${skillPath}`,
       },
       options.json,
     );
@@ -694,22 +798,22 @@ async function writeSkill(scope, mode, values, options) {
 }
 
 async function cmdRemove(scope, values, options) {
-  if (scope === "global") {
+  const normalized = normalizeSkillScope(scope);
+  if (normalized === "shared" || normalized === "gagent") {
     const [name] = values;
     const { config } = await loadGlobalConfig();
-    const loadOptions = resolveGlobalSkillsLoadOptions(config, {});
-    const globalDir = resolveGlobalSkillsDir(loadOptions, true);
-    const skillDir = join(globalDir, name);
-    const skillPath = join(skillDir, "SKILL.md");
-    if (!existsSync(skillPath)) throw new Error(`global skill not found: ${name}`);
+    const loadOptions = resolveSharedGlobalSkillsLoadOptions(config, {});
+    const skillPath = findSkillPath(normalized, name, loadOptions);
+    if (!skillPath) throw new Error(`${normalized} skill not found: ${name}`);
+    const skillDir = dirname(dirname(skillPath));
     await rm(skillDir, { recursive: true, force: true });
     printResult(
       {
         ok: true,
-        scope: "global",
+        scope: normalized,
         name,
         path: skillDir,
-        message: `Removed global skill "${name}" from ${skillDir}`,
+        message: `Removed ${normalized} skill "${name}" from ${skillDir}`,
       },
       options.json,
     );
@@ -766,9 +870,8 @@ async function cmdConfigSet(scope, values, options) {
       ? JSON.parse(options.configJson)
       : { ...(config.skills ?? {}) };
 
-    if (options.loadAgentsSkills !== undefined) {
-      skills.loadAgentsSkills = options.loadAgentsSkills;
-    }
+    if (options.shared !== undefined) skills.shared = options.shared;
+    if (options.gagent !== undefined) skills.gagent = options.gagent;
     if (options.skipPath.length > 0) {
       skills.skipPaths = [...new Set([...(skills.skipPaths ?? []), ...options.skipPath])];
     }
@@ -797,10 +900,9 @@ async function cmdConfigSet(scope, values, options) {
     ? JSON.parse(options.configJson)
     : { ...(config.skills ?? {}) };
 
+  if (options.shared !== undefined) skills.shared = options.shared;
   if (options.global !== undefined) skills.global = options.global;
-  if (options.loadAgentsSkills !== undefined) {
-    skills.loadAgentsSkills = options.loadAgentsSkills;
-  }
+  if (options.gagent !== undefined) skills.gagent = options.gagent;
   if (options.skipPath.length > 0) {
     skills.skipPaths = [...new Set([...(skills.skipPaths ?? []), ...options.skipPath])];
   }
@@ -847,8 +949,9 @@ async function main() {
   if (command === "get") {
     const [scope, ...rest] = values;
     assertWritableScope(scope, "get");
-    if (scope === "global") {
-      await cmdGet("global", rest, options);
+    const normalized = normalizeSkillScope(scope);
+    if (normalized === "shared" || normalized === "gagent") {
+      await cmdGet(scope, rest, options);
       return;
     }
     if (scope === "self") {
@@ -861,8 +964,9 @@ async function main() {
     const [scope, ...rest] = values;
     assertWritableScope(scope, command);
     const mode = command;
-    if (scope === "global") {
-      await writeSkill("global", mode, rest, options);
+    const normalized = normalizeSkillScope(scope);
+    if (normalized === "shared" || normalized === "gagent") {
+      await writeSkill(scope, mode, rest, options);
       return;
     }
     if (scope === "self") {
@@ -874,8 +978,9 @@ async function main() {
   if (command === "remove") {
     const [scope, ...rest] = values;
     assertWritableScope(scope, "remove");
-    if (scope === "global") {
-      await cmdRemove("global", rest, options);
+    const normalized = normalizeSkillScope(scope);
+    if (normalized === "shared" || normalized === "gagent") {
+      await cmdRemove(scope, rest, options);
       return;
     }
     if (scope === "self") {

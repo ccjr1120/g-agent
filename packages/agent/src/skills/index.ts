@@ -8,7 +8,7 @@ export type Skill = {
   path: string;
   body: string;
   disableModelInvocation: boolean;
-  source: "builtin" | "self" | "global";
+  source: "builtin" | "shared" | "gagent" | "self";
 };
 
 export function parseSkillFile(content: string): {
