@@ -1,13 +1,22 @@
 export type ConversationTurn = {
   role: "user" | "assistant";
   content: string;
+  thinking?: string;
+  tools?: Array<{ name: string; args: string }>;
+  durationMs?: number;
+};
+
+export type ActiveAgentTurn = {
+  content: string;
+  thinking: string;
+  tools: Array<{ name: string; args: string }>;
 };
 
 export type ClientMessage =
   | { type: "chat"; message: string }
   | { type: "cancel" }
   | { type: "reset" }
-  | { type: "agent"; name?: string }
+  | { type: "agent"; name?: string; message?: string }
   | { type: "skill"; name: string }
   | { type: "mcp" }
   | { type: "mcp_auth"; name: string }
@@ -73,6 +82,7 @@ export type ServerMessage =
       agent: string;
       model: string;
       history: ConversationTurn[];
+      activeTurn?: ActiveAgentTurn;
     };
 
 export const DEFAULT_SERVER_PORT = 3847;
@@ -98,7 +108,11 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     if (data.type === "cancel") {
       return data;
     }
-    if (data.type === "agent") {
+    if (
+      data.type === "agent" &&
+      (data.name === undefined || typeof data.name === "string") &&
+      (data.message === undefined || typeof data.message === "string")
+    ) {
       return data;
     }
     if (data.type === "skill" && typeof data.name === "string") {

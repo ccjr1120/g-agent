@@ -112,6 +112,18 @@ type BackgroundAgentTask = {
   unread: boolean;
   mcpManager?: McpManager;
   history: ConversationMessage[];
+  transcript: Array<{
+    role: "user" | "assistant";
+    content: string;
+    thinking?: string;
+    tools?: Array<{ name: string; args: string }>;
+    durationMs?: number;
+  }>;
+  activeTurn?: {
+    content: string;
+    thinking: string;
+    tools: Array<{ name: string; args: string }>;
+  };
   promptQueue: string[];
   draining: boolean;
   abortController?: AbortController;
@@ -527,16 +539,20 @@ function sendAgentSession(
     model: task
       ? modelLabel(resolveProvider(task.agent))
       : modelLabel(ws.data.effectiveProvider),
-    history: (task?.history ?? ws.data.history).map((message) => ({
-      role: message.role,
-      content: message.content ?? "",
-    })),
+    history: task
+      ? task.transcript
+      : ws.data.history.map((message) => ({
+          role: message.role,
+          content: message.content ?? "",
+        })),
+    ...(task?.activeTurn ? { activeTurn: task.activeTurn } : {}),
   });
 }
 
 function createAgentSession(
   ws: ServerWebSocket<WsData>,
   agent: AgentConfig,
+  activate = true,
 ): BackgroundAgentTask {
   const task: BackgroundAgentTask = {
     slot: ws.data.nextAgentTaskSlot++,
@@ -547,13 +563,18 @@ function createAgentSession(
     createdAt: Date.now(),
     unread: false,
     history: [],
+    transcript: [],
     promptQueue: [],
     draining: false,
   };
   ws.data.agentTasks.push(task);
-  ws.data.activeAgentTaskSlot = task.slot;
+  if (activate) {
+    ws.data.activeAgentTaskSlot = task.slot;
+  }
   sendAgentTasks(ws);
-  sendAgentSession(ws, task);
+  if (activate) {
+    sendAgentSession(ws, task);
+  }
   return task;
 }
 
@@ -582,6 +603,8 @@ async function runAgentSessionPrompt(
   const isVisible = () => ws.data.activeAgentTaskSlot === task.slot;
   const priorHistory = [...task.history];
   task.history.push({ role: "user", content: prompt });
+  task.transcript.push({ role: "user", content: prompt });
+  task.activeTurn = { content: "", thinking: "", tools: [] };
   if (isVisible()) {
     send(ws, { type: "start" });
   }
@@ -600,10 +623,12 @@ async function runAgentSessionPrompt(
         if (event.type === "thinking_delta") {
           task.status = "thinking";
           task.activity = "Analyzing";
+          task.activeTurn!.thinking += event.text;
           if (isVisible()) send(ws, { type: "thinkingDelta", text: event.text });
         } else if (event.type === "tool_call") {
           task.status = "tool_running";
           task.activity = summarizeToolActivity(event.name, event.args);
+          task.activeTurn!.tools.push({ name: event.name, args: event.args });
           if (isVisible()) {
             send(ws, { type: "tool_call", name: event.name, args: event.args });
           }
@@ -619,6 +644,7 @@ async function runAgentSessionPrompt(
           task.status = "responding";
           task.activity = "Writing response";
           assistantText += event.text;
+          task.activeTurn!.content += event.text;
           if (isVisible()) send(ws, { type: "delta", text: event.text });
         } else if (event.type === "error") {
           failed = true;
@@ -626,10 +652,23 @@ async function runAgentSessionPrompt(
           task.activity = "Failed";
           task.completedAt = Date.now();
           task.unread = !isVisible();
+          const turn = task.activeTurn;
+          if (turn && (turn.content.trim() || turn.thinking.trim() || turn.tools.length > 0)) {
+            task.transcript.push({
+              role: "assistant",
+              content: turn.content,
+              ...(turn.thinking ? { thinking: turn.thinking } : {}),
+              ...(turn.tools.length > 0 ? { tools: turn.tools } : {}),
+              durationMs: Date.now() - task.createdAt,
+            });
+          }
+          task.activeTurn = undefined;
           if (isVisible()) send(ws, { type: "error", message: event.message });
         } else if (event.type === "cancelled") {
           failed = true;
           task.history = priorHistory;
+          task.transcript.pop();
+          task.activeTurn = undefined;
           task.status = "cancelled";
           task.activity = "Cancelled";
           task.completedAt = Date.now();
@@ -639,6 +678,17 @@ async function runAgentSessionPrompt(
             if (assistantText.trim()) {
               task.history.push({ role: "assistant", content: assistantText });
             }
+            const turn = task.activeTurn;
+            if (turn && (turn.content.trim() || turn.thinking.trim() || turn.tools.length > 0)) {
+              task.transcript.push({
+                role: "assistant",
+                content: turn.content,
+                ...(turn.thinking ? { thinking: turn.thinking } : {}),
+                ...(turn.tools.length > 0 ? { tools: turn.tools } : {}),
+                durationMs: Date.now() - task.createdAt,
+              });
+            }
+            task.activeTurn = undefined;
             task.status = "completed";
             task.activity = "Ready";
             task.completedAt = Date.now();
@@ -967,7 +1017,15 @@ Bun.serve<WsData>({
             return;
           }
 
-          createAgentSession(ws, target);
+          const initialMessage = message.message?.trim();
+          const task = createAgentSession(ws, target, !initialMessage);
+          if (initialMessage) {
+            task.status = "queued";
+            task.activity = "Queued";
+            task.promptQueue.push(initialMessage);
+            sendAgentTasks(ws);
+            void drainAgentSessionQueue(ws, task);
+          }
         })();
         return;
       }

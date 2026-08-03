@@ -114,14 +114,13 @@ agent 目录从以下路径查找：`$G_AGENT_AGENTS_DIR` → `$G_AGENT_HOME/age
 
 TUI 内：
 
-- `/agent` — 在消息列表中列出所有可创建子会话的 Agent
-- `/agent <name>` — 创建并进入一个新的独立 Agent 子会话；命令在一级 `/` 菜单中平铺展示
+- `/agent <name> <message>` — 创建独立 Agent 子会话并在后台执行首条消息；主会话会持续显示其进度
 - `/<编号>` — 重新进入已有子会话
 - `/back` — 返回 `default` 主会话
 - `/new` — 启动新会话，同时从磁盘重新加载配置、Agent 与 Skill，并重建当前 Agent 的 MCP 连接；添加或修改 MCP/Skill 后无需重启 server
 - `/reload` — 不清空当前对话，立即重新加载配置、Agent 与 Skill；仅在 MCP 配置发生变化时重建连接
 
-启动后默认进入内置 `default` 主会话。`default` 不显示在 Sub Agents 区域，也不负责调用其他 Agent。只有用户执行 `/agent <name>` 时才创建独立编号子会话；消息直接发送给所选 Agent，不经过 `default` 改写或转发。子会话的第一条用户消息会原样发送，并作为固定标题。
+启动后默认进入内置 `default` 主会话。`default` 不显示在 Sub Agents 区域，也不负责调用其他 Agent。用户执行 `/agent <name> <message>` 后，子会话会在后台运行，主会话可通过 Sub Agents 区域观察状态；输入 `/<编号>` 可进入子会话查看结果。首条消息会原样发送，并作为固定标题。
 
 ## 开发
 
@@ -138,6 +137,10 @@ cargo test -p g-agent-tui
 模型请求默认 120 秒超时，并对 408/409/429/5xx 等瞬时错误最多重试 2
 次。可通过 `G_AGENT_REQUEST_TIMEOUT_MS` 和 `G_AGENT_MAX_RETRIES` 调整；在
 TUI 中取消当前回复会立即中止进行中的模型请求。
+
+Agent 默认最多运行 25 轮模型请求，可通过 `G_AGENT_MAX_TOOL_ROUNDS` 调整。
+最后一轮会禁用工具并要求模型基于已有结果作答，避免研究型任务因达到上限而
+丢失已收集的成果。同一轮中模型发出的多个工具调用会并发执行。
 
 终端性能的后续优化计划见
 [docs/terminal-performance-todo.md](docs/terminal-performance-todo.md)。

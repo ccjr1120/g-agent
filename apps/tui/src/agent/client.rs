@@ -6,8 +6,8 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::protocol::{
-    parse_server_message, AgentInfo, AgentTaskInfo, ClientMessage, McpServerInfo, ServerMessage,
-    SkillInfo,
+    parse_server_message, ActiveAgentTurn, AgentInfo, AgentTaskInfo, ClientMessage, McpServerInfo,
+    ServerMessage, SkillInfo,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,7 @@ pub enum AgentEvent {
         agent: String,
         model: String,
         history: Vec<crate::protocol::ConversationTurn>,
+        active_turn: Option<ActiveAgentTurn>,
     },
 }
 
@@ -229,12 +230,14 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
             agent,
             model,
             history,
+            active_turn,
         } => {
             let _ = events.send(AgentEvent::AgentSession {
                 slot,
                 agent,
                 model,
                 history,
+                active_turn,
             });
         }
         ServerMessage::SystemPrompt { .. } | ServerMessage::ToolResult { .. } => {}

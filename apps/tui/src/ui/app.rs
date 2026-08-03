@@ -23,7 +23,7 @@ use crate::agent::client::{
     format_tool_call, AgentClient, AgentEvent, ChatLine, ConnectionState, ContextUsage,
     ToolCallDisplay,
 };
-use crate::protocol::{AgentTaskInfo, ClientMessage, ConversationTurn};
+use crate::protocol::{ActiveAgentTurn, AgentTaskInfo, ClientMessage, ConversationTurn};
 use crate::session::{
     build_session_preview, format_session_age, format_session_label, list_sessions, load_session,
     save_session, write_conversation_log, SavedSession, SavedSessionSummary, UndoEntry, UndoStack,
@@ -40,7 +40,6 @@ use crate::ui::transcript::{
 };
 
 enum PendingSessionOpen {
-    Agent(String),
     Task(u64),
 }
 
@@ -411,8 +410,9 @@ impl App {
                 agent,
                 model,
                 history,
+                active_turn,
             } => {
-                self.switch_agent_session(slot, agent, model, history);
+                self.switch_agent_session(slot, agent, model, history, active_turn);
             }
         }
     }
@@ -496,12 +496,7 @@ impl App {
             return false;
         };
         match pending {
-            PendingSessionOpen::Agent(name) => {
-                self.client.send(ClientMessage::Agent { name: Some(name) });
-            }
-            PendingSessionOpen::Task(slot) => {
-                self.client.send(ClientMessage::AgentTask { slot });
-            }
+            PendingSessionOpen::Task(slot) => self.client.send(ClientMessage::AgentTask { slot }),
         }
         true
     }
@@ -585,6 +580,9 @@ impl App {
                     .sent_content
                     .clone()
                     .unwrap_or_else(|| line.text.clone()),
+                thinking: String::new(),
+                tools: Vec::new(),
+                duration_ms: line.duration_ms,
             })
             .filter(|turn| !turn.content.trim().is_empty())
             .collect();
@@ -833,7 +831,7 @@ impl App {
         self.input_history.reset_browse();
     }
 
-    /// If the selected item is a group header (e.g. "/skills" or "/agent"), open the
+    /// If the selected item is a group header (e.g. "/skills"), open the
     /// group as a filterable picker instead of running it. Returns true when
     /// it was one.
     fn try_open_command_group(&mut self, item: &SlashCommand) -> bool {
@@ -965,29 +963,23 @@ impl App {
             );
             return;
         }
-        if text == "/agent" {
-            self.add_local(
-                self.agents
-                    .iter()
-                    .filter(|agent| agent.name != "default")
-                    .map(|agent| format!("/agent {} — {}", agent.name, agent.description))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-            return;
-        }
-        if let Some(name) = text.strip_prefix("/agent ") {
-            if self.active_child.is_none() && self.is_turn_busy() {
-                self.pending_session_open =
-                    Some(PendingSessionOpen::Agent(name.trim().to_string()));
-                self.add_local(
-                    "Main agent is still responding; the sub-session will open automatically when it finishes.".into(),
-                );
+        if let Some(arguments) = text.strip_prefix("/agent ") {
+            let mut parts = arguments.trim().splitn(2, char::is_whitespace);
+            let name = parts.next().unwrap_or_default();
+            let message = parts.next().map(str::trim).filter(|value| !value.is_empty());
+            if name.is_empty() {
+                self.enter_command_picker("agent");
+                return;
+            }
+            if message.is_none() {
+                self.complete_into_composer(&format!("/agent {name} "));
                 return;
             }
             self.client.send(ClientMessage::Agent {
                 name: Some(name.trim().to_string()),
+                message: message.map(str::to_string),
             });
+            self.add_status(format!("Started {name} in the background"));
             return;
         }
         if let Some(name) = text.strip_prefix("/skill ") {
@@ -1254,6 +1246,7 @@ impl App {
         agent: String,
         model: String,
         history: Vec<ConversationTurn>,
+        active_turn: Option<ActiveAgentTurn>,
     ) {
         self.commit_streaming_line();
         if self.active_child.is_none() {
@@ -1274,14 +1267,36 @@ impl App {
                     role: turn.role,
                     text: turn.content.clone(),
                     sent_content: Some(turn.content),
-                    thinking: String::new(),
-                    tools: Vec::new(),
-                    duration_ms: None,
+                    thinking: turn.thinking,
+                    tools: turn
+                        .tools
+                        .into_iter()
+                        .map(|tool| ToolCallDisplay {
+                            label: format_tool_call(&tool.name, &tool.args),
+                            name: tool.name,
+                        })
+                        .collect(),
+                    duration_ms: turn.duration_ms,
                     queued: false,
                 })
                 .collect()
         };
-        self.streaming = None;
+        self.streaming = active_turn.map(|turn| ChatLine {
+            role: "assistant".to_string(),
+            text: turn.content,
+            sent_content: None,
+            thinking: turn.thinking,
+            tools: turn
+                .tools
+                .into_iter()
+                .map(|tool| ToolCallDisplay {
+                    label: format_tool_call(&tool.name, &tool.args),
+                    name: tool.name,
+                })
+                .collect(),
+            duration_ms: None,
+            queued: false,
+        });
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
@@ -1377,6 +1392,9 @@ impl App {
                     .sent_content
                     .clone()
                     .unwrap_or_else(|| line.text.clone()),
+                thinking: String::new(),
+                tools: Vec::new(),
+                duration_ms: line.duration_ms,
             })
             .filter(|turn| !turn.content.trim().is_empty())
             .collect::<Vec<_>>();
@@ -1407,10 +1425,6 @@ impl App {
             SlashCommand {
                 value: "/skills".into(),
                 description: "Select and run a skill".into(),
-            },
-            SlashCommand {
-                value: "/agent".into(),
-                description: "List agents for a new sub-session".into(),
             },
             SlashCommand {
                 value: "/back".into(),
@@ -1470,8 +1484,8 @@ impl App {
             .iter()
             .filter(|agent| agent.name != "default")
             .map(|agent| SlashCommand {
-                value: format!("/agent {}", agent.name),
-                description: format!("new sub-session · {}", agent.description),
+                value: format!("/agent {} ", agent.name),
+                description: format!("run in background · add a message · {}", agent.description),
             })
             .collect::<Vec<_>>();
         self.commands.extend(agent_commands.iter().cloned());
@@ -1557,8 +1571,8 @@ impl App {
                     .iter()
                     .filter(|agent| agent.name != "default")
                     .map(|agent| SlashCommand {
-                        value: format!("/agent {}", agent.name),
-                        description: agent.description.clone(),
+                        value: format!("/agent {} ", agent.name),
+                        description: format!("add a message · {}", agent.description),
                     }),
                 partial,
             );

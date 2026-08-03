@@ -3,6 +3,7 @@ import { runAgent, type AgentStreamEvent, type ResolvedProvider } from "./index.
 
 const originalFetch = globalThis.fetch;
 const originalRetries = process.env.G_AGENT_MAX_RETRIES;
+const originalToolRounds = process.env.G_AGENT_MAX_TOOL_ROUNDS;
 
 const provider: ResolvedProvider = {
   name: "test",
@@ -18,6 +19,11 @@ afterEach(() => {
     delete process.env.G_AGENT_MAX_RETRIES;
   } else {
     process.env.G_AGENT_MAX_RETRIES = originalRetries;
+  }
+  if (originalToolRounds === undefined) {
+    delete process.env.G_AGENT_MAX_TOOL_ROUNDS;
+  } else {
+    process.env.G_AGENT_MAX_TOOL_ROUNDS = originalToolRounds;
   }
 });
 
@@ -35,6 +41,55 @@ describe("runAgent", () => {
     ]);
   });
 
+  test("renders think-tagged content as reasoning instead of answer text", async () => {
+    globalThis.fetch = async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              content:
+                "<think>The user greeted me. No tools are needed.</think>你好！有什么可以帮你？",
+            },
+          },
+        ],
+      });
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("你好", (event) => events.push(event), provider);
+
+    expect(events).toEqual([
+      {
+        type: "thinking_delta",
+        text: "The user greeted me. No tools are needed.",
+      },
+      { type: "delta", text: "你好！有什么可以帮你？" },
+      { type: "done" },
+    ]);
+  });
+
+  test("combines reasoning_content with think tags", async () => {
+    globalThis.fetch = async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              reasoning_content: "First thought",
+              content: "<think>Second thought</think>Answer",
+            },
+          },
+        ],
+      });
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("hi", (event) => events.push(event), provider);
+
+    expect(events[0]).toEqual({
+      type: "thinking_delta",
+      text: "First thought\n\nSecond thought",
+    });
+    expect(events[1]).toEqual({ type: "delta", text: "Answer" });
+  });
+
   test("retries transient HTTP failures", async () => {
     let attempts = 0;
     globalThis.fetch = async () => {
@@ -48,6 +103,46 @@ describe("runAgent", () => {
     await runAgent("hi", (event) => events.push(event), provider);
 
     expect(attempts).toBe(2);
+    expect(events.at(-1)).toEqual({ type: "done" });
+  });
+
+  test("reserves the last round for an answer instead of failing", async () => {
+    process.env.G_AGENT_MAX_TOOL_ROUNDS = "2";
+    const requestBodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (requestBodies.length === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: "call-1",
+                type: "function",
+                function: {
+                  name: "read",
+                  arguments: JSON.stringify({ path: "package.json" }),
+                },
+              }],
+            },
+          }],
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: "answer from collected evidence" } }],
+      });
+    };
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("inspect", (event) => events.push(event), provider);
+
+    expect(requestBodies).toHaveLength(2);
+    expect(requestBodies[0]).toHaveProperty("tools");
+    expect(requestBodies[1]).not.toHaveProperty("tools");
+    expect(events.at(-2)).toEqual({
+      type: "delta",
+      text: "answer from collected evidence",
+    });
     expect(events.at(-1)).toEqual({ type: "done" });
   });
 

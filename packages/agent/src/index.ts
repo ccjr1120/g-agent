@@ -59,7 +59,7 @@ type ChatMessage =
     }
   | { role: "tool"; tool_call_id: string; content: string };
 
-const MAX_TOOL_ROUNDS = 25;
+const DEFAULT_MAX_TOOL_ROUNDS = 25;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_RETRIES = 2;
 const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504]);
@@ -141,11 +141,18 @@ function buildInitialMessages(
   history: ConversationMessage[],
 ): ChatMessage[] {
   return [
-    { role: "system", content: systemPrompt },
+    {
+      role: "system",
+      content: [systemPrompt, TOOL_EFFICIENCY_PROMPT].filter(Boolean).join("\n\n"),
+    },
     ...history,
     { role: "user", content: prompt },
   ];
 }
+
+const TOOL_EFFICIENCY_PROMPT = `## Tool efficiency
+
+Use tools economically. Batch related reads and queries, request independent tool calls in the same response, and prefer one well-scoped shell command over many tiny shell calls. For research, gather a broad candidate set in bulk, shortlist it, then inspect only the strongest candidates in depth. Stop gathering evidence once you can answer reliably.`;
 
 async function runOpenAI(
   provider: ResolvedProvider,
@@ -162,8 +169,20 @@ async function runOpenAI(
   const mcpTools = options.mcpManager?.getTools() ?? [];
   const tools = toOpenAITools([...builtinTools, ...mcpTools]);
   const model = provider.modelName ?? provider.model;
+  const maxToolRounds = positiveEnvNumber(
+    "G_AGENT_MAX_TOOL_ROUNDS",
+    DEFAULT_MAX_TOOL_ROUNDS,
+  );
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+  for (let round = 0; round < maxToolRounds; round++) {
+    const mustAnswer = round === maxToolRounds - 1;
+    if (mustAnswer) {
+      messages.push({
+        role: "system",
+        content:
+          "The tool-call budget is exhausted. Do not call tools. Give the best complete answer now using the evidence already collected, and briefly note any material uncertainty.",
+      });
+    }
     const response = await fetchWithRetry(
       `${provider.baseUrl}/chat/completions`,
       {
@@ -177,8 +196,7 @@ async function runOpenAI(
           model,
           stream: false,
           messages,
-          tools,
-          tool_choice: "auto",
+          ...(mustAnswer ? {} : { tools, tool_choice: "auto" }),
         }),
       },
       options.signal,
@@ -204,6 +222,15 @@ async function runOpenAI(
       throw new Error("LLM response has no message");
     }
 
+    const taggedContent = splitThinkTaggedContent(message.content ?? "");
+    const reasoning = [message.reasoning_content, taggedContent.thinking]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value))
+      .join("\n\n");
+    if (reasoning) {
+      await streamText(reasoning, onEvent, "thinking_delta");
+    }
+
     if (message.tool_calls?.length) {
       messages.push({
         role: "assistant",
@@ -215,18 +242,29 @@ async function runOpenAI(
         const name = call.function.name;
         const argsText = call.function.arguments;
         onEvent({ type: "tool_call", name, args: argsText });
+      }
 
+      const results = await Promise.all(message.tool_calls.map(async (call) => {
+        const name = call.function.name;
+        const argsText = call.function.arguments;
         let args: Record<string, unknown> = {};
         try {
           args = JSON.parse(argsText) as Record<string, unknown>;
         } catch {
-          const output = "Error: tool arguments must be valid JSON";
-          onEvent({ type: "tool_result", name, output });
-          messages.push({ role: "tool", tool_call_id: call.id, content: output });
-          continue;
+          return {
+            call,
+            name,
+            output: "Error: tool arguments must be valid JSON",
+          };
         }
 
         const output = await executeNamedTool(name, args, options.mcpManager);
+        return { call, name, output };
+      }));
+
+      // Preserve the provider's tool-call order in conversation history even
+      // though independent calls execute concurrently.
+      for (const { call, name, output } of results) {
         onEvent({ type: "tool_result", name, output });
         messages.push({ role: "tool", tool_call_id: call.id, content: output });
       }
@@ -234,19 +272,55 @@ async function runOpenAI(
       continue;
     }
 
-    const reasoning = message.reasoning_content?.trim();
-    if (reasoning) {
-      await streamText(reasoning, onEvent, "thinking_delta");
-    }
-
-    const text = message.content?.trim();
+    const text = taggedContent.text.trim();
     if (text) {
       await streamText(text, onEvent, "delta");
     }
     return;
   }
 
-  throw new Error(`Too many tool call rounds (max ${MAX_TOOL_ROUNDS})`);
+  throw new Error(`Unable to produce an answer after ${maxToolRounds} rounds`);
+}
+
+/**
+ * Some OpenAI-compatible providers return reasoning inside ordinary content
+ * using <think>...</think> instead of the reasoning_content field. Separate
+ * those blocks so the TUI can render them in its dedicated thinking area.
+ */
+function splitThinkTaggedContent(content: string): {
+  thinking: string;
+  text: string;
+} {
+  if (!/<think>/i.test(content)) {
+    return { thinking: "", text: content };
+  }
+
+  const thinking: string[] = [];
+  let text = "";
+  let cursor = 0;
+  const block = /<think>([\s\S]*?)<\/think>/gi;
+  for (const match of content.matchAll(block)) {
+    const index = match.index ?? 0;
+    text += content.slice(cursor, index);
+    thinking.push(match[1]);
+    cursor = index + match[0].length;
+  }
+
+  // A provider may omit the closing tag on a truncated response. Treat the
+  // remaining content as thinking instead of leaking the raw tag to chat.
+  const remainder = content.slice(cursor);
+  const unclosed = remainder.match(/<think>([\s\S]*)$/i);
+  if (unclosed && unclosed.index !== undefined) {
+    text += remainder.slice(0, unclosed.index);
+    thinking.push(unclosed[1]);
+  } else {
+    text += remainder;
+  }
+
+  return {
+    thinking: thinking.map((value) => value.trim()).filter(Boolean).join("\n\n"),
+    text,
+  };
 }
 
 async function executeNamedTool(

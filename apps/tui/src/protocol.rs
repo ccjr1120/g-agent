@@ -9,6 +9,27 @@ pub const DEFAULT_SERVER_URL: &str = "ws://127.0.0.1:3847";
 pub struct ConversationTurn {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub thinking: String,
+    #[serde(default)]
+    pub tools: Vec<AgentTurnTool>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTurnTool {
+    pub name: String,
+    pub args: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveAgentTurn {
+    pub content: String,
+    pub thinking: String,
+    pub tools: Vec<AgentTurnTool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -22,6 +43,8 @@ pub enum ClientMessage {
     Agent {
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     Skill {
         name: String,
@@ -106,6 +129,8 @@ pub enum ServerMessage {
         agent: String,
         model: String,
         history: Vec<ConversationTurn>,
+        #[serde(default, rename = "activeTurn")]
+        active_turn: Option<ActiveAgentTurn>,
     },
 }
 
@@ -231,6 +256,19 @@ mod tests {
     }
 
     #[test]
+    fn serializes_agent_with_initial_message() {
+        let raw = serde_json::to_string(&ClientMessage::Agent {
+            name: Some("think-agent".into()),
+            message: Some("analyze the cache".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            raw,
+            r#"{"type":"agent","name":"think-agent","message":"analyze the cache"}"#
+        );
+    }
+
+    #[test]
     fn serializes_agent_back_command() {
         let raw = serde_json::to_string(&ClientMessage::AgentBack).expect("serialize agent back");
         assert_eq!(raw, r#"{"type":"agent_back"}"#);
@@ -239,7 +277,7 @@ mod tests {
     #[test]
     fn parses_agent_sub_session() {
         let message = parse_server_message(
-            r#"{"type":"agent_session","slot":2,"agent":"reviewer","model":"openai/test","history":[{"role":"user","content":"check this"}]}"#,
+            r#"{"type":"agent_session","slot":2,"agent":"reviewer","model":"openai/test","history":[{"role":"user","content":"check this"}],"activeTurn":{"content":"working","thinking":"inspect","tools":[{"name":"read","args":"{\"path\":\"README.md\"}"}]}}"#,
         );
         assert!(matches!(
             message,
@@ -248,7 +286,11 @@ mod tests {
                 agent,
                 model: _,
                 history,
-            }) if agent == "reviewer" && history.len() == 1
+                active_turn: Some(active_turn),
+            }) if agent == "reviewer"
+                && history.len() == 1
+                && active_turn.content == "working"
+                && active_turn.tools[0].name == "read"
         ));
     }
 }
