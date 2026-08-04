@@ -34,19 +34,6 @@ impl TextArea {
         self.cursor = self.clamp_boundary(self.cursor.min(self.text.len()));
     }
 
-    pub fn cursor(&self) -> usize {
-        self.cursor
-    }
-
-    pub fn replace_range(&mut self, range: std::ops::Range<usize>) {
-        if range.start >= range.end || range.end > self.text.len() {
-            return;
-        }
-        self.text.replace_range(range.clone(), "");
-        self.cursor = range.start;
-        self.cursor = self.clamp_boundary(self.cursor);
-    }
-
     pub fn insert_str(&mut self, value: &str) {
         if value.is_empty() {
             return;
@@ -195,9 +182,9 @@ impl TextArea {
         }
         self.text
             .grapheme_indices(true)
+            .rev()
+            .find(|(idx, _)| *idx < offset)
             .map(|(idx, _)| idx)
-            .filter(|idx| *idx < offset)
-            .last()
             .unwrap_or(0)
     }
 
@@ -210,7 +197,7 @@ impl TextArea {
     }
 
     fn clamp_boundary(&self, offset: usize) -> usize {
-        if offset <= 0 {
+        if offset == 0 {
             return 0;
         }
         if offset >= self.text.len() {
@@ -262,9 +249,9 @@ impl Widget for TextAreaWidget<'_> {
         let lines = self.textarea.wrapped_lines(width);
         let cursor_line = line_index_for_offset(&lines, self.textarea.cursor);
         let cursor_col = cursor_line
-            .and_then(|index| {
+            .map(|index| {
                 let line = &lines[index];
-                Some(self.textarea.text[line.start..self.textarea.cursor].width())
+                self.textarea.text[line.start..self.textarea.cursor].width()
             })
             .unwrap_or(0);
 
@@ -338,10 +325,10 @@ mod tests {
         for _ in 0..6 {
             textarea.move_right();
         }
-        assert_eq!(textarea.cursor(), 6);
+        assert_eq!(textarea.cursor, 6);
         textarea.delete_current_line();
         assert_eq!(textarea.text(), "line1\nline3");
-        assert_eq!(textarea.cursor(), 6);
+        assert_eq!(textarea.cursor, 6);
     }
 
     #[test]
@@ -351,6 +338,6 @@ mod tests {
         textarea.move_end();
         textarea.delete_current_line();
         assert_eq!(textarea.text(), "line1");
-        assert_eq!(textarea.cursor(), 5);
+        assert_eq!(textarea.cursor, 5);
     }
 }

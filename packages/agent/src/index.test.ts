@@ -13,6 +13,22 @@ const provider: ResolvedProvider = {
   apiKey: "test-key",
 };
 
+function sseResponse(chunks: string[]): Response {
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(new TextEncoder().encode(chunk));
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+const SSE_DONE = "data: [DONE]\n\n";
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   if (originalRetries === undefined) {
@@ -170,5 +186,94 @@ describe("runAgent", () => {
     await running;
 
     expect(events).toEqual([{ type: "cancelled" }]);
+  });
+
+  test("streams content incrementally from SSE chunks", async () => {
+    globalThis.fetch = async () =>
+      sseResponse([
+        'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"lo wor"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"ld"}}]}\n\n',
+        SSE_DONE,
+      ]);
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("hi", (event) => events.push(event), provider);
+
+    expect(events).toEqual([
+      { type: "delta", text: "Hel" },
+      { type: "delta", text: "lo wor" },
+      { type: "delta", text: "ld" },
+      { type: "done" },
+    ]);
+  });
+
+  test("streams reasoning_content as thinking deltas", async () => {
+    globalThis.fetch = async () =>
+      sseResponse([
+        'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n\n',
+        'data: {"choices":[{"delta":{"reasoning_content":"ing"},"finish_reason":null}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
+        SSE_DONE,
+      ]);
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("hi", (event) => events.push(event), provider);
+
+    expect(events).toEqual([
+      { type: "thinking_delta", text: "think" },
+      { type: "thinking_delta", text: "ing" },
+      { type: "delta", text: "answer" },
+      { type: "done" },
+    ]);
+  });
+
+  test("accumulates tool call arguments across SSE chunks", async () => {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return sseResponse([
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read","arguments":"{\\"path\\":"}}]}}]}\n\n',
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"package.json\\"}"}}]}}]}\n\n',
+          SSE_DONE,
+        ]);
+      }
+      return sseResponse([
+        'data: {"choices":[{"delta":{"content":"done reading"}}]}\n\n',
+        SSE_DONE,
+      ]);
+    };
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("read package.json", (event) => events.push(event), provider);
+
+    expect(calls).toBe(2);
+    expect(events).toContainEqual({
+      type: "tool_call",
+      name: "read",
+      args: '{"path":"package.json"}',
+    });
+    expect(events.at(-2)).toEqual({ type: "delta", text: "done reading" });
+  });
+
+  test("splits think tags across chunk boundaries", async () => {
+    globalThis.fetch = async () =>
+      sseResponse([
+        'data: {"choices":[{"delta":{"content":"Pre<thi"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"nk>Secret</th"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"ink>Final"}}]}\n\n',
+        SSE_DONE,
+      ]);
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("hi", (event) => events.push(event), provider);
+
+    expect(events).toEqual([
+      { type: "delta", text: "Pre" },
+      { type: "thinking_delta", text: "Secret" },
+      { type: "delta", text: "Final" },
+      { type: "done" },
+    ]);
   });
 });

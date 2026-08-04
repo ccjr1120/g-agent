@@ -32,7 +32,7 @@ pub fn spinner_line(
     dim: bool,
 ) -> Line<'static> {
     let frame = SPINNER_FRAMES[spinner_frame(clock)];
-    let elapsed = turn_start.map(|start| format_elapsed(start));
+    let elapsed = turn_start.map(format_elapsed);
     let label_text = match (&elapsed, dim) {
         (Some(elapsed), true) => format!(" {elapsed}"),
         (Some(elapsed), false) => format!("{label} {elapsed}"),

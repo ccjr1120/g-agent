@@ -40,12 +40,6 @@ pub mod style {
         Style::default().fg(palette::MUTED)
     }
 
-    pub fn paste_chip() -> Style {
-        Style::default()
-            .fg(palette::MUTED)
-            .add_modifier(Modifier::ITALIC)
-    }
-
     pub fn user_message() -> Style {
         brand()
     }

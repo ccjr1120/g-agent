@@ -12,6 +12,34 @@ export type ActiveAgentTurn = {
   tools: Array<{ name: string; args: string }>;
 };
 
+export type ScheduledTaskStatus =
+  | "scheduled"
+  | "running"
+  | "ok"
+  | "error"
+  | "cancelled";
+
+export type ScheduledTaskInfo = {
+  id: string;
+  label: string;
+  prompt: string;
+  intervalSeconds: number;
+  nextRunAt: number;
+  running: boolean;
+  lastRunAt?: number;
+  lastStatus: ScheduledTaskStatus;
+  lastSummary?: string;
+  unread: boolean;
+  /** Set when the last run could not authenticate with an external tool. */
+  authRequired?: boolean;
+};
+
+export type ScheduledTaskRun = {
+  runAt: number;
+  status: ScheduledTaskStatus;
+  summary: string;
+};
+
 export type ClientMessage =
   | { type: "chat"; message: string }
   | { type: "cancel" }
@@ -24,7 +52,11 @@ export type ClientMessage =
   | { type: "agent_task"; slot: number }
   | { type: "agent_tasks" }
   | { type: "agent_back" }
-  | { type: "resume"; agent: string; history: ConversationTurn[] };
+  | { type: "resume"; agent: string; history: ConversationTurn[] }
+  | { type: "scheduled_tasks" }
+  | { type: "scheduled_task_cancel"; id: string }
+  | { type: "scheduled_task_run"; id: string }
+  | { type: "scheduled_task_history"; id: string };
 
 export type AgentTaskStatus =
   | "idle"
@@ -83,7 +115,15 @@ export type ServerMessage =
       model: string;
       history: ConversationTurn[];
       activeTurn?: ActiveAgentTurn;
-    };
+    }
+  | { type: "scheduled_tasks"; tasks: ScheduledTaskInfo[] }
+  | { type: "scheduled_task_update"; task: ScheduledTaskInfo }
+  | {
+      type: "scheduled_task_history";
+      id: string;
+      runs: ScheduledTaskRun[];
+    }
+  | { type: "notice"; message: string };
 
 export const DEFAULT_SERVER_PORT = 3847;
 export const DEFAULT_SERVER_URL = `ws://127.0.0.1:${DEFAULT_SERVER_PORT}`;
@@ -154,6 +194,18 @@ export function parseClientMessage(raw: string): ClientMessage | null {
           return null;
         }
       }
+      return data;
+    }
+    if (data.type === "scheduled_tasks") {
+      return data;
+    }
+    if (data.type === "scheduled_task_cancel" && typeof data.id === "string") {
+      return data;
+    }
+    if (data.type === "scheduled_task_run" && typeof data.id === "string") {
+      return data;
+    }
+    if (data.type === "scheduled_task_history" && typeof data.id === "string") {
       return data;
     }
     return null;

@@ -65,7 +65,7 @@ pub fn list_sessions() -> Result<Vec<SavedSessionSummary>> {
         }
     }
 
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
     Ok(sessions)
 }
 
@@ -135,8 +135,9 @@ pub fn build_session_preview(history: &[ConversationTurn]) -> String {
     history
         .iter()
         .find(|turn| turn.role == "user")
-        .map(|turn| truncate(&turn.content.replace('\n', " ").trim(), 60))
+        .map(|turn| turn.content.replace('\n', " ").trim().to_string())
         .filter(|value| !value.is_empty())
+        .map(|content| truncate(&content, 60))
         .unwrap_or_else(|| "Untitled session".to_string())
 }
 

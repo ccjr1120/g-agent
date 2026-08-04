@@ -161,8 +161,8 @@ impl Widget for ContextRing {
         let r_out = radius;
         let fill_angle = TAU * percent as f64 / 100.0;
 
-        for y in 0..dot_h {
-            for x in 0..dot_w {
+        for (y, row) in dots.iter_mut().enumerate() {
+            for (x, dot) in row.iter_mut().enumerate() {
                 let dx = x as f64 - cx;
                 let dy = y as f64 - cy;
                 let dist = (dx * dx + dy * dy).sqrt();
@@ -170,7 +170,7 @@ impl Widget for ContextRing {
                     continue;
                 }
                 let angle = (dy.atan2(dx) + PI / 2.0 + TAU) % TAU;
-                dots[y][x] = if angle <= fill_angle {
+                *dot = if angle <= fill_angle {
                     DotKind::Filled
                 } else {
                     DotKind::Track

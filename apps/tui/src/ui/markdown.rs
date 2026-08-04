@@ -32,10 +32,9 @@ impl MarkdownCache {
     pub fn render_static(&mut self, text: &str, width: u16) -> &[Line<'static>] {
         self.set_width(width);
         let key = cache_key(text, width);
-        if !self.static_cache.contains_key(&key) {
-            let lines = render_markdown(text, width);
-            self.static_cache.insert(key, lines);
-        }
+        self.static_cache
+            .entry(key)
+            .or_insert_with(|| render_markdown(text, width));
         &self.static_cache[&key]
     }
 }

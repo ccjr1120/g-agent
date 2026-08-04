@@ -4,10 +4,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use crate::ui::paste::{
-    expand_paste_placeholders, find_placeholder_at, normalize_paste, paste_placeholder,
-    should_attach_as_block, PastedBlock,
-};
+use crate::ui::paste::normalize_paste;
 use crate::ui::textarea::{TextArea, TextAreaWidget};
 use crate::ui::theme::style;
 
@@ -19,8 +16,6 @@ pub struct SlashCommand {
 
 pub struct Composer {
     pub textarea: TextArea,
-    pub pastes: Vec<PastedBlock>,
-    next_paste_id: usize,
     pub menu_open: bool,
     pub menu_index: usize,
     pub open_group: Option<String>,
@@ -31,8 +26,6 @@ impl Composer {
     pub fn new() -> Self {
         Self {
             textarea: TextArea::new(),
-            pastes: Vec::new(),
-            next_paste_id: 1,
             menu_open: false,
             menu_index: 0,
             open_group: None,
@@ -71,66 +64,27 @@ impl Composer {
         if content.is_empty() {
             return;
         }
-
-        if should_attach_as_block(&content) {
-            let id = self.next_paste_id;
-            self.next_paste_id += 1;
-            let line_count = content.lines().count().max(1);
-            let placeholder = paste_placeholder(id, line_count);
-            self.pastes.push(PastedBlock {
-                id,
-                content,
-                placeholder: placeholder.clone(),
-            });
-            self.textarea.insert_str(&placeholder);
-        } else {
-            self.textarea.insert_str(&content);
-        }
+        self.textarea.insert_str(&content);
         self.on_text_changed();
     }
 
-    pub fn expand_message(&self, display: &str) -> String {
-        expand_paste_placeholders(display, &self.pastes)
-    }
-
     pub fn delete_backward(&mut self) {
-        if let Some((range, id)) = find_placeholder_at(self.textarea.text(), self.textarea.cursor())
-        {
-            self.textarea.replace_range(range);
-            self.pastes.retain(|block| block.id != id);
-            self.on_text_changed();
-            return;
-        }
         self.textarea.delete_backward();
         self.on_text_changed();
     }
 
     pub fn delete_forward(&mut self) {
-        let cursor = self.textarea.cursor();
-        if let Some((range, id)) =
-            find_placeholder_at(self.textarea.text(), cursor.saturating_add(1))
-        {
-            if range.start == cursor || range.contains(&cursor) {
-                self.textarea.replace_range(range);
-                self.pastes.retain(|block| block.id != id);
-                self.on_text_changed();
-                return;
-            }
-        }
         self.textarea.delete_forward();
         self.on_text_changed();
     }
 
     pub fn delete_current_line(&mut self) {
         self.textarea.delete_current_line();
-        self.pastes
-            .retain(|block| self.textarea.text().contains(&block.placeholder));
         self.on_text_changed();
     }
 
     pub fn clear(&mut self) {
         self.textarea.set_text(String::new());
-        self.pastes.clear();
         self.open_group = None;
         self.on_text_changed();
     }
@@ -378,9 +332,7 @@ impl InputHistory {
     /// Move toward newer entries / restore the draft. Returns text to show, or
     /// `None` when not browsing.
     pub fn down(&mut self) -> Option<String> {
-        let Some(i) = self.index else {
-            return None;
-        };
+        let i = self.index?;
         let next = i + 1;
         if next >= self.entries.len() {
             self.index = None;
@@ -448,5 +400,20 @@ mod input_history_tests {
         assert_eq!(history.up("world").as_deref(), Some("hello"));
         assert_eq!(history.down().as_deref(), Some("world"));
         assert_eq!(history.down().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn pasted_content_is_inserted_verbatim_and_sent_as_is() {
+        let mut composer = Composer::new();
+        let pasted = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9";
+        composer.insert_paste(pasted);
+        assert_eq!(composer.textarea.text(), pasted);
+    }
+
+    #[test]
+    fn short_paste_is_inserted_directly() {
+        let mut composer = Composer::new();
+        composer.insert_paste("hello world");
+        assert_eq!(composer.textarea.text(), "hello world");
     }
 }

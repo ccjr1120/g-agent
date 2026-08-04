@@ -3,6 +3,8 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
+import type { ScheduledTaskManager } from "../schedules/index.js";
+
 export type ToolDefinition = {
   name: string;
   description: string;
@@ -127,6 +129,55 @@ export const builtinTools: ToolDefinition[] = [
         },
       },
       required: ["steps"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "schedule_task",
+    description:
+      "Schedule a recurring background task that runs its prompt automatically every intervalSeconds and reports when something changes. Use for periodic checks such as 'fetch the requirements list every 10 minutes and tell me about updates'. It never disturbs the main conversation; results appear in the Scheduled Tasks panel.",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description:
+            "What to do on every run, e.g. 'fetch the requirements list and summarize any changes'",
+        },
+        intervalSeconds: {
+          type: "number",
+          description: "How often to run, in seconds (e.g. 600 for 10 minutes). Min 30.",
+        },
+        label: {
+          type: "string",
+          description: "Short label shown in the Scheduled Tasks panel",
+        },
+      },
+      required: ["prompt", "intervalSeconds"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "unschedule_task",
+    description: "Cancel a recurring background task by its id.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "Task id returned by schedule_task",
+        },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_scheduled_tasks",
+    description: "List the currently scheduled recurring background tasks.",
+    parameters: {
+      type: "object",
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -356,9 +407,86 @@ function updatePlan(args: Record<string, unknown>): string {
   ].join("\n");
 }
 
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return `${seconds}s`;
+  if (seconds === 0) return `${minutes}m`;
+  return `${minutes}m ${seconds}s`;
+}
+
+function runScheduleTask(
+  args: Record<string, unknown>,
+  scheduleManager?: ScheduledTaskManager | null,
+): string {
+  if (!scheduleManager) {
+    return "Error: scheduled task support is not available in this runtime";
+  }
+  const intervalSeconds = Number(args.intervalSeconds);
+  if (!Number.isFinite(intervalSeconds) || intervalSeconds < 30) {
+    return "Error: intervalSeconds must be a number of at least 30";
+  }
+  const prompt = String(args.prompt ?? "").trim();
+  if (!prompt) {
+    return "Error: prompt is required";
+  }
+  const label = String(args.label ?? "").trim() || "Scheduled task";
+  const task = scheduleManager.schedule({
+    label,
+    prompt,
+    intervalSeconds: Math.round(intervalSeconds),
+  });
+  return `Scheduled task "${task.label}" runs every ${formatDuration(
+    task.intervalSeconds * 1000,
+  )}. id=${task.id}`;
+}
+
+function runUnscheduleTask(
+  args: Record<string, unknown>,
+  scheduleManager?: ScheduledTaskManager | null,
+): string {
+  if (!scheduleManager) {
+    return "Error: scheduled task support is not available in this runtime";
+  }
+  const id = String(args.id ?? "").trim();
+  if (!id) {
+    return "Error: id is required";
+  }
+  const result = scheduleManager.unschedule(id);
+  if (!result.ok) {
+    return `Error: ${result.error ?? "unknown task"}`;
+  }
+  return `Scheduled task ${id} cancelled`;
+}
+
+function runListScheduledTasks(
+  _args: Record<string, unknown>,
+  scheduleManager?: ScheduledTaskManager | null,
+): string {
+  if (!scheduleManager) {
+    return "Error: scheduled task support is not available in this runtime";
+  }
+  const tasks = scheduleManager.list();
+  if (tasks.length === 0) {
+    return "No scheduled tasks";
+  }
+  return tasks
+    .map((task) => {
+      const state = task.running
+        ? "running"
+        : `next in ${formatDuration(Math.max(0, task.nextRunAt - Date.now()))}`;
+      return `[${task.lastStatus}] ${task.label} · ${state} · id=${task.id}${
+        task.unread ? " · update" : ""
+      }`;
+    })
+    .join("\n");
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
+  scheduleManager?: ScheduledTaskManager | null,
 ): Promise<string> {
   try {
     switch (name) {
@@ -374,6 +502,12 @@ export async function executeTool(
         return await runGrep(args);
       case "update_plan":
         return updatePlan(args);
+      case "schedule_task":
+        return runScheduleTask(args, scheduleManager);
+      case "unschedule_task":
+        return runUnscheduleTask(args, scheduleManager);
+      case "list_scheduled_tasks":
+        return runListScheduledTasks(args, scheduleManager);
       default:
         return `Error: unknown tool "${name}"`;
     }

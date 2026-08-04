@@ -155,12 +155,9 @@ fn read_install_dir_marker() -> Option<PathBuf> {
 }
 
 pub fn repo_root_from_exe() -> Option<PathBuf> {
-    for root in repo_root_candidates() {
-        if root.join("apps/server/src/index.ts").is_file() {
-            return Some(root);
-        }
-    }
-    None
+    repo_root_candidates()
+        .into_iter()
+        .find(|root| root.join("apps/server/src/index.ts").is_file())
 }
 
 fn repo_root_candidates() -> Vec<PathBuf> {

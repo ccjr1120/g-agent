@@ -312,27 +312,10 @@ fn user_line_spans(
     prefix: &str,
     base_style: ratatui::style::Style,
 ) -> Vec<Span<'static>> {
-    const MARKER: &str = "[Pasted text #";
-    let mut spans = vec![Span::styled(prefix.to_string(), base_style)];
-    if let Some(start) = chunk.find(MARKER) {
-        if start > 0 {
-            spans.push(Span::styled(chunk[..start].to_string(), base_style));
-        }
-        let end = chunk[start..]
-            .find(']')
-            .map(|idx| start + idx + 1)
-            .unwrap_or(chunk.len());
-        spans.push(Span::styled(
-            chunk[start..end].to_string(),
-            style::paste_chip(),
-        ));
-        if end < chunk.len() {
-            spans.push(Span::styled(chunk[end..].to_string(), base_style));
-        }
-    } else {
-        spans.push(Span::styled(chunk.to_string(), base_style));
-    }
-    spans
+    vec![
+        Span::styled(prefix.to_string(), base_style),
+        Span::styled(chunk.to_string(), base_style),
+    ]
 }
 
 fn push_assistant_plain(lines: &mut Vec<Line<'static>>, text: &str) {

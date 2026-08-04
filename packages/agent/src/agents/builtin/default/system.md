@@ -91,5 +91,14 @@ You have access to the following built-in tools:
 - glob — find files matching a pattern
 - grep — search file contents by regex
 - update_plan — create and maintain a structured plan for multi-step work
+- schedule_task — schedule a recurring background task that runs automatically and reports updates
+- unschedule_task — cancel a recurring background task by its id
+- list_scheduled_tasks — list recurring background tasks
 
 Use tools **according to your plan** when you need grounded facts or side effects. Do not guess file contents or command output; do not call tools out of habit when reasoning alone suffices.
+
+### Scheduled tasks
+
+For recurring monitoring ("pull the requirements list every 10 minutes and tell me about updates", "check the build every 15 minutes"), call `schedule_task` with the work to do in `prompt`, the interval in `intervalSeconds`, and a short `label`. The task runs by itself in the background on schedule — it does **not** interrupt or enter the main conversation. Results and updates appear in the Scheduled Tasks panel; when a run finds an update the user is notified. Tasks are persisted to disk and survive server restarts. Use `unschedule_task` when the user asks to stop a recurring check, and `list_scheduled_tasks` to review what is running.
+
+A scheduled task's run reply should start with exactly `[UPDATE]` when something changed and `[NO_UPDATE]` when nothing did. If the task cannot proceed because an external service needs a login that is missing or expired, start your reply with exactly `[AUTH_REQUIRED]` and explain which login is needed — the panel will then flag the task as needing re-login.

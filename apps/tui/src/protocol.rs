@@ -66,6 +66,20 @@ pub enum ClientMessage {
         agent: String,
         history: Vec<ConversationTurn>,
     },
+    #[serde(rename = "scheduled_tasks")]
+    ScheduledTasks,
+    #[serde(rename = "scheduled_task_cancel")]
+    ScheduledTaskCancel {
+        id: String,
+    },
+    #[serde(rename = "scheduled_task_run")]
+    ScheduledTaskRun {
+        id: String,
+    },
+    #[serde(rename = "scheduled_task_history")]
+    ScheduledTaskHistory {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,6 +136,23 @@ pub enum ServerMessage {
     AgentTasks {
         tasks: Vec<AgentTaskInfo>,
     },
+    #[serde(rename = "scheduled_tasks")]
+    ScheduledTasks {
+        tasks: Vec<ScheduledTaskInfo>,
+    },
+    #[serde(rename = "scheduled_task_update")]
+    ScheduledTaskUpdate {
+        task: ScheduledTaskInfo,
+    },
+    #[serde(rename = "scheduled_task_history")]
+    ScheduledTaskHistory {
+        id: String,
+        runs: Vec<ScheduledTaskRun>,
+    },
+    #[serde(rename = "notice")]
+    Notice {
+        message: String,
+    },
     #[serde(rename = "agent_session")]
     AgentSession {
         #[serde(default)]
@@ -145,6 +176,33 @@ pub struct AgentTaskInfo {
     pub activity: Option<String>,
     pub elapsed_ms: u64,
     pub unread: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTaskInfo {
+    pub id: String,
+    pub label: String,
+    pub prompt: String,
+    pub interval_seconds: u64,
+    pub next_run_at: i64,
+    pub running: bool,
+    #[serde(default)]
+    pub last_run_at: Option<i64>,
+    pub last_status: String,
+    #[serde(default)]
+    pub last_summary: Option<String>,
+    pub unread: bool,
+    #[serde(default)]
+    pub auth_required: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTaskRun {
+    pub run_at: i64,
+    pub status: String,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -291,6 +349,85 @@ mod tests {
                 && history.len() == 1
                 && active_turn.content == "working"
                 && active_turn.tools[0].name == "read"
+        ));
+    }
+
+    #[test]
+    fn parses_scheduled_tasks_catalog() {
+        let message = parse_server_message(
+            r#"{"type":"scheduled_tasks","tasks":[{"id":"st01","label":"需求列表","prompt":"fetch requirements","intervalSeconds":600,"nextRunAt":1720000000000,"running":false,"lastStatus":"ok","lastSummary":"新增 2 条需求","unread":true}]}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::ScheduledTasks { tasks })
+                if tasks.len() == 1
+                    && tasks[0].label == "需求列表"
+                    && tasks[0].interval_seconds == 600
+                    && tasks[0].last_status == "ok"
+                    && tasks[0].unread
+        ));
+    }
+
+    #[test]
+    fn parses_scheduled_task_update() {
+        let message = parse_server_message(
+            r#"{"type":"scheduled_task_update","task":{"id":"st01","label":"需求列表","prompt":"fetch","intervalSeconds":600,"nextRunAt":1720000000000,"running":false,"lastRunAt":1720000000000,"lastStatus":"ok","lastSummary":"新增 2 条需求","unread":true}}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::ScheduledTaskUpdate { task })
+                if task.id == "st01" && task.unread && task.last_run_at == Some(1720000000000)
+        ));
+    }
+
+    #[test]
+    fn serializes_scheduled_task_cancel_command() {
+        let raw = serde_json::to_string(&ClientMessage::ScheduledTaskCancel { id: "st01".into() })
+            .expect("serialize scheduled task cancel command");
+        assert_eq!(raw, r#"{"type":"scheduled_task_cancel","id":"st01"}"#);
+    }
+
+    #[test]
+    fn serializes_scheduled_task_run_and_history_commands() {
+        assert_eq!(
+            serde_json::to_string(&ClientMessage::ScheduledTaskRun { id: "st01".into() }).unwrap(),
+            r#"{"type":"scheduled_task_run","id":"st01"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ClientMessage::ScheduledTaskHistory { id: "st01".into() })
+                .unwrap(),
+            r#"{"type":"scheduled_task_history","id":"st01"}"#
+        );
+    }
+
+    #[test]
+    fn parses_scheduled_task_history_and_notice() {
+        let history = parse_server_message(
+            r#"{"type":"scheduled_task_history","id":"st01","runs":[{"runAt":1720000000000,"status":"ok","summary":"no changes"}]}"#,
+        );
+        assert!(matches!(
+            history,
+            Some(ServerMessage::ScheduledTaskHistory { id, runs })
+                if id == "st01" && runs.len() == 1 && runs[0].status == "ok"
+        ));
+
+        let notice =
+            parse_server_message(r#"{"type":"notice","message":"Context window reached"}"#);
+        assert!(matches!(
+            notice,
+            Some(ServerMessage::Notice { message }) if message == "Context window reached"
+        ));
+    }
+
+    #[test]
+    fn parses_auth_required_scheduled_task() {
+        let message = parse_server_message(
+            r#"{"type":"scheduled_tasks","tasks":[{"id":"st01","label":"需求列表","prompt":"fetch","intervalSeconds":600,"nextRunAt":1720000000000,"running":false,"lastStatus":"error","lastSummary":"需要重新登录","unread":true,"authRequired":true}]}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::ScheduledTasks { tasks })
+                if tasks[0].auth_required && tasks[0].last_status == "error"
         ));
     }
 }

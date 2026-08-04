@@ -122,6 +122,10 @@ TUI 内：
 
 启动后默认进入内置 `default` 主会话。`default` 不显示在 Sub Agents 区域，也不负责调用其他 Agent。用户执行 `/agent <name> <message>` 后，子会话会在后台运行，主会话可通过 Sub Agents 区域观察状态；输入 `/<编号>` 可进入子会话查看结果。首条消息会原样发送，并作为固定标题。
 
+#### 定时任务
+
+`default` 内置 `schedule_task` / `unschedule_task` / `list_scheduled_tasks` 工具。告诉 Agent「每 10 分钟拉取一次需求列表，有更新告诉我」即可注册一个后台定时任务：它在自己的调度上独立运行（复用当前 Agent 的工具与 MCP），**不会进入或打断主对话**。结果与更新显示在 **Scheduled Tasks** 面板（类似 Sub Agents 两行布局）；运行发现更新时面板标记「更新」并给出提示。任务**持久化**到磁盘（`$G_AGENT_HOME/scheduled-tasks.json`，默认 `~/.config/g-agent/scheduled-tasks.json`），server 重启后自动恢复（到期的任务顺延一个周期，避免重启瞬间全部执行）。`/scheduled` 刷新列表，`/scheduled run <序号|id>` 立即执行一次，`/scheduled cancel <序号|id>` 取消，`/scheduled history <序号|id>` 查看历次运行记录。若任务因外部服务（如 Meegle）登录过期而无法执行，面板会标记「需重新登录」。
+
 ## 开发
 
 前置：安装 [bun](https://bun.sh)、[pnpm](https://pnpm.io) 与 [Rust](https://rustup.rs)（含 `cargo`）。

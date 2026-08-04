@@ -7,7 +7,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 
 use crate::protocol::{
     parse_server_message, ActiveAgentTurn, AgentInfo, AgentTaskInfo, ClientMessage, McpServerInfo,
-    ServerMessage, SkillInfo,
+    ScheduledTaskInfo, ScheduledTaskRun, ServerMessage, SkillInfo,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,15 +17,9 @@ pub enum ConnectionState {
     Disconnected,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ContextUsage {
     pub percent: u8,
-}
-
-impl Default for ContextUsage {
-    fn default() -> Self {
-        Self { percent: 0 }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +68,13 @@ pub enum AgentEvent {
         history: Vec<crate::protocol::ConversationTurn>,
         active_turn: Option<ActiveAgentTurn>,
     },
+    ScheduledTasks(Vec<ScheduledTaskInfo>),
+    ScheduledTaskUpdate(ScheduledTaskInfo),
+    ScheduledTaskHistory {
+        id: String,
+        runs: Vec<ScheduledTaskRun>,
+    },
+    Notice(String),
 }
 
 pub struct AgentClient {
@@ -240,6 +241,18 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
                 active_turn,
             });
         }
+        ServerMessage::ScheduledTasks { tasks } => {
+            let _ = events.send(AgentEvent::ScheduledTasks(tasks));
+        }
+        ServerMessage::ScheduledTaskUpdate { task } => {
+            let _ = events.send(AgentEvent::ScheduledTaskUpdate(task));
+        }
+        ServerMessage::ScheduledTaskHistory { id, runs } => {
+            let _ = events.send(AgentEvent::ScheduledTaskHistory { id, runs });
+        }
+        ServerMessage::Notice { message } => {
+            let _ = events.send(AgentEvent::Notice(message));
+        }
         ServerMessage::SystemPrompt { .. } | ServerMessage::ToolResult { .. } => {}
     }
 }
@@ -273,6 +286,27 @@ pub fn format_tool_call(name: &str, args: &str) -> String {
                     .count();
                 return format!("Plan · {completed}/{}", steps.len());
             }
+        }
+        if name == "schedule_task" {
+            let label = parsed
+                .get("label")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("Scheduled task");
+            let interval = parsed
+                .get("intervalSeconds")
+                .and_then(|value| value.as_f64())
+                .map(|value| format!(" · every {}s", value.round() as u64))
+                .unwrap_or_default();
+            return format!("Schedule · {label}{interval}");
+        }
+        if name == "unschedule_task" {
+            if let Some(id) = parsed.get("id").and_then(|value| value.as_str()) {
+                return format!("Unschedule · {id}");
+            }
+        }
+        if name == "list_scheduled_tasks" {
+            return "List scheduled tasks".into();
         }
     }
 
@@ -364,6 +398,21 @@ mod tests {
                 r#"{"steps":[{"step":"Inspect","status":"completed"},{"step":"Verify","status":"in_progress"}]}"#
             ),
             "Plan · 1/2"
+        );
+        assert_eq!(
+            format_tool_call(
+                "schedule_task",
+                r#"{"prompt":"fetch","intervalSeconds":600,"label":"需求列表"}"#
+            ),
+            "Schedule · 需求列表 · every 600s"
+        );
+        assert_eq!(
+            format_tool_call("unschedule_task", r#"{"id":"st01"}"#),
+            "Unschedule · st01"
+        );
+        assert_eq!(
+            format_tool_call("list_scheduled_tasks", "{}"),
+            "List scheduled tasks"
         );
     }
 
