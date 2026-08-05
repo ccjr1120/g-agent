@@ -101,7 +101,6 @@ impl StatusBar<'_> {
         }
         let model = display_model(self.model);
         let agent = self.active_agent.to_string();
-        let percent = self.context.percent.min(100);
         let mut spans = Vec::new();
         if !model.is_empty() {
             spans.extend([
@@ -121,8 +120,29 @@ impl StatusBar<'_> {
             ]);
         }
         spans.push(Span::raw(SECTION_GAP));
-        spans.push(Span::styled(format!("{percent}%"), style::status_meta()));
+        // Show concrete token counts when the provider reports a context
+        // window; fall back to a bare percentage otherwise.
+        let context_text = if self.context.max_tokens > 0 {
+            format!(
+                "{}/{}",
+                compact_tokens(self.context.used_tokens),
+                compact_tokens(self.context.max_tokens)
+            )
+        } else {
+            format!("{}%", self.context.percent.min(100))
+        };
+        spans.push(Span::styled(context_text, style::status_meta()));
         Line::from(spans)
+    }
+}
+
+fn compact_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -232,6 +252,19 @@ mod tests {
     #[test]
     fn compact_ring_renders_without_panic() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
-        ContextRing::new(ContextUsage { percent: 50 }).render(Rect::new(0, 0, 1, 1), &mut buf);
+        ContextRing::new(ContextUsage {
+            used_tokens: 0,
+            max_tokens: 0,
+            percent: 50,
+        })
+        .render(Rect::new(0, 0, 1, 1), &mut buf);
+    }
+
+    #[test]
+    fn compacts_token_counts() {
+        assert_eq!(compact_tokens(0), "0");
+        assert_eq!(compact_tokens(1234), "1.2k");
+        assert_eq!(compact_tokens(128000), "128.0k");
+        assert_eq!(compact_tokens(1_500_000), "1.5m");
     }
 }

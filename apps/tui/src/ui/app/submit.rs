@@ -316,6 +316,7 @@ impl App {
                 self.static_lines.remove(user_index);
                 self.shift_line_indices_after_remove(user_index);
                 self.composer.set_restore(text);
+                self.add_status("Removed queued message — restored to editor".into());
                 return true;
             }
             return false;
@@ -344,7 +345,9 @@ impl App {
             self.streaming = None;
             self.streaming_md.reset();
             self.turn_start = None;
+            self.tool_start = None;
             self.client.send(ClientMessage::Cancel);
+            self.add_status("Turn cancelled — your prompt was restored to the editor".into());
             return true;
         }
 
@@ -410,6 +413,7 @@ impl App {
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
+        self.tool_start = None;
         self.context = ContextUsage::default();
         self.session_id = None;
         self.history_scroll = 0;
@@ -426,6 +430,9 @@ impl App {
         self.active_child = None;
         self.main_lines.clear();
         self.view_agent = self.active_agent.clone();
+        self.expand_thinking = false;
+        self.notified_task_slots.clear();
+        self.reset_panel_scroll();
         self.rebuild_commands();
     }
 }

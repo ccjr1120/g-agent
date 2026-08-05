@@ -114,6 +114,7 @@ export async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Pr
         mcpManager: ws.data.mcpManager,
         scheduleManager,
         signal: abortController.signal,
+        agentName: ws.data.activeAgent.name,
       },
     );
   } finally {

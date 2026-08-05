@@ -1,4 +1,5 @@
 use super::*;
+use crossterm::event::MouseButton;
 
 impl App {
     pub(super) fn handle_input(&mut self, event: Event, area: Rect) {
@@ -10,6 +11,9 @@ impl App {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => self.scroll_history(3, transcript_area),
                 MouseEventKind::ScrollDown => self.scroll_history(-3, transcript_area),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.open_link_at(mouse.column, mouse.row);
+                }
                 _ => {}
             },
             Event::Paste(text) => {
@@ -17,6 +21,22 @@ impl App {
                 self.composer.insert_paste(&text);
             }
             _ => {}
+        }
+    }
+
+    /// Open a link under the cursor with the system browser.
+    /// Terminals can't report Cmd in mouse events, so any left-click on a link
+    /// opens it.
+    fn open_link_at(&mut self, column: u16, row: u16) {
+        let Some(region) = self.link_regions.iter().find(|region| {
+            row == region.row && column >= region.col_start && column < region.col_end
+        }) else {
+            return;
+        };
+        let url = region.url.clone();
+        match open_url(&url) {
+            Ok(_) => self.add_status(format!("Opening {url}")),
+            Err(error) => self.add_error(format!("Failed to open {url}: {error}")),
         }
     }
 
@@ -93,6 +113,37 @@ impl App {
             return;
         }
 
+        // Ctrl+C mirrors Esc: close the command menu, otherwise cancel the
+        // running/queued turn (matching the universal "interrupt" expectation).
+        if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.composer.menu_open {
+                self.composer.clear();
+            } else {
+                self.revert_last_send();
+            }
+            return;
+        }
+
+        // Ctrl+T toggles expanding long thinking blocks.
+        if matches!(key.code, KeyCode::Char('t')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.expand_thinking = !self.expand_thinking;
+            return;
+        }
+
+        // While a panel is focused, route navigation keys to it; Tab returns
+        // to the transcript. The composer is only editable again after
+        // pressing Esc/Tab/Enter to drop focus.
+        if !self.composer.menu_open && !self.input_history.is_browsing() {
+            if self.panel_focus != PanelFocus::Transcript {
+                if self.handle_panel_key(key) {
+                    return;
+                }
+            } else if matches!(key.code, KeyCode::Tab) && key.modifiers.is_empty() {
+                self.cycle_panel_focus();
+                return;
+            }
+        }
+
         // History browse owns ↑/↓/Enter so slash-looking recalls (e.g. `/resume …`)
         // never trap keys in the command menu.
         if self.input_history.is_browsing() {
@@ -152,6 +203,16 @@ impl App {
             KeyCode::Enter => {
                 self.submit_composer();
             }
+            // Cmd+Backspace deletes the whole logical line (macOS muscle memory).
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SUPER) => {
+                self.leave_input_history_browse();
+                self.composer.delete_current_line();
+            }
+            // Option+Backspace deletes the previous word.
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.leave_input_history_browse();
+                self.composer.delete_word_backward();
+            }
             KeyCode::Backspace => {
                 self.leave_input_history_browse();
                 self.composer.delete_backward();
@@ -160,11 +221,27 @@ impl App {
                 self.leave_input_history_browse();
                 self.composer.delete_current_line();
             }
+            KeyCode::Delete if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.leave_input_history_browse();
+                self.composer.delete_word_forward();
+            }
             KeyCode::Delete => {
                 self.leave_input_history_browse();
                 self.composer.delete_forward();
             }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::SUPER) => {
+                self.composer.textarea.move_home();
+            }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.composer.move_word_left();
+            }
             KeyCode::Left => self.composer.textarea.move_left(),
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::SUPER) => {
+                self.composer.textarea.move_end();
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.composer.move_word_right();
+            }
             KeyCode::Right => self.composer.textarea.move_right(),
             KeyCode::Home => self.composer.textarea.move_home(),
             KeyCode::End => self.composer.textarea.move_end(),
@@ -176,6 +253,32 @@ impl App {
             }
             KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) && ch == 'y' => {
                 self.copy_last_reply();
+            }
+            // readline-style editing: Ctrl+A/E move to line start/end, Ctrl+K/U
+            // kill to line end/start, Ctrl+W delete previous word, Ctrl+D delete forward.
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.leave_input_history_browse();
+                self.composer.textarea.move_home();
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.leave_input_history_browse();
+                self.composer.textarea.move_end();
+            }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.leave_input_history_browse();
+                self.composer.delete_to_line_end();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.leave_input_history_browse();
+                self.composer.delete_to_line_start();
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.leave_input_history_browse();
+                self.composer.delete_word_backward();
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.leave_input_history_browse();
+                self.composer.delete_forward();
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::SUPER) => {
                 self.copy_last_reply();
@@ -276,5 +379,60 @@ impl App {
         self.composer.menu_open = false;
         self.composer.menu_index = 0;
         self.composer.open_group = None;
+    }
+
+    /// Keys consumed while a panel is focused. Returns true when handled.
+    fn handle_panel_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up => {
+                self.scroll_focused_panel(-1);
+                true
+            }
+            KeyCode::Down => {
+                self.scroll_focused_panel(1);
+                true
+            }
+            KeyCode::PageUp => {
+                self.scroll_focused_panel(-5);
+                true
+            }
+            KeyCode::PageDown => {
+                self.scroll_focused_panel(5);
+                true
+            }
+            KeyCode::Home => {
+                self.scroll_focused_panel(-i16::MAX);
+                true
+            }
+            KeyCode::End => {
+                self.scroll_focused_panel(i16::MAX);
+                true
+            }
+            KeyCode::Tab | KeyCode::Esc | KeyCode::Enter => {
+                self.reset_panel_scroll();
+                true
+            }
+            // Consume everything else so typing doesn't land in the composer
+            // while a panel owns focus.
+            _ => true,
+        }
+    }
+}
+
+/// Open a URL with the platform's default browser.
+fn open_url(url: &str) -> std::io::Result<std::process::Child> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()
     }
 }

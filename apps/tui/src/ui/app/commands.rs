@@ -226,9 +226,16 @@ impl App {
             "\nKeys:\n",
             "  Enter send · Shift+Enter newline · Tab complete command\n",
             "  ↑/↓ recall previous prompts (shared across agents) · menu when open\n",
+            "  Cmd+←/→ or Ctrl+A/E jump to line start/end\n",
+            "  Option+←/→ or Ctrl+W delete/move by word\n",
+            "  Cmd+Delete deletes the whole line\n",
+            "  Ctrl+K/U delete to line end/start · Ctrl+D delete forward\n",
             "  PageUp/PageDown scroll conversation\n",
+            "  Ctrl+C cancel the running/queued turn · Esc undo last send / cancel\n",
+            "  Ctrl+T expand or collapse long thinking blocks\n",
+            "  Tab cycles focus through Scheduled Tasks / Sub Agents panels (↑↓/PgUp/PgDn scroll, Esc returns)\n",
+            "  Click a link in the transcript to open it in the browser\n",
             "  Cmd+0 or Alt+0 return to the main agent\n",
-            "  Esc undo last send / clear input / cancel a running turn\n",
             "  Ctrl+Y or Cmd+C copy last reply\n",
         ));
         out

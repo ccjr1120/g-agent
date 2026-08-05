@@ -36,6 +36,7 @@ impl App {
                         .map(|tool| ToolCallDisplay {
                             label: format_tool_call(&tool.name, &tool.args),
                             name: tool.name,
+                            status: ToolStatus::Done,
                         })
                         .collect(),
                     duration_ms: turn.duration_ms,
@@ -54,6 +55,7 @@ impl App {
                 .map(|tool| ToolCallDisplay {
                     label: format_tool_call(&tool.name, &tool.args),
                     name: tool.name,
+                    status: ToolStatus::Running,
                 })
                 .collect(),
             duration_ms: None,
@@ -62,11 +64,13 @@ impl App {
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
+        self.tool_start = None;
         self.in_flight = None;
         self.send_queue.clear();
         self.streaming_md.reset();
         self.markdown_cache.clear();
         self.history_scroll = 0;
+        self.reset_panel_scroll();
         self.restore_active_child_progress();
         self.rebuild_commands();
     }

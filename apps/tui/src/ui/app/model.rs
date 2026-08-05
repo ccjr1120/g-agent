@@ -7,6 +7,15 @@ pub enum PendingSessionOpen {
     Task(u64),
 }
 
+/// Which region has keyboard focus. Panels are scrollable when focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelFocus {
+    #[default]
+    Transcript,
+    Scheduled,
+    Tasks,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlanStep {
     pub(super) text: String,

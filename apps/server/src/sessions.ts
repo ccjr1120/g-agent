@@ -266,6 +266,7 @@ export async function runAgentSessionPrompt(
         mcpManager: task.mcpManager,
         scheduleManager,
         signal: abortController.signal,
+        agentName: task.agent.name,
       },
     );
   } finally {

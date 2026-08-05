@@ -164,6 +164,7 @@ export async function runScheduledTask(task: ScheduledTask): Promise<void> {
         mcpManager: task.mcpManager,
         scheduleManager,
         signal: abortController.signal,
+        agentName: initialAgent.name,
       },
     );
   } catch {

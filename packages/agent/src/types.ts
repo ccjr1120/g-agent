@@ -7,6 +7,12 @@ export type AgentRunOptions = {
   scheduleManager?: ScheduledTaskManager | null;
   /** Cancels an in-flight model request. */
   signal?: AbortSignal;
+  /**
+   * Name of the agent running this turn. Exposed to subprocesses (e.g. bash)
+   * as `G_AGENT_AGENT` so per-agent skills like memory-manager write to the
+   * correct agent's data instead of the global default.
+   */
+  agentName?: string;
 };
 
 export type AgentStreamEvent =

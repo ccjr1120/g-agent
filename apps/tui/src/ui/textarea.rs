@@ -60,6 +60,42 @@ impl TextArea {
         self.text.replace_range(self.cursor..next, "");
     }
 
+    /// Move to the start of the previous word (skipping separators).
+    pub fn move_word_left(&mut self) {
+        self.cursor = self.previous_word_start(self.cursor);
+    }
+
+    /// Move to the start of the next word.
+    pub fn move_word_right(&mut self) {
+        self.cursor = self.next_word_start(self.cursor);
+    }
+
+    /// Delete the word immediately before the cursor.
+    pub fn delete_word_backward(&mut self) {
+        let start = self.previous_word_start(self.cursor);
+        self.text.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    /// Delete the word immediately after the cursor.
+    pub fn delete_word_forward(&mut self) {
+        let end = self.next_word_end(self.cursor);
+        self.text.replace_range(self.cursor..end, "");
+    }
+
+    /// Delete from the start of the line up to the cursor.
+    pub fn delete_to_line_start(&mut self) {
+        let start = self.line_start(self.cursor);
+        self.text.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    /// Delete from the cursor to the end of the line.
+    pub fn delete_to_line_end(&mut self) {
+        let end = self.line_end(self.cursor);
+        self.text.replace_range(self.cursor..end, "");
+    }
+
     pub fn move_left(&mut self) {
         if self.cursor == 0 {
             return;
@@ -176,6 +212,78 @@ impl TextArea {
             .unwrap_or(self.text.len())
     }
 
+    fn prev_char_start(&self, pos: usize) -> usize {
+        let mut index = pos;
+        while index > 0 {
+            index -= 1;
+            if self.text.is_char_boundary(index) {
+                return index;
+            }
+        }
+        0
+    }
+
+    fn previous_word_start(&self, from: usize) -> usize {
+        let mut pos = from;
+        while pos > 0 {
+            let prev = self.prev_char_start(pos);
+            let ch = self.text[prev..pos].chars().next().unwrap();
+            if is_word_char(ch) {
+                break;
+            }
+            pos = prev;
+        }
+        while pos > 0 {
+            let prev = self.prev_char_start(pos);
+            let ch = self.text[prev..pos].chars().next().unwrap();
+            if !is_word_char(ch) {
+                break;
+            }
+            pos = prev;
+        }
+        pos
+    }
+
+    fn next_word_start(&self, from: usize) -> usize {
+        let mut pos = from;
+        // Skip past the current word (if the cursor sits on one).
+        while pos < self.text.len() {
+            let ch = self.text[pos..].chars().next().unwrap();
+            if !is_word_char(ch) {
+                break;
+            }
+            pos += ch.len_utf8();
+        }
+        // Skip past separators to the start of the next word.
+        while pos < self.text.len() {
+            let ch = self.text[pos..].chars().next().unwrap();
+            if is_word_char(ch) {
+                break;
+            }
+            pos += ch.len_utf8();
+        }
+        pos
+    }
+
+    fn next_word_end(&self, from: usize) -> usize {
+        let mut pos = from;
+        while pos < self.text.len() {
+            let ch = self.text[pos..].chars().next().unwrap();
+            if is_word_char(ch) {
+                break;
+            }
+            pos += ch.len_utf8();
+        }
+        while pos < self.text.len() {
+            let ch = self.text[pos..].chars().next().unwrap();
+            if !is_word_char(ch) {
+                break;
+            }
+            pos += ch.len_utf8();
+        }
+        pos
+    }
+
     fn prev_boundary(&self, offset: usize) -> usize {
         if offset == 0 {
             return 0;
@@ -223,6 +331,10 @@ fn line_index_for_offset(lines: &[WrappedLine], offset: usize) -> Option<usize> 
     } else {
         Some(idx - 1)
     }
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 pub struct TextAreaWidget<'a> {
@@ -339,5 +451,78 @@ mod tests {
         textarea.delete_current_line();
         assert_eq!(textarea.text(), "line1");
         assert_eq!(textarea.cursor, 5);
+    }
+
+    #[test]
+    fn word_movement_skips_separators() {
+        let mut textarea = TextArea::new();
+        textarea.insert_str("foo bar baz");
+        textarea.move_end();
+        textarea.move_word_left();
+        assert_eq!(&textarea.text()[..textarea.cursor], "foo bar ");
+        textarea.move_word_left();
+        assert_eq!(&textarea.text()[..textarea.cursor], "foo ");
+        textarea.move_word_left();
+        assert_eq!(textarea.cursor, 0);
+    }
+
+    #[test]
+    fn word_movement_right_lands_on_next_word_start() {
+        let mut textarea = TextArea::new();
+        textarea.insert_str("foo  bar baz");
+        textarea.move_home();
+        textarea.move_word_right();
+        assert_eq!(&textarea.text()[textarea.cursor..], "bar baz");
+        textarea.move_word_right();
+        assert_eq!(&textarea.text()[textarea.cursor..], "baz");
+        textarea.move_word_right();
+        assert_eq!(textarea.cursor, textarea.text().len());
+    }
+
+    #[test]
+    fn delete_word_backward_removes_previous_word() {
+        let mut textarea = TextArea::new();
+        textarea.insert_str("hello cruel world");
+        textarea.move_end();
+        textarea.delete_word_backward();
+        assert_eq!(textarea.text(), "hello cruel ");
+        textarea.delete_word_backward();
+        assert_eq!(textarea.text(), "hello ");
+        textarea.delete_word_backward();
+        assert_eq!(textarea.text(), "");
+        assert_eq!(textarea.cursor, 0);
+    }
+
+    #[test]
+    fn delete_word_forward_removes_next_word() {
+        let mut textarea = TextArea::new();
+        textarea.insert_str("hello cruel world");
+        textarea.move_home();
+        textarea.move_word_right();
+        assert_eq!(&textarea.text()[textarea.cursor..], "cruel world");
+        textarea.delete_word_forward();
+        assert_eq!(textarea.text(), "hello  world");
+    }
+
+    #[test]
+    fn delete_to_line_start_keeps_rest_of_line() {
+        let mut textarea = TextArea::new();
+        textarea.insert_str("keep\ndrop me");
+        textarea.move_end();
+        textarea.delete_to_line_start();
+        assert_eq!(textarea.text(), "keep\n");
+        assert_eq!(textarea.cursor, 5);
+    }
+
+    #[test]
+    fn delete_to_line_end_keeps_line_start() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("abc def\nsecond".into());
+        textarea.move_right();
+        textarea.move_right();
+        textarea.move_right();
+        textarea.delete_to_line_end();
+        assert_eq!(textarea.text(), "abc\nsecond");
+        assert_eq!(textarea.cursor, 3);
     }
 }

@@ -83,6 +83,34 @@ impl Composer {
         self.on_text_changed();
     }
 
+    pub fn move_word_left(&mut self) {
+        self.textarea.move_word_left();
+    }
+
+    pub fn move_word_right(&mut self) {
+        self.textarea.move_word_right();
+    }
+
+    pub fn delete_word_backward(&mut self) {
+        self.textarea.delete_word_backward();
+        self.on_text_changed();
+    }
+
+    pub fn delete_word_forward(&mut self) {
+        self.textarea.delete_word_forward();
+        self.on_text_changed();
+    }
+
+    pub fn delete_to_line_start(&mut self) {
+        self.textarea.delete_to_line_start();
+        self.on_text_changed();
+    }
+
+    pub fn delete_to_line_end(&mut self) {
+        self.textarea.delete_to_line_end();
+        self.on_text_changed();
+    }
+
     pub fn clear(&mut self) {
         self.textarea.set_text(String::new());
         self.open_group = None;

@@ -140,7 +140,13 @@ cargo test -p g-agent-tui
 
 模型请求默认 120 秒超时，并对 408/409/429/5xx 等瞬时错误最多重试 2
 次。可通过 `G_AGENT_REQUEST_TIMEOUT_MS` 和 `G_AGENT_MAX_RETRIES` 调整；在
-TUI 中取消当前回复会立即中止进行中的模型请求。
+TUI 中按 **Esc** 或 **Ctrl+C** 可立即取消当前回复并中止进行中的模型请求（输入会恢复到编辑器）。
+
+工具调用会实时显示状态：执行中的工具带运行计时（`🐚 ls · 00:32`），完成后标记 ✓ / ✗。长篇幅的
+thinking 自动折叠，按 **Ctrl+T** 展开/收起。状态栏会显示 token 用量（如 `12.3k/128k`）。
+
+后台 Agent 或定时任务完成/失败时，主会话会收到通知；**Tab** 可将焦点切换到
+Scheduled Tasks / Sub Agents 面板（↑↓/PageUp/PageDown 滚动，Esc 返回输入区）。
 
 Agent 默认最多运行 25 轮模型请求，可通过 `G_AGENT_MAX_TOOL_ROUNDS` 调整。
 最后一轮会禁用工具并要求模型基于已有结果作答，避免研究型任务因达到上限而

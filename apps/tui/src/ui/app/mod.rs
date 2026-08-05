@@ -6,14 +6,14 @@ mod panels;
 mod sessions;
 mod submit;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
-    cursor::{MoveTo, SetCursorStyle, Show},
+    cursor::{Hide, MoveTo, SetCursorStyle, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
     execute,
 };
@@ -29,7 +29,7 @@ pub(super) use ratatui::text::{Line, Span};
 
 pub(super) use crate::agent::client::{
     format_tool_call, AgentClient, AgentEvent, ChatLine, ConnectionState, ContextUsage,
-    ToolCallDisplay,
+    ToolCallDisplay, ToolStatus,
 };
 pub(super) use crate::protocol::{
     ActiveAgentTurn, AgentInfo, AgentTaskInfo, ClientMessage, ConversationTurn, McpServerInfo,
@@ -42,14 +42,14 @@ pub(super) use crate::session::{
 pub(super) use crate::ui::composer::{
     command_group_id, menu_height, Composer, ComposerWidget, InputHistory, MenuWidget, SlashCommand,
 };
-pub(super) use crate::ui::markdown::{MarkdownCache, StreamingMarkdown};
+pub(super) use crate::ui::markdown::{render_inline_markdown, MarkdownCache, StreamingMarkdown};
 pub(super) use crate::ui::status::{StatusBar, STATUS_HEIGHT};
 pub(super) use crate::ui::theme::style;
 pub(super) use crate::ui::transcript::{
-    assistant_markdown_width, build_transcript_lines, max_history_scroll, TranscriptContent,
-    TranscriptWidget,
+    assistant_markdown_width, build_transcript_lines, link_regions_to_screen, max_history_scroll,
+    transcript_content_area, ScreenLinkRegion, TranscriptContent, TranscriptWidget,
 };
-pub(super) use model::PlanDisplay;
+pub(super) use model::{PanelFocus, PlanDisplay};
 
 pub struct App {
     banner: Vec<String>,
@@ -84,6 +84,21 @@ pub struct App {
     commands: Vec<SlashCommand>,
     command_groups: Vec<(String, Vec<SlashCommand>)>,
     menu_groups_raw: Vec<(String, Vec<SlashCommand>)>,
+
+    /// When the most recent event was a tool call (not text), this tracks the
+    /// running tool's start so the transcript can tick its elapsed time.
+    tool_start: Option<Instant>,
+    /// Show full thinking blocks instead of collapsing long ones.
+    expand_thinking: bool,
+    /// Currently keyboard-focused region; panels are scrollable when focused.
+    panel_focus: PanelFocus,
+    scheduled_scroll: u16,
+    task_scroll: u16,
+    /// Background agent tasks already announced to the user (busy → done).
+    notified_task_slots: HashSet<u64>,
+
+    /// Clickable link rectangles on screen, rebuilt every frame.
+    link_regions: Vec<ScreenLinkRegion>,
 
     history_scroll: u16,
     should_quit: bool,
@@ -138,6 +153,13 @@ impl App {
             commands: Vec::new(),
             command_groups: Vec::new(),
             menu_groups_raw: Vec::new(),
+            tool_start: None,
+            expand_thinking: false,
+            panel_focus: PanelFocus::Transcript,
+            scheduled_scroll: 0,
+            task_scroll: 0,
+            notified_task_slots: HashSet::new(),
+            link_regions: Vec::new(),
             history_scroll: 0,
             should_quit: false,
             session_id: None,
@@ -163,56 +185,98 @@ impl App {
         self.saved_sessions = list_sessions().unwrap_or_default();
         self.rebuild_commands();
 
+        // Force an initial paint, then only redraw when state changed or an
+        // animation is ticking (spinner, tool timer, panel elapsed counters).
+        let mut dirty = true;
+
         loop {
             if self.should_quit {
                 break;
             }
 
             while let Ok(event) = self.events.try_recv() {
+                dirty = true;
                 self.handle_agent_event(event);
             }
 
             if self.composer.restore_pending.is_some() {
                 self.composer.consume_restore();
+                dirty = true;
             }
 
             let size = terminal.size()?;
             let area = Rect::new(0, 0, size.width, size.height);
             let transcript_area = self.transcript_area(area);
-            let width = transcript_area.width;
-            self.last_transcript_width = width;
-            self.sync_streaming_markdown(width);
-            let show_welcome = self.is_welcome_screen();
-            let content = TranscriptContent {
-                lines: &self.static_lines,
-                streaming: self.streaming.as_ref(),
-                waiting: self.waiting_for_reply(),
-                banner: &self.banner,
-                show_welcome,
-                connecting: matches!(self.connection, ConnectionState::Connecting),
-                active_agent: &self.view_agent,
-                fallback: None,
-                clock: self.started_at,
-                turn_start: self.turn_start,
-                width,
-            };
-            let transcript_lines =
-                build_transcript_lines(&content, &mut self.markdown_cache, &self.streaming_md);
 
-            terminal.draw(|frame| {
-                self.render(frame.area(), frame.buffer_mut(), transcript_lines);
-            })?;
-            self.clamp_history_scroll(width, transcript_area.height);
-            if let Some((x, y)) = self.cursor_screen_pos(area) {
-                execute!(stdout(), MoveTo(x, y), Show, SetCursorStyle::BlinkingBar)?;
+            if dirty || self.has_live_animation() {
+                let width = transcript_area.width;
+                self.last_transcript_width = width;
+                self.sync_streaming_markdown(width);
+                let show_welcome = self.is_welcome_screen();
+                let content = TranscriptContent {
+                    lines: &self.static_lines,
+                    streaming: self.streaming.as_ref(),
+                    waiting: self.waiting_for_reply(),
+                    banner: &self.banner,
+                    show_welcome,
+                    connecting: matches!(self.connection, ConnectionState::Connecting),
+                    disconnected: matches!(self.connection, ConnectionState::Disconnected),
+                    active_agent: &self.view_agent,
+                    fallback: None,
+                    clock: self.started_at,
+                    turn_start: self.turn_start,
+                    tool_elapsed: self.tool_start,
+                    expand_thinking: self.expand_thinking,
+                    width,
+                };
+                let (transcript_lines, link_regions) =
+                    build_transcript_lines(&content, &mut self.markdown_cache, &self.streaming_md);
+                let content_area = transcript_content_area(transcript_area);
+                self.link_regions = link_regions_to_screen(
+                    &transcript_lines,
+                    &link_regions,
+                    content_area,
+                    self.history_scroll,
+                );
+
+                terminal.draw(|frame| {
+                    self.render(frame.area(), frame.buffer_mut(), transcript_lines);
+                })?;
+                self.clamp_history_scroll(width, transcript_area.height);
             }
 
-            if event::poll(Duration::from_millis(50))? {
+            if let Some((x, y)) = self.cursor_screen_pos(area) {
+                if self.panel_focus == PanelFocus::Transcript {
+                    execute!(stdout(), MoveTo(x, y), Show, SetCursorStyle::BlinkingBar)?;
+                } else {
+                    execute!(stdout(), Hide)?;
+                }
+            }
+
+            let timeout = if self.has_live_animation() {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_millis(250)
+            };
+            if event::poll(timeout)? {
                 self.handle_input(event::read()?, area);
+                dirty = true;
             }
         }
 
         Ok(())
+    }
+
+    /// True while anything on screen is animating and needs periodic repaints.
+    fn has_live_animation(&self) -> bool {
+        matches!(self.connection, ConnectionState::Connecting)
+            || self.waiting_for_reply()
+            || self.tool_start.is_some()
+            || self.scheduled_tasks.iter().any(|task| task.running)
+            || self
+                .agent_tasks
+                .iter()
+                .any(|task| model::agent_task_is_busy(&task.status))
     }
 
     fn render(
@@ -238,64 +302,125 @@ impl App {
             .render(chunks[1], buf);
         }
 
-        if !self.visible_scheduled_tasks().is_empty() {
-            Paragraph::new(self.scheduled_task_lines(chunks[3].width.saturating_sub(2)))
-                .block(
-                    Block::default()
-                        .title(" Scheduled Tasks ")
-                        .borders(Borders::ALL)
-                        .border_style(style::border()),
-                )
-                .render(chunks[3], buf);
-        }
-
-        if !self.agent_tasks.is_empty() {
-            Paragraph::new(self.agent_task_lines(chunks[4].width.saturating_sub(2)))
-                .block(
-                    Block::default()
-                        .title(" Sub Agents ")
-                        .borders(Borders::ALL)
-                        .border_style(style::border()),
-                )
-                .render(chunks[4], buf);
-        }
-
-        if let Some(plan) = self.active_plan() {
-            let completed = plan
-                .steps
-                .iter()
-                .filter(|step| step.status == "completed")
-                .count();
-            Paragraph::new(self.plan_lines(plan, chunks[2].width.saturating_sub(2)))
-                .block(
-                    Block::default()
-                        .title(format!(" Plan {completed}/{} ", plan.steps.len()))
-                        .borders(Borders::ALL)
-                        .border_style(style::border()),
-                )
-                .render(chunks[2], buf);
-        }
+        self.render_panels(chunks[2], buf);
 
         let menu_items = self.current_menu_items();
-        MenuWidget::new(&self.composer, &menu_items).render(chunks[5], buf);
+        MenuWidget::new(&self.composer, &menu_items).render(chunks[3], buf);
         StatusBar {
             connection: self.connection,
             model: &self.model,
             active_agent: &self.view_agent,
             context: self.context.clone(),
         }
-        .render(chunks[6], buf);
+        .render(chunks[4], buf);
 
         let composer_area = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(style::border());
-        let inner = composer_area.inner(chunks[7]);
-        composer_area.render(chunks[7], buf);
+        let inner = composer_area.inner(chunks[5]);
+        composer_area.render(chunks[5], buf);
         ComposerWidget::new(
             &self.composer,
             !matches!(self.connection, ConnectionState::Connected),
         )
         .render(inner, buf);
+    }
+
+    /// Render the Plan / Scheduled Tasks / Sub Agents stack. A 1-row spacer
+    /// above every visible panel keeps it from touching the transcript or the
+    /// panel above it.
+    fn render_panels(&self, region: Rect, buf: &mut ratatui::buffer::Buffer) {
+        if region.height == 0 {
+            return;
+        }
+        let mut y = region.y.saturating_add(1);
+        if let Some(plan) = self.active_plan() {
+            let height = self.plan_height();
+            let rect = Rect {
+                x: region.x,
+                y,
+                width: region.width,
+                height,
+            };
+            let completed = plan
+                .steps
+                .iter()
+                .filter(|step| step.status == "completed")
+                .count();
+            Paragraph::new(self.plan_lines(plan, rect.width.saturating_sub(2)))
+                .block(
+                    Block::default()
+                        .title(format!(" Plan {completed}/{} ", plan.steps.len()))
+                        .borders(Borders::ALL)
+                        .border_style(style::border()),
+                )
+                .render(rect, buf);
+            y = y.saturating_add(height).saturating_add(1);
+        }
+
+        if !self.visible_scheduled_tasks().is_empty() {
+            let height = self.scheduled_height();
+            let rect = Rect {
+                x: region.x,
+                y,
+                width: region.width,
+                height,
+            };
+            let border = if self.panel_focus == PanelFocus::Scheduled {
+                style::panel_focused()
+            } else {
+                style::border()
+            };
+            let visible = self.visible_scheduled_tasks().len().min(3);
+            let title = if visible < self.visible_scheduled_tasks().len() {
+                format!(
+                    " Scheduled Tasks ({visible}/{}) ",
+                    self.visible_scheduled_tasks().len()
+                )
+            } else {
+                " Scheduled Tasks ".into()
+            };
+            Paragraph::new(
+                self.scheduled_task_lines(rect.width.saturating_sub(2), self.scheduled_scroll),
+            )
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(border),
+            )
+            .render(rect, buf);
+            y = y.saturating_add(height).saturating_add(1);
+        }
+
+        if !self.agent_tasks.is_empty() {
+            let height = self.task_height();
+            let rect = Rect {
+                x: region.x,
+                y,
+                width: region.width,
+                height,
+            };
+            let border = if self.panel_focus == PanelFocus::Tasks {
+                style::panel_focused()
+            } else {
+                style::border()
+            };
+            let visible = self.agent_tasks.len().min(3);
+            let title = if visible < self.agent_tasks.len() {
+                format!(" Sub Agents ({visible}/{}) ", self.agent_tasks.len())
+            } else {
+                " Sub Agents ".into()
+            };
+            Paragraph::new(self.agent_task_lines(rect.width.saturating_sub(2), self.task_scroll))
+                .block(
+                    Block::default()
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(border),
+                )
+                .render(rect, buf);
+        }
     }
 
     fn input_height(&self, width: u16) -> u16 {
@@ -313,7 +438,7 @@ impl App {
         let chunks = self.layout_chunks(area);
         let inner = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .inner(chunks[7]);
+            .inner(chunks[5]);
         self.composer.cursor_pos(inner, 2)
     }
 
@@ -355,37 +480,60 @@ impl App {
 
     fn layout_chunks(&self, area: Rect) -> Vec<Rect> {
         let menu_items = self.current_menu_items();
-        let plan_height = self
-            .active_plan()
-            .map(|plan| plan.steps.len().min(5) as u16 + 2)
-            .unwrap_or(0);
-        let task_height = if self.agent_tasks.is_empty() {
-            0
-        } else {
-            (self.agent_tasks.len().min(3) as u16)
-                .saturating_mul(2)
-                .saturating_add(2)
-        };
-        let scheduled_height = if self.visible_scheduled_tasks().is_empty() {
-            0
-        } else {
-            (self.visible_scheduled_tasks().len().min(3) as u16)
-                .saturating_mul(2)
-                .saturating_add(2)
-        };
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),
                 Constraint::Length(if self.history_scroll > 0 { 1 } else { 0 }),
-                Constraint::Length(plan_height),
-                Constraint::Length(scheduled_height),
-                Constraint::Length(task_height),
+                Constraint::Length(self.panel_region_height()),
                 Constraint::Length(menu_height(&self.composer, &menu_items)),
                 Constraint::Length(STATUS_HEIGHT),
                 Constraint::Length(self.input_height(area.width)),
             ])
             .split(area)
             .to_vec()
+    }
+
+    fn plan_height(&self) -> u16 {
+        self.active_plan()
+            .map(|plan| plan.steps.len().min(5) as u16 + 2)
+            .unwrap_or(0)
+    }
+
+    fn scheduled_height(&self) -> u16 {
+        if self.visible_scheduled_tasks().is_empty() {
+            0
+        } else {
+            (self.visible_scheduled_tasks().len().min(3) as u16)
+                .saturating_mul(2)
+                .saturating_add(2)
+        }
+    }
+
+    fn task_height(&self) -> u16 {
+        if self.agent_tasks.is_empty() {
+            0
+        } else {
+            (self.agent_tasks.len().min(3) as u16)
+                .saturating_mul(2)
+                .saturating_add(2)
+        }
+    }
+
+    /// Combined height of the Plan / Scheduled Tasks / Sub Agents panels,
+    /// including a 1-row spacer above each visible panel so panels never touch
+    /// the transcript or each other.
+    fn panel_region_height(&self) -> u16 {
+        let mut height = 0u16;
+        for panel_height in [
+            self.plan_height(),
+            self.scheduled_height(),
+            self.task_height(),
+        ] {
+            if panel_height > 0 {
+                height = height.saturating_add(panel_height).saturating_add(1);
+            }
+        }
+        height
     }
 }

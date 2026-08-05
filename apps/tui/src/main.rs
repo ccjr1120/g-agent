@@ -12,7 +12,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::{
     cursor::{Hide, Show},
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -133,6 +136,18 @@ async fn run_tui(server_url: String, banner: Vec<String>) -> Result<()> {
         EnterAlternateScreen,
         EnableMouseCapture,
         EnableBracketedPaste,
+        // Ask the terminal for disambiguated key events so Cmd/Option+arrows
+        // and Cmd+Backspace are reported with modifiers (ignored silently by
+        // terminals that don't support the kitty keyboard protocol).
+        //
+        // NOTE: REPORT_ALL_KEYS_AS_ESCAPE_CODES / REPORT_EVENT_TYPES must stay
+        // OFF — they make the terminal report every key (including the keys a
+        // macOS IME consumes to pick a Chinese candidate) to the app, leaking
+        // digits like "1" into the input while composing.
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        ),
         Hide
     )?;
 
@@ -142,6 +157,7 @@ async fn run_tui(server_url: String, banner: Vec<String>) -> Result<()> {
         stdout,
         DisableMouseCapture,
         DisableBracketedPaste,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         Show
     )?;

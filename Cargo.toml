@@ -1,6 +1,9 @@
 [workspace]
-members = ["apps/tui"]
+members = ["apps/tui", "crates/markdown-ratatui"]
 resolver = "2"
+
+[patch.crates-io]
+codewandler-markdown-ratatui = { path = "crates/markdown-ratatui" }
 
 [workspace.package]
 version = "0.1.0"

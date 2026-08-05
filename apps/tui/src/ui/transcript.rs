@@ -6,8 +6,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::agent::client::{ChatLine, ToolCallDisplay};
-use crate::ui::markdown::{MarkdownCache, StreamingMarkdown};
+use crate::agent::client::{ChatLine, ToolCallDisplay, ToolStatus};
+use crate::ui::markdown::{LinkRegion, MarkdownCache, StreamingMarkdown};
 use crate::ui::spinner::spinner_line;
 use crate::ui::theme::style;
 
@@ -21,6 +21,9 @@ const THINKING_CONTINUATION: &str = "  ";
 const TRANSCRIPT_LEFT_PADDING: u16 = 1;
 /// Blank lines above the startup banner for breathing room from the terminal top.
 const BANNER_TOP_PADDING_LINES: usize = 2;
+/// Thinking blocks longer than this are collapsed until the user toggles them.
+const THINKING_COLLAPSE_LINES: usize = 8;
+const THINKING_COLLAPSE_SHOWN: usize = 4;
 
 fn content_width(viewport_width: u16) -> u16 {
     viewport_width
@@ -53,10 +56,16 @@ pub struct TranscriptContent<'a> {
     pub banner: &'a [String],
     pub show_welcome: bool,
     pub connecting: bool,
+    pub disconnected: bool,
     pub active_agent: &'a str,
     pub fallback: Option<(&'a str, &'a str)>,
     pub clock: Instant,
     pub turn_start: Option<Instant>,
+    /// When set, the most recent tool call is still running and its elapsed
+    /// time should tick on the last tool line.
+    pub tool_elapsed: Option<Instant>,
+    /// Show full thinking blocks instead of collapsing long ones.
+    pub expand_thinking: bool,
     pub width: u16,
 }
 
@@ -64,9 +73,17 @@ pub fn build_transcript_lines(
     content: &TranscriptContent<'_>,
     markdown: &mut MarkdownCache,
     streaming_md: &StreamingMarkdown,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<LinkRegion>) {
     let mut rendered: Vec<Line<'static>> = Vec::new();
+    let mut links: Vec<LinkRegion> = Vec::new();
     let width = content_width(content.width.max(1));
+
+    if content.disconnected {
+        rendered.push(Line::from(Span::styled(
+            "! Connection lost — reconnecting…",
+            style::warning(),
+        )));
+    }
 
     if !content.banner.is_empty() {
         for _ in 0..BANNER_TOP_PADDING_LINES {
@@ -112,7 +129,14 @@ pub fn build_transcript_lines(
     // Keep queued follow-ups after the live turn so order stays
     // user → reply → queued, not user → queued → reply.
     for line in content.lines.iter().filter(|line| !line.queued) {
-        push_chat_line(&mut rendered, line, width, markdown);
+        push_chat_line(
+            &mut rendered,
+            &mut links,
+            line,
+            width,
+            markdown,
+            content.expand_thinking,
+        );
     }
 
     if content.waiting {
@@ -123,36 +147,66 @@ pub fn build_transcript_lines(
             false,
         ));
     } else if let Some(line) = content.streaming {
-        push_streaming_line(&mut rendered, line, width, markdown, streaming_md);
+        push_streaming_line(
+            &mut rendered,
+            &mut links,
+            line,
+            width,
+            markdown,
+            streaming_md,
+            content.tool_elapsed,
+            content.expand_thinking,
+        );
     }
 
     for line in content.lines.iter().filter(|line| line.queued) {
-        push_chat_line(&mut rendered, line, width, markdown);
+        push_chat_line(
+            &mut rendered,
+            &mut links,
+            line,
+            width,
+            markdown,
+            content.expand_thinking,
+        );
     }
 
-    rendered
+    (rendered, links)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_streaming_line(
     lines: &mut Vec<Line<'static>>,
+    links: &mut Vec<LinkRegion>,
     line: &ChatLine,
     width: u16,
     markdown: &mut MarkdownCache,
     streaming_md: &StreamingMarkdown,
+    tool_elapsed: Option<Instant>,
+    expand_thinking: bool,
 ) {
     if line.role == "user" {
-        push_chat_line(lines, line, width, markdown);
+        push_chat_line(lines, links, line, width, markdown, expand_thinking);
         return;
     }
 
-    for tool in &line.tools {
-        lines.push(tool_line(tool));
+    let last_tool = line.tools.len().saturating_sub(1);
+    for (index, tool) in line.tools.iter().enumerate() {
+        let elapsed = if index == last_tool {
+            tool_elapsed.map(|start| start.elapsed())
+        } else {
+            None
+        };
+        lines.push(tool_line(tool, elapsed));
     }
-    push_thinking_text(lines, &line.thinking);
+    push_thinking_text(lines, &line.thinking, expand_thinking);
     if streaming_md.lines().is_empty() {
         push_assistant_plain(lines, &line.text);
     } else {
+        let base = lines.len() as u16;
         lines.extend(prefix_assistant_lines(streaming_md.lines()));
+        for region in streaming_md.links() {
+            links.push(offset_link_region(region, base, 2));
+        }
     }
     lines.push(Line::from(""));
 }
@@ -166,7 +220,7 @@ pub fn max_history_scroll(
     if height == 0 {
         return 0;
     }
-    let lines = build_transcript_lines(content, markdown, streaming_md);
+    let (lines, _) = build_transcript_lines(content, markdown, streaming_md);
     let total = line_count(&lines, content_width(content.width.max(1)));
     total.saturating_sub(height)
 }
@@ -238,9 +292,11 @@ impl Widget for TranscriptWidget {
 
 fn push_chat_line(
     lines: &mut Vec<Line<'static>>,
+    links: &mut Vec<LinkRegion>,
     line: &ChatLine,
     width: u16,
     markdown: &mut MarkdownCache,
+    expand_thinking: bool,
 ) {
     match line.role.as_str() {
         "user" => push_user_text(lines, &line.text, line.queued),
@@ -252,12 +308,23 @@ fn push_chat_line(
                 )));
             }
         }
+        // System feedback (e.g. "/reload", copy confirmations) and command
+        // results (/log, /resume all) are not assistant replies — keep them
+        // visually distinct from the assistant's own voice.
+        "status" | "local" => {
+            for chunk in line.text.lines() {
+                lines.push(Line::from(vec![
+                    Span::styled("ℹ ", style::system()),
+                    Span::styled(chunk.to_string(), style::system()),
+                ]));
+            }
+        }
         _ => {
             for tool in &line.tools {
-                lines.push(tool_line(tool));
+                lines.push(tool_line(tool, None));
             }
-            push_thinking_text(lines, &line.thinking);
-            push_assistant_body(lines, &line.text, width, markdown);
+            push_thinking_text(lines, &line.thinking, expand_thinking);
+            push_assistant_body(lines, links, &line.text, width, markdown);
         }
     }
 
@@ -271,12 +338,30 @@ fn push_chat_line(
     lines.push(Line::from(""));
 }
 
-fn push_thinking_text(lines: &mut Vec<Line<'static>>, text: &str) {
+/// Render a thinking block. Long blocks are collapsed to a few lines with a
+/// hint unless the user has toggled expansion.
+fn push_thinking_text(lines: &mut Vec<Line<'static>>, text: &str, expand: bool) {
     if text.trim().is_empty() {
         return;
     }
     let style = style::thinking();
-    for chunk in text.lines() {
+    let chunks: Vec<&str> = text.lines().collect();
+    let hidden = chunks.len().saturating_sub(THINKING_COLLAPSE_LINES);
+    if hidden > 0 && !expand {
+        for chunk in chunks.iter().take(THINKING_COLLAPSE_SHOWN) {
+            lines.push(Line::from(vec![
+                Span::styled(THINKING_CONTINUATION, style),
+                Span::styled(chunk.to_string(), style),
+            ]));
+        }
+        let hint = format!("··· {hidden} more thinking lines · Ctrl+T to expand");
+        lines.push(Line::from(vec![
+            Span::styled(THINKING_CONTINUATION, style),
+            Span::styled(hint, style::muted()),
+        ]));
+        return;
+    }
+    for chunk in chunks {
         lines.push(Line::from(vec![
             Span::styled(THINKING_CONTINUATION, style),
             Span::styled(chunk.to_string(), style),
@@ -363,6 +448,7 @@ pub fn assistant_markdown_width(viewport_width: u16) -> u16 {
 
 fn push_assistant_body(
     lines: &mut Vec<Line<'static>>,
+    links: &mut Vec<LinkRegion>,
     text: &str,
     width: u16,
     markdown: &mut MarkdownCache,
@@ -371,22 +457,113 @@ fn push_assistant_body(
         return;
     }
     let body_width = assistant_body_width(width);
-    let rendered = markdown.render_static(text, body_width);
+    let (rendered, rendered_links) = markdown.render_static_with_links(text, body_width);
     if rendered.is_empty() {
         push_assistant_plain(lines, text);
-    } else {
-        lines.extend(prefix_assistant_lines(rendered));
+        return;
+    }
+    let base = lines.len() as u16;
+    lines.extend(prefix_assistant_lines(rendered));
+    for region in rendered_links {
+        links.push(offset_link_region(region, base, 2));
     }
 }
 
-fn tool_line(tool: &ToolCallDisplay) -> Line<'static> {
-    Line::from(Span::styled(
+/// Shift a link region from "markdown block" space into the transcript lines
+/// vec: offset the line index by `base_line` and columns by `col_offset`
+/// (the assistant "● " / "  " prefix).
+fn offset_link_region(region: &LinkRegion, base_line: u16, col_offset: u16) -> LinkRegion {
+    LinkRegion {
+        line: base_line.saturating_add(region.line),
+        col_start: region.col_start.saturating_add(col_offset),
+        col_end: region.col_end.saturating_add(col_offset),
+        url: region.url.clone(),
+    }
+}
+
+/// A clickable link on the terminal screen (0-based row/columns).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenLinkRegion {
+    pub row: u16,
+    pub col_start: u16,
+    pub col_end: u16,
+    pub url: String,
+}
+
+/// Map link regions (indexed into the rendered transcript lines) to absolute
+/// screen coordinates, accounting for the transcript's left padding, the
+/// paragraph's vertical scroll, and clipping to the visible viewport.
+pub fn link_regions_to_screen(
+    lines: &[Line<'static>],
+    regions: &[LinkRegion],
+    content_area: Rect,
+    scroll: u16,
+) -> Vec<ScreenLinkRegion> {
+    if regions.is_empty() {
+        return Vec::new();
+    }
+    let total = line_count(lines, content_area.width.max(1));
+    let scroll_y = paragraph_scroll_y(total, content_area.height, scroll);
+    let mut out = Vec::new();
+    for region in regions {
+        let Some(row) = content_area
+            .y
+            .checked_add(region.line)
+            .and_then(|y| y.checked_sub(scroll_y))
+        else {
+            continue;
+        };
+        if row >= content_area.bottom() {
+            continue;
+        }
+        out.push(ScreenLinkRegion {
+            row,
+            col_start: content_area.x.saturating_add(region.col_start),
+            col_end: content_area.x.saturating_add(region.col_end),
+            url: region.url.clone(),
+        });
+    }
+    out
+}
+
+/// The transcript widget's content rect (left padding applied, markdown width).
+pub fn transcript_content_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(TRANSCRIPT_LEFT_PADDING),
+        y: area.y,
+        width: content_width(area.width),
+        height: area.height,
+    }
+}
+
+fn tool_line(tool: &ToolCallDisplay, elapsed: Option<std::time::Duration>) -> Line<'static> {
+    let mut spans = vec![Span::styled(
         format!("{} {}", tool_icon(&tool.name), tool.label),
         style::tool_call(),
-    ))
+    )];
+    if elapsed.is_some() && tool.status == ToolStatus::Running {
+        let seconds = elapsed.unwrap_or_default().as_secs();
+        spans.push(Span::styled(
+            format!(" · {:02}:{:02}", seconds / 60, seconds % 60),
+            style::tool_running(),
+        ));
+    }
+    match tool.status {
+        ToolStatus::Done => {
+            spans.push(Span::styled(" ✓", style::success()));
+        }
+        ToolStatus::Failed => {
+            spans.push(Span::styled(" ✗", style::error()));
+        }
+        ToolStatus::Running => {}
+    }
+    Line::from(spans)
 }
 
 fn tool_icon(name: &str) -> &'static str {
+    if name.starts_with("mcp__") {
+        return "🔌";
+    }
     match name {
         "bash" => "🐚",
         "read" => "📖",
@@ -433,6 +610,67 @@ mod tests {
     }
 
     #[test]
+    fn assistant_links_are_tracked_with_prefix_offset() {
+        let assistant = sample_line("assistant", "see [docs](https://example.com/docs)", false);
+        let content = TranscriptContent {
+            lines: &[assistant],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            disconnected: false,
+            tool_elapsed: None,
+            expand_thinking: false,
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, links) =
+            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://example.com/docs");
+        let text: String = rendered[links[0].line as usize]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        let byte_idx = text.find("docs").unwrap();
+        let offset = text[..byte_idx].width() as u16;
+        assert_eq!(links[0].col_start, offset);
+        assert_eq!(links[0].col_end, offset + "docs".len() as u16);
+    }
+
+    #[test]
+    fn link_regions_map_to_screen_with_scroll() {
+        let lines = vec![
+            Line::from(""),
+            Line::from("first reply"),
+            Line::from("see [docs](https://example.com) here"),
+            Line::from("tail"),
+        ];
+        let regions = vec![LinkRegion {
+            line: 2,
+            col_start: 4,
+            col_end: 8,
+            url: "https://example.com".into(),
+        }];
+        // 4 content rows in a 2-row viewport, scrolled up by 1 → link row 2 − 1.
+        let content_area = Rect::new(1, 0, 100, 2);
+        let screen = link_regions_to_screen(&lines, &regions, content_area, 1);
+        assert_eq!(screen.len(), 1);
+        assert_eq!(screen[0].row, 1);
+        assert_eq!(screen[0].col_start, 5);
+        assert_eq!(screen[0].col_end, 9);
+        // A region scrolled out of view (above the viewport) is dropped.
+        let scrolled = link_regions_to_screen(&lines, &regions, Rect::new(1, 0, 100, 1), 0);
+        assert!(scrolled.is_empty());
+    }
+
+    #[test]
     fn queued_messages_render_after_streaming_reply() {
         let lines = vec![
             sample_line("user", "first", false),
@@ -450,11 +688,14 @@ mod tests {
             fallback: None,
             clock: Instant::now(),
             turn_start: None,
+            disconnected: false,
+            tool_elapsed: None,
+            expand_thinking: false,
             width: 80,
         };
         let mut markdown = MarkdownCache::new();
         let streaming_md = StreamingMarkdown::new();
-        let rendered = build_transcript_lines(&content, &mut markdown, &streaming_md);
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown, &streaming_md);
         let joined: String = rendered
             .iter()
             .map(|line| {
@@ -494,10 +735,14 @@ mod tests {
             fallback: None,
             clock: Instant::now(),
             turn_start: None,
+            disconnected: false,
+            tool_elapsed: None,
+            expand_thinking: false,
             width: 80,
         };
         let mut markdown = MarkdownCache::new();
-        let rendered = build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+        let (rendered, _) =
+            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
         let joined = rendered
             .iter()
             .map(|line| {
@@ -534,10 +779,14 @@ mod tests {
             fallback: None,
             clock: Instant::now(),
             turn_start: None,
+            disconnected: false,
+            tool_elapsed: None,
+            expand_thinking: false,
             width: 80,
         };
         let mut markdown = MarkdownCache::new();
-        let rendered = build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+        let (rendered, _) =
+            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
         let joined = rendered
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -548,5 +797,141 @@ mod tests {
         let feedback = joined.find("sub-session opened").expect("local feedback");
         let after = joined.find("after-command").expect("last message");
         assert!(before < feedback && feedback < after);
+    }
+
+    fn render_single(line: ChatLine) -> String {
+        let content = TranscriptContent {
+            lines: &[line],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: false,
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) =
+            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+        rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn tools_render_completion_status() {
+        let mut line = sample_line("assistant", "done", false);
+        line.tools = vec![
+            ToolCallDisplay {
+                name: "bash".into(),
+                label: "ls -la".into(),
+                status: ToolStatus::Done,
+            },
+            ToolCallDisplay {
+                name: "read".into(),
+                label: "README.md".into(),
+                status: ToolStatus::Failed,
+            },
+        ];
+        let joined = render_single(line);
+        assert!(joined.contains("✓"), "done tool should show a check");
+        assert!(joined.contains("✗"), "failed tool should show a cross");
+    }
+
+    #[test]
+    fn long_thinking_collapses_until_expanded() {
+        let thinking = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut line = sample_line("assistant", "answer", false);
+        line.thinking = thinking;
+
+        let collapsed = render_single(line.clone());
+        assert!(collapsed.contains("more thinking lines"), "collapsed hint");
+        assert!(
+            !collapsed.contains("line 19"),
+            "tail is hidden when collapsed"
+        );
+
+        let content = TranscriptContent {
+            lines: &[line],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: true,
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) =
+            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+        let expanded = rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            expanded.contains("line 19"),
+            "full thinking shown when expanded"
+        );
+    }
+
+    #[test]
+    fn system_messages_render_distinct_from_assistant() {
+        let status = render_single(sample_line("status", "Reloading config…", false));
+        assert!(status.contains("Reloading config…"));
+        assert!(
+            status.contains("ℹ ") && !status.starts_with('●'),
+            "system messages use an info prefix, not the assistant bullet"
+        );
+
+        let local = render_single(sample_line("local", "Log saved to: /tmp/x.md", false));
+        assert!(local.contains("Log saved to: /tmp/x.md"));
+        assert!(local.contains("ℹ ") && !local.starts_with('●'));
+    }
+
+    #[test]
+    fn disconnected_shows_reconnect_banner() {
+        let content = TranscriptContent {
+            lines: &[],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: true,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: false,
+            width: 80,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) =
+            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+        let joined = rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(joined.contains("Connection lost"));
     }
 }

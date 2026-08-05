@@ -3,6 +3,7 @@ use super::model::{
 };
 use super::*;
 use crate::protocol::ScheduledTaskInfo;
+use ratatui::style::Style;
 
 impl App {
     pub(super) fn active_plan_key(&self) -> u64 {
@@ -35,17 +36,17 @@ impl App {
                     _ => ("○", style::muted()),
                 };
                 let text = truncate_to_width(&step.text, width.saturating_sub(3) as usize);
-                Line::from(vec![
-                    Span::styled(format!(" {icon} "), step_style),
-                    Span::styled(text, step_style),
-                ])
+                let mut spans = vec![Span::styled(format!(" {icon} "), step_style)];
+                spans.extend(render_inline_markdown(&text, step_style));
+                Line::from(spans)
             })
             .collect()
     }
 
-    pub(super) fn agent_task_lines(&self, width: u16) -> Vec<Line<'static>> {
+    pub(super) fn agent_task_lines(&self, width: u16, scroll: u16) -> Vec<Line<'static>> {
         self.agent_tasks
             .iter()
+            .skip(scroll as usize)
             .take(3)
             .flat_map(|task| {
                 let icon = match task.status.as_str() {
@@ -78,28 +79,28 @@ impl App {
                     .as_deref()
                     .map(|value| format!(" · {value}"))
                     .unwrap_or_default();
-                vec![
-                    Line::from(vec![
-                        Span::styled(prefix, style::brand_bold()),
-                        Span::raw(title),
-                    ]),
-                    Line::from(Span::styled(
-                        format!(
-                            "   {icon} {} · {} · {:02}:{:02}{activity}{unread}",
-                            task.agent,
-                            task.status,
-                            seconds / 60,
-                            seconds % 60,
-                        ),
-                        if task.status == "failed" {
-                            style::error()
-                        } else if task.status == "completed" {
-                            style::success()
-                        } else {
-                            style::muted()
-                        },
-                    )),
-                ]
+                let status_style = if task.status == "failed" {
+                    style::error()
+                } else if task.status == "completed" {
+                    style::success()
+                } else {
+                    style::muted()
+                };
+                let mut title_spans = vec![Span::styled(prefix, style::brand_bold())];
+                title_spans.extend(render_inline_markdown(&title, Style::default()));
+                let mut activity_spans = vec![Span::styled(
+                    format!(
+                        "   {icon} {} · {} · {:02}:{:02}",
+                        task.agent,
+                        task.status,
+                        seconds / 60,
+                        seconds % 60,
+                    ),
+                    status_style,
+                )];
+                activity_spans.extend(render_inline_markdown(&activity, status_style));
+                activity_spans.push(Span::styled(unread, status_style));
+                vec![Line::from(title_spans), Line::from(activity_spans)]
             })
             .collect()
     }
@@ -153,10 +154,11 @@ impl App {
         self.add_local(format!("Run history for \"{label}\":\n{lines}"));
     }
 
-    pub(super) fn scheduled_task_lines(&self, width: u16) -> Vec<Line<'static>> {
+    pub(super) fn scheduled_task_lines(&self, width: u16, scroll: u16) -> Vec<Line<'static>> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         self.visible_scheduled_tasks()
             .iter()
+            .skip(scroll as usize)
             .take(3)
             .flat_map(|task| {
                 let icon = match task.last_status.as_str() {
@@ -197,15 +199,16 @@ impl App {
                 } else {
                     style::muted()
                 };
+                let mut summary_spans =
+                    vec![Span::styled(format!("   {icon} {state} · "), status_style)];
+                summary_spans.extend(render_inline_markdown(&summary, status_style));
+                summary_spans.push(Span::styled(format!("{unread}{auth}"), status_style));
                 vec![
                     Line::from(vec![
                         Span::styled(prefix, style::brand_bold()),
                         Span::styled(label, style::brand_bold()),
                     ]),
-                    Line::from(Span::styled(
-                        format!("   {icon} {state} · {summary}{unread}{auth}"),
-                        status_style,
-                    )),
+                    Line::from(summary_spans),
                 ]
             })
             .collect()
@@ -220,10 +223,13 @@ impl App {
             banner: &self.banner,
             show_welcome: self.is_welcome_screen(),
             connecting: matches!(self.connection, ConnectionState::Connecting),
+            disconnected: matches!(self.connection, ConnectionState::Disconnected),
             active_agent: &self.view_agent,
             fallback: None,
             clock: self.started_at,
             turn_start: self.turn_start,
+            tool_elapsed: self.tool_start,
+            expand_thinking: self.expand_thinking,
             width,
         };
         let max = max_history_scroll(
@@ -248,10 +254,13 @@ impl App {
             banner: &self.banner,
             show_welcome: self.is_welcome_screen(),
             connecting: matches!(self.connection, ConnectionState::Connecting),
+            disconnected: matches!(self.connection, ConnectionState::Disconnected),
             active_agent: &self.view_agent,
             fallback: None,
             clock: self.started_at,
             turn_start: self.turn_start,
+            tool_elapsed: self.tool_start,
+            expand_thinking: self.expand_thinking,
             width,
         };
         let max = max_history_scroll(
@@ -289,5 +298,59 @@ impl App {
         } else {
             self.add_error("Copy failed".into());
         }
+    }
+
+    /// Maximum scroll offset (in task rows) for the currently focused panel.
+    pub(super) fn focused_panel_max_scroll(&self) -> u16 {
+        match self.panel_focus {
+            PanelFocus::Scheduled => self.visible_scheduled_tasks().len().saturating_sub(3) as u16,
+            PanelFocus::Tasks => self.agent_tasks.len().saturating_sub(3) as u16,
+            PanelFocus::Transcript => 0,
+        }
+    }
+
+    pub(super) fn scroll_focused_panel(&mut self, delta: i16) {
+        let max = self.focused_panel_max_scroll();
+        let target = match self.panel_focus {
+            PanelFocus::Scheduled => &mut self.scheduled_scroll,
+            PanelFocus::Tasks => &mut self.task_scroll,
+            PanelFocus::Transcript => return,
+        };
+        *target = ((*target as i32 + delta as i32).clamp(0, max as i32)) as u16;
+    }
+
+    /// Move keyboard focus to the next visible panel, wrapping back to the
+    /// transcript (and resetting panel scroll positions when returning).
+    pub(super) fn cycle_panel_focus(&mut self) {
+        let candidates = [
+            (
+                PanelFocus::Scheduled,
+                !self.visible_scheduled_tasks().is_empty(),
+            ),
+            (PanelFocus::Tasks, !self.agent_tasks.is_empty()),
+        ];
+        let start = match self.panel_focus {
+            PanelFocus::Transcript => 0,
+            focus => candidates
+                .iter()
+                .position(|(kind, _)| *kind == focus)
+                .map(|index| index + 1)
+                .unwrap_or(0),
+        };
+        for (kind, visible) in candidates.iter().cycle().skip(start) {
+            if *visible {
+                self.panel_focus = *kind;
+                return;
+            }
+        }
+        self.panel_focus = PanelFocus::Transcript;
+    }
+
+    /// When focus leaves the transcript, reset panel scroll positions so the
+    /// next entry starts from the top.
+    pub(super) fn reset_panel_scroll(&mut self) {
+        self.panel_focus = PanelFocus::Transcript;
+        self.scheduled_scroll = 0;
+        self.task_scroll = 0;
     }
 }

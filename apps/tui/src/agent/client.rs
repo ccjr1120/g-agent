@@ -19,13 +19,25 @@ pub enum ConnectionState {
 
 #[derive(Debug, Clone, Default)]
 pub struct ContextUsage {
+    pub used_tokens: u64,
+    pub max_tokens: u64,
     pub percent: u8,
+}
+
+/// Whether a tool call has finished and, if so, whether it reported failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolStatus {
+    #[default]
+    Running,
+    Done,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
 pub struct ToolCallDisplay {
     pub name: String,
     pub label: String,
+    pub status: ToolStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +68,10 @@ pub enum AgentEvent {
     ToolCall {
         name: String,
         args: String,
+    },
+    ToolResult {
+        name: String,
+        output: String,
     },
     TurnDone,
     Error(String),
@@ -196,11 +212,15 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
             let _ = events.send(AgentEvent::Mcp(servers));
         }
         ServerMessage::Context {
-            used_tokens: _,
-            max_tokens: _,
+            used_tokens,
+            max_tokens,
             percent,
         } => {
-            let _ = events.send(AgentEvent::Context(ContextUsage { percent }));
+            let _ = events.send(AgentEvent::Context(ContextUsage {
+                used_tokens,
+                max_tokens,
+                percent,
+            }));
         }
         ServerMessage::Start => {
             let _ = events.send(AgentEvent::TurnStarted);
@@ -213,6 +233,9 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
         }
         ServerMessage::ToolCall { name, args } => {
             let _ = events.send(AgentEvent::ToolCall { name, args });
+        }
+        ServerMessage::ToolResult { name, output } => {
+            let _ = events.send(AgentEvent::ToolResult { name, output });
         }
         ServerMessage::Done => {
             let _ = events.send(AgentEvent::TurnDone);
@@ -253,7 +276,7 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
         ServerMessage::Notice { message } => {
             let _ = events.send(AgentEvent::Notice(message));
         }
-        ServerMessage::SystemPrompt { .. } | ServerMessage::ToolResult { .. } => {}
+        ServerMessage::SystemPrompt { .. } => {}
     }
 }
 

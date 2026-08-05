@@ -28,6 +28,14 @@ description: 用户记忆的写入与维护：记住、列出、搜索、修改�
 ~/.config/g-agent/agents/<agent>/memory.md
 ```
 
+**每个 agent 有自己独立的记忆文件**，互不共享；`default` 也不是其他 agent 的记忆。系统提示里的 `## Memory` 只注入当前 agent 自己的记忆。
+
+脚本判定「当前 agent」的顺序：
+
+1. 环境变量 `G_AGENT_AGENT`（g-agent server 执行 `bash` 工具时按当前会话自动注入，无需手动设置）
+2. `~/.config/g-agent/config.json` 的 `agent` 字段（手动在 shell 里运行时生效）
+3. 兜底 `default`
+
 每条记忆格式：
 
 ```

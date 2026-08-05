@@ -209,18 +209,25 @@ function resolvePath(path: string, cwd?: string): string {
   return resolve(base, expanded);
 }
 
-async function runBash(args: Record<string, unknown>): Promise<string> {
+async function runBash(
+  args: Record<string, unknown>,
+  agentName?: string,
+): Promise<string> {
   const command = String(args.command ?? "").trim();
   if (!command) {
     return "Error: command is required";
   }
 
   const cwd = args.cwd ? resolvePath(String(args.cwd)) : process.cwd();
+  const env = { ...process.env };
+  if (agentName?.trim()) {
+    env.G_AGENT_AGENT = agentName.trim();
+  }
   const proc = Bun.spawn(["bash", "-lc", command], {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
-    env: process.env,
+    env,
   });
 
   const timer = setTimeout(() => proc.kill(), BASH_TIMEOUT_MS);
@@ -487,11 +494,12 @@ export async function executeTool(
   name: string,
   args: Record<string, unknown>,
   scheduleManager?: ScheduledTaskManager | null,
+  agentName?: string,
 ): Promise<string> {
   try {
     switch (name) {
       case "bash":
-        return await runBash(args);
+        return await runBash(args, agentName);
       case "read":
         return await runRead(args);
       case "write":

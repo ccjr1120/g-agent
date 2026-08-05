@@ -98,6 +98,7 @@ export async function runOpenAI(
           args,
           options.mcpManager,
           options.scheduleManager,
+          options.agentName,
         );
         return { call, name, output };
       }));
@@ -166,11 +167,12 @@ export async function executeNamedTool(
   args: Record<string, unknown>,
   mcpManager?: McpManager | null,
   scheduleManager?: ScheduledTaskManager | null,
+  agentName?: string,
 ): Promise<string> {
   if (mcpManager?.hasTool(name)) {
     return mcpManager.callTool(name, args);
   }
-  return executeTool(name, args, scheduleManager);
+  return executeTool(name, args, scheduleManager, agentName);
 }
 
 export type { ChatMessage, ToolCallMessage };

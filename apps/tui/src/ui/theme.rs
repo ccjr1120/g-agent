@@ -58,6 +58,22 @@ pub mod style {
         Style::default().fg(palette::MUTED)
     }
 
+    /// A tool call that is still executing (running elapsed timer).
+    pub fn tool_running() -> Style {
+        Style::default().fg(palette::WARNING)
+    }
+
+    /// System feedback / command results rendered in the transcript
+    /// (distinct from assistant replies).
+    pub fn system() -> Style {
+        Style::default().fg(palette::MUTED)
+    }
+
+    /// Border of the currently focused panel (Tab cycles focus).
+    pub fn panel_focused() -> Style {
+        brand_bold()
+    }
+
     pub fn banner() -> Style {
         brand_bold()
     }

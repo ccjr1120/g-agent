@@ -45,6 +45,7 @@ impl App {
                 self.pending = false;
                 self.streaming_flag = true;
                 self.turn_start = Some(Instant::now());
+                self.tool_start = None;
                 self.streaming_md.reset();
                 self.streaming = Some(ChatLine {
                     role: "assistant".to_string(),
@@ -60,6 +61,7 @@ impl App {
                 if self.cancel_turn {
                     return;
                 }
+                self.tool_start = None;
                 if let Some(line) = &mut self.streaming {
                     line.thinking.push_str(&text);
                 }
@@ -68,6 +70,7 @@ impl App {
                 if self.cancel_turn {
                     return;
                 }
+                self.tool_start = None;
                 if let Some(line) = &mut self.streaming {
                     line.text.push_str(&text);
                 }
@@ -92,8 +95,19 @@ impl App {
                 }
                 let label = format_tool_call(&name, &args);
                 if let Some(line) = &mut self.streaming {
-                    line.tools.push(ToolCallDisplay { name, label });
+                    line.tools.push(ToolCallDisplay {
+                        name,
+                        label,
+                        status: ToolStatus::Running,
+                    });
                 }
+                self.tool_start = Some(Instant::now());
+            }
+            AgentEvent::ToolResult { name, output } => {
+                if self.cancel_turn {
+                    return;
+                }
+                self.mark_tool_result(&name, &output);
             }
             AgentEvent::TurnDone => self.finish_turn(),
             AgentEvent::Error(message) => self.finish_turn_with_error(message),
@@ -105,6 +119,7 @@ impl App {
                 self.try_send_next();
             }
             AgentEvent::AgentTasks(tasks) => {
+                self.notify_finished_tasks(&tasks);
                 self.agent_tasks = tasks;
                 self.agent_tasks_updated_at = Instant::now();
                 self.restore_active_child_progress();
@@ -158,6 +173,7 @@ impl App {
             self.pending = false;
             self.streaming_flag = false;
             self.turn_start = None;
+            self.tool_start = None;
             self.in_flight = None;
             self.cancel_turn = false;
             if self.open_pending_session() {
@@ -172,6 +188,7 @@ impl App {
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
+        self.tool_start = None;
         self.in_flight = None;
         self.persist_session();
         if self.open_pending_session() {
@@ -217,12 +234,88 @@ impl App {
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
+        self.tool_start = None;
         self.in_flight = None;
         self.persist_session();
         if self.open_pending_session() {
             return;
         }
         self.try_send_next();
+    }
+
+    /// Mark the matching tool call as done/failed and stop the running-timer
+    /// once every tool in the current round has finished.
+    fn mark_tool_result(&mut self, name: &str, output: &str) {
+        let status = if output.trim_start().starts_with("Error:") {
+            ToolStatus::Failed
+        } else {
+            ToolStatus::Done
+        };
+        let Some(line) = self.streaming.as_mut() else {
+            return;
+        };
+        if let Some(tool) = line
+            .tools
+            .iter_mut()
+            .rev()
+            .find(|tool| tool.name == name && tool.status == ToolStatus::Running)
+        {
+            tool.status = status;
+        }
+        if line
+            .tools
+            .iter()
+            .all(|tool| tool.status != ToolStatus::Running)
+        {
+            self.tool_start = None;
+        }
+    }
+
+    /// Notify once when a background agent transitions from busy to a terminal
+    /// state, so the user hears about finishes that happened while they were
+    /// reading or typing in the main session.
+    fn notify_finished_tasks(&mut self, tasks: &[AgentTaskInfo]) {
+        for task in tasks {
+            let Some(previous) = self
+                .agent_tasks
+                .iter()
+                .find(|candidate| candidate.slot == task.slot)
+            else {
+                continue;
+            };
+            if !model::agent_task_is_busy(&previous.status) {
+                continue;
+            }
+            if !matches!(task.status.as_str(), "completed" | "failed" | "cancelled") {
+                continue;
+            }
+            if self.active_child == Some(task.slot) {
+                continue;
+            }
+            if !self.notified_task_slots.insert(task.slot) {
+                continue;
+            }
+            let title = task.title.split_whitespace().collect::<Vec<_>>().join(" ");
+            let title = if title.is_empty() {
+                String::new()
+            } else {
+                format!(" — {title}")
+            };
+            match task.status.as_str() {
+                "failed" => self.add_error(format!(
+                    "✗ Agent /{} ({}) failed{title}",
+                    task.slot, task.agent
+                )),
+                "cancelled" => self.add_status(format!(
+                    "– Agent /{} ({}) cancelled{title}",
+                    task.slot, task.agent
+                )),
+                _ => self.add_status(format!(
+                    "✓ Agent /{} ({}) finished{title}",
+                    task.slot, task.agent
+                )),
+            }
+        }
     }
 
     fn open_pending_session(&mut self) -> bool {
@@ -247,6 +340,7 @@ impl App {
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
+        self.tool_start = None;
         self.in_flight = None;
         self.persist_session();
     }

@@ -104,3 +104,43 @@ describe("scheduled task tools", () => {
     expect(names).toContain("list_scheduled_tasks");
   });
 });
+
+describe("bash tool agent context", () => {
+  test("sets G_AGENT_AGENT for the subprocess when an agent name is given", async () => {
+    const output = await executeTool(
+      "bash",
+      { command: "printf '%s' \"$G_AGENT_AGENT\"" },
+      undefined,
+      "obsidian-agent",
+    );
+    expect(output).toBe("obsidian-agent");
+  });
+
+  test("does not set G_AGENT_AGENT when no agent name is given", async () => {
+    const output = await executeTool(
+      "bash",
+      { command: "printf '[%s]' \"${G_AGENT_AGENT:-}\"" },
+    );
+    expect(output).toBe("[]");
+  });
+
+  test("inherits an existing G_AGENT_AGENT from the parent process", async () => {
+    const previous = process.env.G_AGENT_AGENT;
+    process.env.G_AGENT_AGENT = "legacy-agent";
+    try {
+      const output = await executeTool(
+        "bash",
+        { command: "printf '%s' \"$G_AGENT_AGENT\"" },
+        undefined,
+        "obsidian-agent",
+      );
+      expect(output).toBe("obsidian-agent");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.G_AGENT_AGENT;
+      } else {
+        process.env.G_AGENT_AGENT = previous;
+      }
+    }
+  });
+});
