@@ -133,6 +133,27 @@ export const builtinTools: ToolDefinition[] = [
     },
   },
   {
+    name: "ask_user",
+    description:
+      "Ask the user a blocking question and wait for their reply. Use to clarify requirements, constraints, or ambiguous choices before starting work or committing to a plan — a few targeted questions up front prevent derailing mid-task. Also use when execution depends on a decision only the user can make.",
+    parameters: {
+      type: "object",
+      properties: {
+        question: {
+          type: "string",
+          description: "The question to ask the user, phrased so it can be answered briefly",
+        },
+        hint: {
+          type: "string",
+          description:
+            "Optional guidance on expected answers, e.g. valid options or the default you will use if the user says 'up to you'",
+        },
+      },
+      required: ["question"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "schedule_task",
     description:
       "Schedule a recurring background task that runs its prompt automatically every intervalSeconds and reports when something changes. Use for periodic checks such as 'fetch the requirements list every 10 minutes and tell me about updates'. It never disturbs the main conversation; results appear in the Scheduled Tasks panel.",
@@ -495,6 +516,7 @@ export async function executeTool(
   args: Record<string, unknown>,
   scheduleManager?: ScheduledTaskManager | null,
   agentName?: string,
+  askUser?: (question: string) => Promise<string>,
 ): Promise<string> {
   try {
     switch (name) {
@@ -510,16 +532,35 @@ export async function executeTool(
         return await runGrep(args);
       case "update_plan":
         return updatePlan(args);
+      case "ask_user":
+        return await runAskUser(args, askUser);
       case "schedule_task":
-        return runScheduleTask(args, scheduleManager);
+        return await runScheduleTask(args, scheduleManager);
       case "unschedule_task":
-        return runUnscheduleTask(args, scheduleManager);
+        return await runUnscheduleTask(args, scheduleManager);
       case "list_scheduled_tasks":
-        return runListScheduledTasks(args, scheduleManager);
+        return await runListScheduledTasks(args, scheduleManager);
       default:
         return `Error: unknown tool "${name}"`;
     }
   } catch (error) {
     return `Error: ${error instanceof Error ? error.message : "tool failed"}`;
   }
+}
+
+function runAskUser(
+  args: Record<string, unknown>,
+  askUser?: (question: string) => Promise<string>,
+): Promise<string> {
+  const question = String(args.question ?? "").trim();
+  if (!question) {
+    return Promise.resolve("Error: question is required");
+  }
+  if (!askUser) {
+    return Promise.resolve(
+      "Error: user input is not available in this runtime. State what you need and continue with the most reasonable assumption, noting the assumption clearly.",
+    );
+  }
+  const hint = String(args.hint ?? "").trim();
+  return askUser(hint ? `${question}\n(hint: ${hint})` : question);
 }

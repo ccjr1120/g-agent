@@ -105,8 +105,62 @@ describe("scheduled task tools", () => {
   });
 });
 
-describe("bash tool agent context", () => {
-  test("sets G_AGENT_AGENT for the subprocess when an agent name is given", async () => {
+describe("ask_user tool", () => {
+  test("returns the user reply from the askUser handler", async () => {
+    const output = await executeTool(
+      "ask_user",
+      { question: "Which stack?" },
+      undefined,
+      undefined,
+      async () => "Rust",
+    );
+    expect(output).toBe("Rust");
+  });
+
+  test("appends the hint to the question", async () => {
+    let seen = "";
+    const output = await executeTool(
+      "ask_user",
+      { question: "Which stack?", hint: "Rust / Go" },
+      undefined,
+      undefined,
+      async (question) => {
+        seen = question;
+        return "Go";
+      },
+    );
+    expect(seen).toContain("Which stack?");
+    expect(seen).toContain("Rust / Go");
+    expect(output).toBe("Go");
+  });
+
+  test("reports missing question as an error", async () => {
+    const output = await executeTool(
+      "ask_user",
+      {},
+      undefined,
+      undefined,
+      async () => "n/a",
+    );
+    expect(output).toContain("Error");
+  });
+
+  test("reports unavailable user input and tells the model to assume", async () => {
+    const output = await executeTool(
+      "ask_user",
+      { question: "Which stack?" },
+    );
+    expect(output).toContain("Error");
+    expect(output).toContain("most reasonable assumption");
+  });
+
+  test("ask_user is advertised as a built-in tool", () => {
+    const names = builtinTools.map((tool) => tool.name);
+    expect(names).toContain("ask_user");
+  });
+});
+
+describe("bash tool agent context", () => {  test("sets G_AGENT_AGENT for the subprocess when an agent name is given", async () => {
     const output = await executeTool(
       "bash",
       { command: "printf '%s' \"$G_AGENT_AGENT\"" },

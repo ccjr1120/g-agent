@@ -12,13 +12,14 @@ import {
   type BackgroundAgentTask,
   type WsData,
 } from "./state.js";
-import { connectMcpForAgent, resolveProvider } from "./helpers.js";
+import { connectMcpForAgent, makeAskUserHandler, resolveProvider } from "./helpers.js";
 import {
   modelLabel,
   refreshClient,
   reloadAgentsCatalog,
 } from "./catalog.js";
 import { scheduleManager, sendScheduledTasksToAll } from "./scheduled-runtime.js";
+import { persistAgentTasks } from "./agent-tasks.js";
 import { truncateError } from "./usage.js";
 
 export async function loadStartupAgent(): Promise<{ agent: AgentConfig }> {
@@ -55,6 +56,10 @@ export async function applyAgentSwitch(
  * skills are re-read from disk, and MCP connections are recreated even when
  * their serialized config did not change (the MCP server implementation or
  * its advertised tools may have changed).
+ *
+ * Sub-agent sessions are independent of the main conversation and survive a
+ * `/new`: they keep their slots and history, re-resolve their agent config
+ * from the freshly loaded catalog, and stay selectable via `/<slot>`.
  */
 export async function restartSession(ws: ServerWebSocket<WsData>): Promise<void> {
   const currentAgentName = ws.data.activeAgent.name;
@@ -69,11 +74,10 @@ export async function restartSession(ws: ServerWebSocket<WsData>): Promise<void>
     reconnectMcp: true,
   });
   for (const task of ws.data.agentTasks) {
-    await task.mcpManager?.close();
+    task.agent = loadedAgents.agents.get(task.agent.name) ?? task.agent;
   }
-  ws.data.agentTasks.length = 0;
-  ws.data.nextAgentTaskSlot = 1;
   ws.data.activeAgentTaskSlot = undefined;
+  await persistAgentTasks(ws.data.agentTasks);
   sendAgentTasks(ws);
   sendScheduledTasksToAll();
 }
@@ -105,7 +109,7 @@ export function createAgentSession(
   activate = true,
 ): BackgroundAgentTask {
   const task: BackgroundAgentTask = {
-    slot: ws.data.nextAgentTaskSlot++,
+    slot: nextFreeAgentSlot(ws.data.agentTasks),
     agent,
     title: "",
     status: "idle",
@@ -118,6 +122,7 @@ export function createAgentSession(
     draining: false,
   };
   ws.data.agentTasks.push(task);
+  void persistAgentTasks(ws.data.agentTasks);
   if (activate) {
     ws.data.activeAgentTaskSlot = task.slot;
   }
@@ -267,12 +272,14 @@ export async function runAgentSessionPrompt(
         scheduleManager,
         signal: abortController.signal,
         agentName: task.agent.name,
+        askUser: makeAskUserHandler(ws, abortController.signal),
       },
     );
   } finally {
     if (task.abortController === abortController) {
       task.abortController = undefined;
     }
+    void persistAgentTasks(ws.data.agentTasks);
   }
 }
 
@@ -309,4 +316,17 @@ function summarizeToolActivity(name: string, argsText: string): string {
     return "Searching files";
   }
   return `Using ${name}`;
+}
+
+/**
+ * The smallest positive slot not currently used by a sub-agent, so closing an
+ * agent frees its number and the next one reuses it instead of always +1.
+ */
+export function nextFreeAgentSlot(tasks: BackgroundAgentTask[]): number {
+  const used = new Set(tasks.map((task) => task.slot));
+  let slot = 1;
+  while (used.has(slot)) {
+    slot += 1;
+  }
+  return slot;
 }

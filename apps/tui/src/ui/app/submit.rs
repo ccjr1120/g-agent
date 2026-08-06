@@ -3,6 +3,13 @@ use super::*;
 
 impl App {
     pub(super) fn submit(&mut self, display: String, full: String) {
+        // While an ask_user question is awaiting a reply, the composer answers
+        // that question instead of starting a new chat turn.
+        if self.pending_ask.take().is_some() {
+            self.submit_ask_reply(display, full);
+            return;
+        }
+
         // Only remember real chat prompts. Slash commands like `/resume …` would
         // reopen the command menu and make ↑ history feel broken.
         let remembered = if full.trim().is_empty() {
@@ -18,9 +25,14 @@ impl App {
 
         let text = display.as_str();
         if text == "exit" {
-            if self.active_child.is_some() {
-                self.client.send(ClientMessage::AgentBack);
-                self.add_status("Exited current agent — back to the main session".into());
+            if let Some(slot) = self.active_child {
+                self.client.send(ClientMessage::AgentTaskClose { slot });
+                // The slot becomes free and may be reused by the next sub-agent,
+                // so a fresh completion notification must fire for it again.
+                self.notified_task_slots.remove(&slot);
+                self.add_status(
+                    "Closed current agent session — back to the main session".into(),
+                );
                 return;
             }
             self.should_quit = true;
@@ -255,6 +267,7 @@ impl App {
         if self.is_turn_busy() {
             self.send_queue.push_back(user_index);
             self.history_scroll = 0;
+            self.scroll_anchor_y = None;
             return;
         }
         self.start_chat_turn(user_index, display, full);
@@ -265,11 +278,27 @@ impl App {
             role: "user".to_string(),
             text,
             sent_content,
-            thinking: String::new(),
-            tools: Vec::new(),
+            segments: Vec::new(),
+            pending_thinking: String::new(),
+            pending_text: String::new(),
             duration_ms: None,
             queued,
         }
+    }
+
+    /// Answer a blocking `ask_user` question. The reply is sent to the server
+    /// as `ask_user_reply` (not a chat turn) and rendered locally as a user
+    /// line so the exchange reads naturally in the transcript.
+    fn submit_ask_reply(&mut self, display: String, full: String) {
+        self.static_lines.push(Self::user_line(
+            display.clone(),
+            Some(full.clone()),
+            false,
+        ));
+        self.client.send(ClientMessage::AskUserReply { reply: full });
+        self.input_history.reset_browse();
+        self.history_scroll = 0;
+        self.scroll_anchor_y = None;
     }
 
     pub(super) fn is_turn_busy(&self) -> bool {
@@ -287,6 +316,7 @@ impl App {
         });
         self.pending = true;
         self.history_scroll = 0;
+        self.scroll_anchor_y = None;
         self.client.send(ClientMessage::Chat { message: full });
     }
 
@@ -343,8 +373,7 @@ impl App {
             self.pending = false;
             self.streaming_flag = false;
             self.streaming = None;
-            self.streaming_md.reset();
-            self.turn_start = None;
+                        self.turn_start = None;
             self.tool_start = None;
             self.client.send(ClientMessage::Cancel);
             self.add_status("Turn cancelled — your prompt was restored to the editor".into());
@@ -373,8 +402,9 @@ impl App {
             role: "local".to_string(),
             text,
             sent_content: None,
-            thinking: String::new(),
-            tools: Vec::new(),
+            segments: Vec::new(),
+            pending_thinking: String::new(),
+            pending_text: String::new(),
             duration_ms: None,
             queued: false,
         });
@@ -386,12 +416,12 @@ impl App {
             role: "status".to_string(),
             text,
             sent_content: None,
-            thinking: String::new(),
-            tools: Vec::new(),
+            segments: Vec::new(),
+            pending_thinking: String::new(),
+            pending_text: String::new(),
             duration_ms: None,
             queued: false,
         });
-        self.history_scroll = 0;
     }
 
     pub(super) fn add_error(&mut self, text: String) {
@@ -399,12 +429,12 @@ impl App {
             role: "error".to_string(),
             text,
             sent_content: None,
-            thinking: String::new(),
-            tools: Vec::new(),
+            segments: Vec::new(),
+            pending_thinking: String::new(),
+            pending_text: String::new(),
             duration_ms: None,
             queued: false,
         });
-        self.history_scroll = 0;
     }
 
     fn reset_local_conversation(&mut self) {
@@ -417,12 +447,13 @@ impl App {
         self.context = ContextUsage::default();
         self.session_id = None;
         self.history_scroll = 0;
+        self.scroll_anchor_y = None;
         self.markdown_cache.clear();
-        self.streaming_md.reset();
-        self.undo.clear();
+                self.undo.clear();
         self.send_queue.clear();
         self.in_flight = None;
         self.cancel_turn = false;
+        self.pending_ask = None;
         self.pending_session_open = None;
         self.agent_tasks.clear();
         self.scheduled_tasks.clear();

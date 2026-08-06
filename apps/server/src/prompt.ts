@@ -5,6 +5,7 @@ import {
   type WsData,
 } from "./state.js";
 import { scheduleManager } from "./scheduled-runtime.js";
+import { makeAskUserHandler } from "./helpers.js";
 import {
   sendContextUsage,
   sendNotice,
@@ -115,6 +116,7 @@ export async function runPrompt(ws: ServerWebSocket<WsData>, prompt: string): Pr
         scheduleManager,
         signal: abortController.signal,
         agentName: ws.data.activeAgent.name,
+        askUser: makeAskUserHandler(ws, abortController.signal),
       },
     );
   } finally {

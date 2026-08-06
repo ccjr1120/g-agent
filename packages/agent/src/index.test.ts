@@ -162,6 +162,80 @@ describe("runAgent", () => {
     expect(events.at(-1)).toEqual({ type: "done" });
   });
 
+  test("does not end with plain text while a plan has unfinished steps", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const round = requestBodies.length;
+      if (round === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: "call-plan",
+                type: "function",
+                function: {
+                  name: "update_plan",
+                  arguments: JSON.stringify({
+                    steps: [
+                      { step: "Inspect", status: "completed" },
+                      { step: "Build", status: "in_progress" },
+                      { step: "Verify", status: "pending" },
+                    ],
+                  }),
+                },
+              }],
+            },
+          }],
+        });
+      }
+      if (round === 2) {
+        // The model tries to end mid-plan by asking the user in plain text.
+        return Response.json({
+          choices: [{ message: { content: "Should I continue building now?" } }],
+        });
+      }
+      if (round === 3) {
+        return Response.json({
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: "call-read",
+                type: "function",
+                function: {
+                  name: "read",
+                  arguments: JSON.stringify({ path: "src/main.rs" }),
+                },
+              }],
+            },
+          }],
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: "Feature is built." } }],
+      });
+    };
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("build the feature", (event) => events.push(event), provider);
+
+    // Round 2 (the "Should I continue?" prose) must NOT be the terminal reply:
+    // the loop must have pushed a system nudge and continued to a tool round.
+    expect(requestBodies.length).toBeGreaterThanOrEqual(3);
+    expect(events).not.toContainEqual({
+      type: "delta",
+      text: "Should I continue building now?",
+    });
+    expect(events).toContainEqual({
+      type: "tool_call",
+      name: "read",
+      args: '{"path":"src/main.rs"}',
+    });
+    expect(events.at(-1)).toEqual({ type: "done" });
+  });
+
   test("reports cancellation without surfacing it as an error", async () => {
     const controller = new AbortController();
     globalThis.fetch = (_input, init) =>

@@ -46,13 +46,13 @@ impl App {
                 self.streaming_flag = true;
                 self.turn_start = Some(Instant::now());
                 self.tool_start = None;
-                self.streaming_md.reset();
                 self.streaming = Some(ChatLine {
                     role: "assistant".to_string(),
                     text: String::new(),
                     sent_content: None,
-                    thinking: String::new(),
-                    tools: Vec::new(),
+                    segments: Vec::new(),
+                    pending_thinking: String::new(),
+                    pending_text: String::new(),
                     duration_ms: None,
                     queued: false,
                 });
@@ -63,7 +63,9 @@ impl App {
                 }
                 self.tool_start = None;
                 if let Some(line) = &mut self.streaming {
-                    line.thinking.push_str(&text);
+                    // Text that preceded this reasoning keeps its position.
+                    flush_pending_text(line);
+                    line.pending_thinking.push_str(&text);
                 }
             }
             AgentEvent::Delta(text) => {
@@ -72,7 +74,9 @@ impl App {
                 }
                 self.tool_start = None;
                 if let Some(line) = &mut self.streaming {
+                    flush_pending_thinking(line);
                     line.text.push_str(&text);
+                    line.pending_text.push_str(&text);
                 }
             }
             AgentEvent::ToolCall { name, args } => {
@@ -95,11 +99,13 @@ impl App {
                 }
                 let label = format_tool_call(&name, &args);
                 if let Some(line) = &mut self.streaming {
-                    line.tools.push(ToolCallDisplay {
+                    flush_pending_text(line);
+                    flush_pending_thinking(line);
+                    line.segments.push(TurnSegment::Tool(ToolCallDisplay {
                         name,
                         label,
                         status: ToolStatus::Running,
-                    });
+                    }));
                 }
                 self.tool_start = Some(Instant::now());
             }
@@ -108,6 +114,12 @@ impl App {
                     return;
                 }
                 self.mark_tool_result(&name, &output);
+            }
+            AgentEvent::AskUser(question) => {
+                if self.cancel_turn {
+                    return;
+                }
+                self.begin_ask(&question);
             }
             AgentEvent::TurnDone => self.finish_turn(),
             AgentEvent::Error(message) => self.finish_turn_with_error(message),
@@ -166,16 +178,38 @@ impl App {
         }
     }
 
+    /// Enter "answer the agent" mode for a blocking `ask_user` question. The
+    /// question is placed in the transcript as a distinct ask message right
+    /// after the in-flight turn so the user sees what the agent is asking;
+    /// the composer then submits an `ask_user_reply` instead of a chat turn.
+    fn begin_ask(&mut self, question: &str) {
+        if self.pending_ask.is_some() {
+            return;
+        }
+        self.pending_ask = Some(question.to_string());
+        let line = ChatLine {
+            role: "ask".to_string(),
+            text: question.to_string(),
+            sent_content: None,
+            segments: Vec::new(),
+            pending_thinking: String::new(),
+            pending_text: String::new(),
+            duration_ms: None,
+            queued: false,
+        };
+        self.static_lines.push(line);
+    }
+
     fn finish_turn(&mut self) {
         if self.cancel_turn {
             self.streaming = None;
-            self.streaming_md.reset();
             self.pending = false;
             self.streaming_flag = false;
             self.turn_start = None;
             self.tool_start = None;
             self.in_flight = None;
             self.cancel_turn = false;
+            self.pending_ask = None;
             if self.open_pending_session() {
                 return;
             }
@@ -184,12 +218,12 @@ impl App {
         }
 
         self.commit_streaming_line();
-        self.streaming_md.reset();
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
         self.tool_start = None;
         self.in_flight = None;
+        self.pending_ask = None;
         self.persist_session();
         if self.open_pending_session() {
             return;
@@ -213,8 +247,9 @@ impl App {
             role: "error".to_string(),
             text: message,
             sent_content: None,
-            thinking: String::new(),
-            tools: Vec::new(),
+            segments: Vec::new(),
+            pending_thinking: String::new(),
+            pending_text: String::new(),
             duration_ms: None,
             queued: false,
         };
@@ -230,12 +265,12 @@ impl App {
             self.static_lines.push(line);
         }
 
-        self.streaming_md.reset();
         self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
         self.tool_start = None;
         self.in_flight = None;
+        self.pending_ask = None;
         self.persist_session();
         if self.open_pending_session() {
             return;
@@ -246,27 +281,14 @@ impl App {
     /// Mark the matching tool call as done/failed and stop the running-timer
     /// once every tool in the current round has finished.
     fn mark_tool_result(&mut self, name: &str, output: &str) {
-        let status = if output.trim_start().starts_with("Error:") {
-            ToolStatus::Failed
-        } else {
-            ToolStatus::Done
-        };
         let Some(line) = self.streaming.as_mut() else {
             return;
         };
-        if let Some(tool) = line
-            .tools
-            .iter_mut()
-            .rev()
-            .find(|tool| tool.name == name && tool.status == ToolStatus::Running)
-        {
-            tool.status = status;
-        }
-        if line
-            .tools
-            .iter()
-            .all(|tool| tool.status != ToolStatus::Running)
-        {
+        mark_tool_in_line(line, name, output);
+        if line.segments.iter().all(|segment| match segment {
+            TurnSegment::Tool(tool) => tool.status != ToolStatus::Running,
+            TurnSegment::Thinking(_) | TurnSegment::Text(_) | TurnSegment::Plan(_) => true,
+        }) {
             self.tool_start = None;
         }
     }
@@ -336,12 +358,12 @@ impl App {
             return;
         }
         self.commit_streaming_line();
-        self.streaming_md.reset();
-        self.pending = false;
+                self.pending = false;
         self.streaming_flag = false;
         self.turn_start = None;
         self.tool_start = None;
         self.in_flight = None;
+        self.pending_ask = None;
         self.persist_session();
     }
 
@@ -349,21 +371,16 @@ impl App {
     /// immediately after its user message so queued prompts stay after the
     /// completed turn instead of trapping the reply at the bottom.
     pub(super) fn commit_streaming_line(&mut self) {
-        let width = self.last_transcript_width;
         let user_index = self.in_flight.as_ref().map(|(index, _, _)| *index);
         let Some(mut line) = self.streaming.take() else {
             return;
         };
+        flush_pending_text(&mut line);
+        flush_pending_thinking(&mut line);
         if let Some(start) = self.turn_start {
             line.duration_ms = Some(start.elapsed().as_millis() as u64);
         }
-        if !line.text.trim().is_empty() {
-            self.streaming_md
-                .flush(&line.text, assistant_markdown_width(width));
-            self.markdown_cache
-                .render_static(&line.text, assistant_markdown_width(width));
-        }
-        if line.text.trim().is_empty() && line.thinking.trim().is_empty() && line.tools.is_empty() {
+        if line.text.trim().is_empty() && line.segments.is_empty() {
             return;
         }
         match user_index {
@@ -384,15 +401,17 @@ impl App {
 
     /// Turn a completed plan into a normal assistant message placed directly
     /// after the in-flight user message, so it scrolls with the transcript
-    /// instead of staying in the fixed Plan panel.
+    /// instead of staying in the fixed Plan panel. The plan is kept as a
+    /// structured segment so the transcript can style it like the panel.
     fn insert_plan_message_after_user(&mut self, plan: PlanDisplay) {
         let text = format_plan_message(&plan);
         let line = ChatLine {
             role: "assistant".to_string(),
             text,
             sent_content: None,
-            thinking: String::new(),
-            tools: Vec::new(),
+            segments: vec![TurnSegment::Plan(plan)],
+            pending_thinking: String::new(),
+            pending_text: String::new(),
             duration_ms: None,
             queued: false,
         };
@@ -446,5 +465,151 @@ impl App {
             agent: self.active_agent.clone(),
             history,
         });
+    }
+}
+
+/// Match a tool result to the first still-running call with the same name.
+///
+/// The server emits results in the provider's tool-call order, and tool calls
+/// are appended in that same order, so a FIFO match keeps ✓/✗ attached to the
+/// right line even when the same tool runs several times in one round
+/// (parallel calls). Matching the *last* running call instead would swap the
+/// status between same-name tool lines.
+fn mark_tool_in_line(line: &mut ChatLine, name: &str, output: &str) {
+    let status = if output.trim_start().starts_with("Error:") {
+        ToolStatus::Failed
+    } else {
+        ToolStatus::Done
+    };
+    if let Some(TurnSegment::Tool(tool)) = line.segments.iter_mut().find(|segment| {
+        matches!(segment, TurnSegment::Tool(tool) if tool.name == name && tool.status == ToolStatus::Running)
+    }) {
+        tool.status = status;
+    }
+}
+
+/// Flush streamed reasoning into an ordered segment so long blocks stay
+/// collapsible and keep their position before the tool call / text they
+/// precede.
+fn flush_pending_thinking(line: &mut ChatLine) {
+    if !line.pending_thinking.trim().is_empty() {
+        line.segments
+            .push(TurnSegment::Thinking(std::mem::take(&mut line.pending_thinking)));
+    }
+}
+
+/// Flush streamed text into an ordered segment so markdown blocks are not
+/// split by reasoning or tool calls that interrupt them.
+fn flush_pending_text(line: &mut ChatLine) {
+    if !line.pending_text.trim().is_empty() {
+        line.segments
+            .push(TurnSegment::Text(std::mem::take(&mut line.pending_text)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_with(tools: &[(&str, ToolStatus)]) -> ChatLine {
+        ChatLine {
+            role: "assistant".to_string(),
+            text: String::new(),
+            sent_content: None,
+            segments: tools
+                .iter()
+                .map(|(name, status)| {
+                    TurnSegment::Tool(ToolCallDisplay {
+                        name: name.to_string(),
+                        label: name.to_string(),
+                        status: *status,
+                    })
+                })
+                .collect(),
+            pending_thinking: String::new(),
+            pending_text: String::new(),
+            duration_ms: None,
+            queued: false,
+        }
+    }
+
+    fn tool_status(line: &ChatLine, index: usize) -> ToolStatus {
+        match &line.segments[index] {
+            TurnSegment::Tool(tool) => tool.status,
+            TurnSegment::Thinking(_) | TurnSegment::Text(_) | TurnSegment::Plan(_) => {
+                panic!("expected a tool segment")
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_same_name_tools_pair_with_results_in_call_order() {
+        let mut line = line_with(&[
+            ("bash", ToolStatus::Running),
+            ("bash", ToolStatus::Running),
+            ("read", ToolStatus::Running),
+        ]);
+
+        // First result belongs to the first bash call (call order), so it must
+        // mark that line, not the second bash line.
+        mark_tool_in_line(&mut line, "bash", "output one");
+        assert_eq!(tool_status(&line, 0), ToolStatus::Done);
+        assert_eq!(tool_status(&line, 1), ToolStatus::Running);
+
+        mark_tool_in_line(&mut line, "read", "output");
+        assert_eq!(tool_status(&line, 2), ToolStatus::Done);
+
+        mark_tool_in_line(&mut line, "bash", "Error: boom");
+        assert_eq!(tool_status(&line, 1), ToolStatus::Failed);
+    }
+
+    #[test]
+    fn results_across_rounds_reach_the_right_running_call() {
+        let mut line = line_with(&[
+            ("read", ToolStatus::Done),
+            ("read", ToolStatus::Done),
+            ("bash", ToolStatus::Running),
+        ]);
+
+        // A later round reuses the same tool name; only the running call from
+        // the current round should be marked.
+        mark_tool_in_line(&mut line, "bash", "done");
+        assert_eq!(tool_status(&line, 2), ToolStatus::Done);
+        assert_eq!(tool_status(&line, 0), ToolStatus::Done);
+        assert_eq!(tool_status(&line, 1), ToolStatus::Done);
+    }
+
+    #[test]
+    fn unknown_result_is_ignored() {
+        let mut line = line_with(&[("bash", ToolStatus::Running)]);
+        mark_tool_in_line(&mut line, "read", "output");
+        assert_eq!(tool_status(&line, 0), ToolStatus::Running);
+    }
+
+    #[test]
+    fn thinking_flushes_in_front_of_the_tool_that_follows() {
+        let mut line = ChatLine {
+            role: "assistant".to_string(),
+            text: String::new(),
+            sent_content: None,
+            segments: Vec::new(),
+            pending_thinking: "first reasoning".to_string(),
+            pending_text: String::new(),
+            duration_ms: None,
+            queued: false,
+        };
+        flush_pending_thinking(&mut line);
+        line.segments.push(TurnSegment::Tool(ToolCallDisplay {
+            name: "bash".into(),
+            label: "ls".into(),
+            status: ToolStatus::Running,
+        }));
+        line.pending_thinking = "second reasoning".to_string();
+        flush_pending_thinking(&mut line);
+
+        assert_eq!(line.segments.len(), 3);
+        assert!(matches!(&line.segments[0], TurnSegment::Thinking(t) if t == "first reasoning"));
+        assert!(matches!(&line.segments[1], TurnSegment::Tool(_)));
+        assert!(matches!(&line.segments[2], TurnSegment::Thinking(t) if t == "second reasoning"));
     }
 }

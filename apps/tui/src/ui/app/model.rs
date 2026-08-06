@@ -2,6 +2,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::ui::composer::SlashCommand;
 
+pub(super) use crate::agent::client::{PlanDisplay, PlanStep};
+
 #[derive(Debug, Clone)]
 pub enum PendingSessionOpen {
     Task(u64),
@@ -14,17 +16,6 @@ pub enum PanelFocus {
     Transcript,
     Scheduled,
     Tasks,
-}
-
-#[derive(Debug, Clone)]
-pub struct PlanStep {
-    pub(super) text: String,
-    pub(super) status: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct PlanDisplay {
-    pub(super) steps: Vec<PlanStep>,
 }
 
 pub(super) fn copy_to_clipboard(text: &str) -> bool {

@@ -18,6 +18,7 @@ import {
   sendAgentTasks,
   type WsData,
 } from "./state.js";
+import { loadPersistedAgentTasks, persistAgentTasks } from "./agent-tasks.js";
 import {
   ensureReloadWatches,
   refreshClient,
@@ -67,7 +68,6 @@ Bun.serve<WsData>({
           effectiveProvider: resolveProvider(initialAgent),
           mcpManager: new McpManager(),
           agentTasks: [],
-          nextAgentTaskSlot: 1,
         } satisfies WsData,
       })
     ) {
@@ -88,13 +88,20 @@ Bun.serve<WsData>({
         ws.data.effectiveProvider = resolveProvider(agent);
         ws.data.mcpManager = await connectMcpForAgent(agent);
 
+        // Restore sub-agent sessions persisted across server restarts. MCP
+        // connections reconnect lazily on the next prompt in that session.
+        ws.data.agentTasks = await loadPersistedAgentTasks(loadedAgents);
+
         send(ws, { type: "ready" });
         refreshClient(ws);
+        sendAgentTasks(ws);
         sendScheduledTasksToAll();
       })();
     },
     close(ws) {
       clients.delete(ws);
+      ws.data.pendingAsk?.reject(new Error("disconnected"));
+      ws.data.pendingAsk = undefined;
       void ws.data.mcpManager.close();
       for (const task of ws.data.agentTasks) {
         void task.mcpManager?.close();
@@ -201,6 +208,7 @@ Bun.serve<WsData>({
         }
         ws.data.activeAgentTaskSlot = task.slot;
         task.unread = false;
+        void persistAgentTasks(ws.data.agentTasks);
         sendAgentSession(ws, task);
         sendAgentTasks(ws);
         return;
@@ -209,6 +217,29 @@ Bun.serve<WsData>({
       if (message.type === "agent_back") {
         ws.data.activeAgentTaskSlot = undefined;
         sendAgentSession(ws);
+        return;
+      }
+
+      if (message.type === "agent_task_close") {
+        const index = ws.data.agentTasks.findIndex(
+          (task) => task.slot === message.slot,
+        );
+        if (index === -1) {
+          send(ws, {
+            type: "error",
+            message: `Unknown agent task /${message.slot}`,
+          });
+          return;
+        }
+        const [removed] = ws.data.agentTasks.splice(index, 1);
+        removed.abortController?.abort();
+        void removed.mcpManager?.close();
+        if (ws.data.activeAgentTaskSlot === removed.slot) {
+          ws.data.activeAgentTaskSlot = undefined;
+          sendAgentSession(ws);
+        }
+        void persistAgentTasks(ws.data.agentTasks);
+        sendAgentTasks(ws);
         return;
       }
 
@@ -226,6 +257,16 @@ Bun.serve<WsData>({
         ws.data.cancelRequested = ws.data.abortController !== undefined;
         ws.data.promptQueue.length = 0;
         ws.data.abortController?.abort();
+        return;
+      }
+
+      if (message.type === "ask_user_reply") {
+        const pending = ws.data.pendingAsk;
+        if (!pending) {
+          return;
+        }
+        ws.data.pendingAsk = undefined;
+        pending.resolve(message.reply);
         return;
       }
 

@@ -40,13 +40,48 @@ pub struct ToolCallDisplay {
     pub status: ToolStatus,
 }
 
+/// One step of a structured plan, shown in the dedicated Plan panel and, once
+/// the plan is complete, as a styled message in the transcript.
+#[derive(Debug, Clone)]
+pub struct PlanStep {
+    pub text: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanDisplay {
+    pub steps: Vec<PlanStep>,
+}
+
+/// One ordered display segment of an assistant turn. The server streams
+/// reasoning, text and tool calls in an interleaved sequence; keeping them in
+/// order lets the transcript render each piece where the model actually
+/// emitted it instead of grouping tools (or text) at the top or bottom.
+#[derive(Debug, Clone)]
+pub enum TurnSegment {
+    Tool(ToolCallDisplay),
+    Thinking(String),
+    Text(String),
+    Plan(PlanDisplay),
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatLine {
     pub role: String,
     pub text: String,
     pub sent_content: Option<String>,
-    pub thinking: String,
-    pub tools: Vec<ToolCallDisplay>,
+    /// Ordered display segments (thinking / text / tool calls) interleaved as
+    /// the model emitted them. `text` keeps the full accumulated content for
+    /// persistence; the segments drive display order.
+    pub segments: Vec<TurnSegment>,
+    /// Reasoning streamed since the last flush; flushed into `segments` when a
+    /// tool call, text or the end of the turn arrives, so long reasoning stays
+    /// collapsible and keeps its position before the tool call it precedes.
+    pub pending_thinking: String,
+    /// Text streamed since the last flush; flushed into a `Text` segment when
+    /// reasoning, a tool call or the end of the turn arrives, so markdown
+    /// blocks are not split across unrelated segments.
+    pub pending_text: String,
     pub duration_ms: Option<u64>,
     pub queued: bool,
 }
@@ -73,6 +108,7 @@ pub enum AgentEvent {
         name: String,
         output: String,
     },
+    AskUser(String),
     TurnDone,
     Error(String),
     Resumed,
@@ -237,6 +273,9 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
         ServerMessage::ToolResult { name, output } => {
             let _ = events.send(AgentEvent::ToolResult { name, output });
         }
+        ServerMessage::AskUser { question } => {
+            let _ = events.send(AgentEvent::AskUser(question));
+        }
         ServerMessage::Done => {
             let _ = events.send(AgentEvent::TurnDone);
         }
@@ -308,6 +347,11 @@ pub fn format_tool_call(name: &str, args: &str) -> String {
                     })
                     .count();
                 return format!("Plan · {completed}/{}", steps.len());
+            }
+        }
+        if name == "ask_user" {
+            if let Some(question) = parsed.get("question").and_then(|value| value.as_str()) {
+                return format!("Ask · {}", truncate(question, 48));
             }
         }
         if name == "schedule_task" {
@@ -421,6 +465,13 @@ mod tests {
                 r#"{"steps":[{"step":"Inspect","status":"completed"},{"step":"Verify","status":"in_progress"}]}"#
             ),
             "Plan · 1/2"
+        );
+        assert_eq!(
+            format_tool_call(
+                "ask_user",
+                r#"{"question":"Which stack should I use for the UI?"}"#
+            ),
+            "Ask · Which stack should I use for the UI?"
         );
         assert_eq!(
             format_tool_call(

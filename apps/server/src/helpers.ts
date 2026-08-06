@@ -1,3 +1,4 @@
+import type { ServerWebSocket } from "bun";
 import {
   getActiveProvider,
   mergeAgentMcpServers,
@@ -11,7 +12,7 @@ import {
   type AgentConfig,
   type Skill,
 } from "@g-agent/agent";
-import { config } from "./state.js";
+import { config, send, type WsData } from "./state.js";
 
 export function resolveProvider(
   agent: AgentConfig,
@@ -78,6 +79,34 @@ export function buildSkillPrompt(skill: Skill): string {
     "",
     "请立即开始执行该技能。需要用户输入时主动询问用户。",
   ].join("\n");
+}
+
+/**
+ * Create an `askUser` handler for a connection. Sends the question to the
+ * client as an `ask_user` event and resolves when `ask_user_reply` arrives.
+ * Rejects (and resolves the pending slot) if the connection drops or the turn
+ * is aborted, so an in-flight ask never hangs a turn forever.
+ */
+export function makeAskUserHandler(
+  ws: ServerWebSocket<WsData>,
+  signal?: AbortSignal,
+): (question: string) => Promise<string> {
+  return (question) =>
+    new Promise<string>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new Error("cancelled"));
+        return;
+      }
+      ws.data.pendingAsk = { resolve, reject };
+      send(ws, { type: "ask_user", question });
+      const onAbort = () => {
+        if (ws.data.pendingAsk?.reject === reject) {
+          ws.data.pendingAsk = undefined;
+        }
+        reject(new Error("cancelled"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
 }
 
 export type { McpServerConfig };

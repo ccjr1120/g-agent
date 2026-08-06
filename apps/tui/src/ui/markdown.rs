@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use markdown_ratatui::{render_with_links, Theme};
-use markdown_stream::{parse_gfm, Event, InlineStyle, Parser, StreamParser};
+use markdown_stream::{parse_gfm, Event, InlineStyle};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -37,10 +37,6 @@ impl MarkdownCache {
         self.static_cache.clear();
     }
 
-    pub fn render_static(&mut self, text: &str, width: u16) -> &[Line<'static>] {
-        self.render_static_with_links(text, width).0
-    }
-
     pub fn render_static_with_links(
         &mut self,
         text: &str,
@@ -53,63 +49,6 @@ impl MarkdownCache {
             CachedMarkdown { lines, links }
         });
         (&cached.lines, &cached.links)
-    }
-}
-
-pub struct StreamingMarkdown {
-    parser: StreamParser,
-    events: Vec<Event>,
-    fed_len: usize,
-    rendered: Vec<Line<'static>>,
-    links: Vec<LinkRegion>,
-}
-
-impl StreamingMarkdown {
-    pub fn new() -> Self {
-        Self {
-            parser: StreamParser::new_gfm(),
-            events: Vec::new(),
-            fed_len: 0,
-            rendered: Vec::new(),
-            links: Vec::new(),
-        }
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    pub fn sync(&mut self, text: &str, width: u16) {
-        if text.len() < self.fed_len {
-            self.reset();
-        }
-        if text.len() > self.fed_len {
-            let delta = &text[self.fed_len..];
-            self.events.extend(self.parser.write(delta.as_bytes()));
-            self.fed_len = text.len();
-        }
-        self.rerender(width);
-    }
-
-    pub fn flush(&mut self, text: &str, width: u16) {
-        self.sync(text, width);
-        self.events.extend(self.parser.flush());
-        self.rerender(width);
-    }
-
-    pub fn lines(&self) -> &[Line<'static>] {
-        &self.rendered
-    }
-
-    pub fn links(&self) -> &[LinkRegion] {
-        &self.links
-    }
-
-    fn rerender(&mut self, width: u16) {
-        let (text, links) =
-            render_with_links(&self.events, &Theme::default(), width.max(1) as usize);
-        self.rendered = text.lines;
-        self.links = links;
     }
 }
 

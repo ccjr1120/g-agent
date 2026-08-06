@@ -28,8 +28,16 @@ export type WsData = {
   effectiveProvider: ResolvedProvider | null;
   mcpManager: McpManager;
   agentTasks: BackgroundAgentTask[];
-  nextAgentTaskSlot: number;
   activeAgentTaskSlot?: number;
+  /**
+   * Resolver for an in-flight `ask_user` question awaiting a reply from the
+   * client. One question at a time per connection; a second ask while one is
+   * pending rejects the earlier one.
+   */
+  pendingAsk?: {
+    resolve: (reply: string) => void;
+    reject: (error: Error) => void;
+  };
 };
 
 export type BackgroundAgentTask = {

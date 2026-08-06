@@ -6,8 +6,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::agent::client::{ChatLine, ToolCallDisplay, ToolStatus};
-use crate::ui::markdown::{LinkRegion, MarkdownCache, StreamingMarkdown};
+use crate::agent::client::{
+    ChatLine, PlanDisplay, PlanStep, ToolCallDisplay, ToolStatus, TurnSegment,
+};
+use crate::ui::markdown::{render_inline_markdown, LinkRegion, MarkdownCache};
 use crate::ui::spinner::spinner_line;
 use crate::ui::theme::style;
 
@@ -24,6 +26,9 @@ const BANNER_TOP_PADDING_LINES: usize = 2;
 /// Thinking blocks longer than this are collapsed until the user toggles them.
 const THINKING_COLLAPSE_LINES: usize = 8;
 const THINKING_COLLAPSE_SHOWN: usize = 4;
+/// Tool calls beyond the most recent few are collapsed (like thinking) until
+/// the user toggles expansion with Ctrl+T.
+const TOOL_COLLAPSE_VISIBLE: usize = 2;
 
 fn content_width(viewport_width: u16) -> u16 {
     viewport_width
@@ -72,7 +77,6 @@ pub struct TranscriptContent<'a> {
 pub fn build_transcript_lines(
     content: &TranscriptContent<'_>,
     markdown: &mut MarkdownCache,
-    streaming_md: &StreamingMarkdown,
 ) -> (Vec<Line<'static>>, Vec<LinkRegion>) {
     let mut rendered: Vec<Line<'static>> = Vec::new();
     let mut links: Vec<LinkRegion> = Vec::new();
@@ -140,12 +144,35 @@ pub fn build_transcript_lines(
     }
 
     if content.waiting {
-        rendered.push(spinner_line(
-            "Thinking…",
-            content.clock,
-            content.turn_start,
-            false,
-        ));
+        if let Some(line) = content.streaming {
+            push_streaming_line(
+                &mut rendered,
+                &mut links,
+                line,
+                width,
+                markdown,
+                content.tool_elapsed,
+                content.expand_thinking,
+            );
+        }
+        // Keep a loading indicator visible for the whole turn — while the
+        // model reasons and runs tools. It is replaced by the streaming answer
+        // text only once no tool is still executing.
+        let text_streaming = content
+            .streaming
+            .is_some_and(|line| !line.text.trim().is_empty());
+        let tool_running = content.streaming.is_some_and(|line| {
+            line.segments.iter().any(|segment| {
+                matches!(segment, TurnSegment::Tool(tool) if tool.status == ToolStatus::Running)
+            })
+        });
+        if !text_streaming || tool_running {
+            let has_content = content.streaming.is_some_and(|line| {
+                !line.segments.is_empty() || !line.pending_thinking.trim().is_empty()
+            });
+            let label = if has_content { "Working…" } else { "Thinking…" };
+            rendered.push(spinner_line(label, content.clock, content.turn_start, false));
+        }
     } else if let Some(line) = content.streaming {
         push_streaming_line(
             &mut rendered,
@@ -153,7 +180,6 @@ pub fn build_transcript_lines(
             line,
             width,
             markdown,
-            streaming_md,
             content.tool_elapsed,
             content.expand_thinking,
         );
@@ -180,7 +206,6 @@ fn push_streaming_line(
     line: &ChatLine,
     width: u16,
     markdown: &mut MarkdownCache,
-    streaming_md: &StreamingMarkdown,
     tool_elapsed: Option<Instant>,
     expand_thinking: bool,
 ) {
@@ -189,38 +214,96 @@ fn push_streaming_line(
         return;
     }
 
-    let last_tool = line.tools.len().saturating_sub(1);
-    for (index, tool) in line.tools.iter().enumerate() {
-        let elapsed = if index == last_tool {
-            tool_elapsed.map(|start| start.elapsed())
-        } else {
-            None
-        };
-        lines.push(tool_line(tool, elapsed));
-    }
-    push_thinking_text(lines, &line.thinking, expand_thinking);
-    if streaming_md.lines().is_empty() {
-        push_assistant_plain(lines, &line.text);
-    } else {
-        let base = lines.len() as u16;
-        lines.extend(prefix_assistant_lines(streaming_md.lines()));
-        for region in streaming_md.links() {
-            links.push(offset_link_region(region, base, 2));
+    let last_tool = line
+        .segments
+        .iter()
+        .rposition(|segment| matches!(segment, TurnSegment::Tool(_)));
+    let tool_hidden = collapsed_tool_count(&line.segments, expand_thinking);
+    let mut tools_seen = 0usize;
+    let mut tool_hint_rendered = false;
+    let mut text_rendered = false;
+    let mut prev: Option<BlockKind> = None;
+    for (index, segment) in line.segments.iter().enumerate() {
+        match segment {
+            TurnSegment::Tool(tool) => {
+                tools_seen += 1;
+                if let Some(hidden) = tool_hidden {
+                    if tools_seen <= hidden {
+                        continue;
+                    }
+                }
+                prev = push_block_gap(lines, prev, BlockKind::Tool);
+                let collapse_hint = if !tool_hint_rendered {
+                    tool_hidden.map(|hidden| {
+                        let noun = if hidden == 1 { "call" } else { "calls" };
+                        format!("+{hidden} more {noun} · Ctrl+T")
+                    })
+                } else {
+                    None
+                };
+                tool_hint_rendered = true;
+                let elapsed = if Some(index) == last_tool {
+                    tool_elapsed.map(|start| start.elapsed())
+                } else {
+                    None
+                };
+                lines.push(tool_line(tool, elapsed, collapse_hint));
+            }
+            TurnSegment::Thinking(text) => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                prev = push_block_gap(lines, prev, BlockKind::Thinking);
+                push_thinking_text(lines, text, expand_thinking);
+            }
+            TurnSegment::Text(text) => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                prev = push_block_gap(lines, prev, BlockKind::Text);
+                push_assistant_body(lines, links, text, width, markdown);
+                text_rendered = true;
+            }
+            TurnSegment::Plan(plan) => {
+                prev = push_block_gap(lines, prev, BlockKind::Plan);
+                push_plan_block(lines, plan);
+                text_rendered = true;
+            }
         }
     }
-    lines.push(Line::from(""));
+    if !line.pending_thinking.trim().is_empty() {
+        prev = push_block_gap(lines, prev, BlockKind::Thinking);
+        push_thinking_text(lines, &line.pending_thinking, expand_thinking);
+    }
+    if !line.pending_text.trim().is_empty() {
+        prev = push_block_gap(lines, prev, BlockKind::Text);
+        push_assistant_body(lines, links, &line.pending_text, width, markdown);
+        text_rendered = true;
+    }
+    // Guard for streaming lines restored before the timeline existed (and for
+    // lines that only carried plain text): render the accumulated text last.
+    if !text_rendered && !line.text.trim().is_empty() {
+        push_block_gap(lines, prev, BlockKind::Text);
+        push_assistant_body(lines, links, &line.text, width, markdown);
+    }
+    if !line.segments.is_empty()
+        || !line.pending_thinking.trim().is_empty()
+        || !line.pending_text.trim().is_empty()
+        || !line.text.trim().is_empty()
+    {
+        lines.push(Line::from(""));
+    }
 }
 
 pub fn max_history_scroll(
     content: &TranscriptContent<'_>,
     markdown: &mut MarkdownCache,
-    streaming_md: &StreamingMarkdown,
     height: u16,
 ) -> u16 {
     if height == 0 {
         return 0;
     }
-    let (lines, _) = build_transcript_lines(content, markdown, streaming_md);
+    let (lines, _) = build_transcript_lines(content, markdown);
     let total = line_count(&lines, content_width(content.width.max(1)));
     total.saturating_sub(height)
 }
@@ -319,12 +402,71 @@ fn push_chat_line(
                 ]));
             }
         }
-        _ => {
-            for tool in &line.tools {
-                lines.push(tool_line(tool, None));
+        // A blocking ask_user question awaiting a reply — brand accent so it
+        // stands apart from system feedback and ordinary assistant text.
+        "ask" => {
+            for chunk in line.text.lines() {
+                lines.push(Line::from(vec![
+                    Span::styled("? ", style::ask()),
+                    Span::styled(chunk.to_string(), style::ask()),
+                ]));
             }
-            push_thinking_text(lines, &line.thinking, expand_thinking);
-            push_assistant_body(lines, links, &line.text, width, markdown);
+        }
+        _ => {
+            let tool_hidden = collapsed_tool_count(&line.segments, expand_thinking);
+            let mut tools_seen = 0usize;
+            let mut tool_hint_rendered = false;
+            let mut prev: Option<BlockKind> = None;
+            for segment in &line.segments {
+                match segment {
+                    TurnSegment::Tool(tool) => {
+                        tools_seen += 1;
+                        if let Some(hidden) = tool_hidden {
+                            if tools_seen <= hidden {
+                                continue;
+                            }
+                        }
+                        prev = push_block_gap(lines, prev, BlockKind::Tool);
+                        let collapse_hint = if !tool_hint_rendered {
+                            tool_hidden.map(|hidden| {
+                                let noun = if hidden == 1 { "call" } else { "calls" };
+                                format!("+{hidden} more {noun} · Ctrl+T")
+                            })
+                        } else {
+                            None
+                        };
+                        tool_hint_rendered = true;
+                        lines.push(tool_line(tool, None, collapse_hint));
+                    }
+                    TurnSegment::Thinking(text) => {
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        prev = push_block_gap(lines, prev, BlockKind::Thinking);
+                        push_thinking_text(lines, text, expand_thinking);
+                    }
+                    TurnSegment::Text(text) => {
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        prev = push_block_gap(lines, prev, BlockKind::Text);
+                        push_assistant_body(lines, links, text, width, markdown);
+                    }
+                    TurnSegment::Plan(plan) => {
+                        prev = push_block_gap(lines, prev, BlockKind::Plan);
+                        push_plan_block(lines, plan);
+                    }
+                }
+            }
+            // Guard for lines restored before the timeline existed: their text
+            // lives only in `text`, not in a Text segment.
+            let text_in_segments = line.segments.iter().any(|segment| {
+                matches!(segment, TurnSegment::Text(_) | TurnSegment::Plan(_))
+            });
+            if !text_in_segments && !line.text.trim().is_empty() {
+                push_block_gap(lines, prev, BlockKind::Text);
+                push_assistant_body(lines, links, &line.text, width, markdown);
+            }
         }
     }
 
@@ -338,8 +480,9 @@ fn push_chat_line(
     lines.push(Line::from(""));
 }
 
-/// Render a thinking block. Long blocks are collapsed to a few lines with a
-/// hint unless the user has toggled expansion.
+/// Render a thinking block. Long blocks are collapsed to a few lines with the
+/// "more" hint appended to the last shown line (never on its own line) unless
+/// the user has toggled expansion.
 fn push_thinking_text(lines: &mut Vec<Line<'static>>, text: &str, expand: bool) {
     if text.trim().is_empty() {
         return;
@@ -348,17 +491,21 @@ fn push_thinking_text(lines: &mut Vec<Line<'static>>, text: &str, expand: bool) 
     let chunks: Vec<&str> = text.lines().collect();
     let hidden = chunks.len().saturating_sub(THINKING_COLLAPSE_LINES);
     if hidden > 0 && !expand {
-        for chunk in chunks.iter().take(THINKING_COLLAPSE_SHOWN) {
-            lines.push(Line::from(vec![
+        let shown = THINKING_COLLAPSE_SHOWN.min(chunks.len());
+        for (index, chunk) in chunks.iter().take(shown).enumerate() {
+            let mut spans = vec![
                 Span::styled(THINKING_CONTINUATION, style),
                 Span::styled(chunk.to_string(), style),
-            ]));
+            ];
+            if index + 1 == shown {
+                let noun = if hidden == 1 { "line" } else { "lines" };
+                spans.push(Span::styled(
+                    format!(" ··· {hidden} more {noun} · Ctrl+T"),
+                    style::muted(),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
-        let hint = format!("··· {hidden} more thinking lines · Ctrl+T to expand");
-        lines.push(Line::from(vec![
-            Span::styled(THINKING_CONTINUATION, style),
-            Span::styled(hint, style::muted()),
-        ]));
         return;
     }
     for chunk in chunks {
@@ -440,10 +587,6 @@ fn assistant_body_width(viewport_width: u16) -> u16 {
     content_width(viewport_width)
         .saturating_sub(ASSISTANT_PREFIX.width() as u16)
         .max(20)
-}
-
-pub fn assistant_markdown_width(viewport_width: u16) -> u16 {
-    assistant_body_width(viewport_width)
 }
 
 fn push_assistant_body(
@@ -536,7 +679,11 @@ pub fn transcript_content_area(area: Rect) -> Rect {
     }
 }
 
-fn tool_line(tool: &ToolCallDisplay, elapsed: Option<std::time::Duration>) -> Line<'static> {
+fn tool_line(
+    tool: &ToolCallDisplay,
+    elapsed: Option<std::time::Duration>,
+    collapse_hint: Option<String>,
+) -> Line<'static> {
     let mut spans = vec![Span::styled(
         format!("{} {}", tool_icon(&tool.name), tool.label),
         style::tool_call(),
@@ -557,7 +704,85 @@ fn tool_line(tool: &ToolCallDisplay, elapsed: Option<std::time::Duration>) -> Li
         }
         ToolStatus::Running => {}
     }
+    if let Some(hint) = collapse_hint {
+        spans.push(Span::styled(format!("  {hint}"), style::muted()));
+    }
     Line::from(spans)
+}
+
+/// Build the styled spans for one plan step (status icon + inline markdown).
+/// Shared with the Plan panel so the transcript's completed plan matches the
+/// panel exactly.
+pub fn plan_step_spans(step: &PlanStep, text: &str) -> Vec<Span<'static>> {
+    let (icon, step_style) = match step.status.as_str() {
+        "completed" => ("✓", style::success()),
+        "in_progress" => ("●", style::brand_bold()),
+        _ => ("○", style::muted()),
+    };
+    let mut spans = vec![Span::styled(format!(" {icon} "), step_style)];
+    spans.extend(render_inline_markdown(text, step_style));
+    spans
+}
+
+/// How many of the oldest tool calls should be hidden (matching the thinking
+/// collapse) until the user expands with Ctrl+T. `None` when nothing is hidden.
+fn collapsed_tool_count(segments: &[TurnSegment], expand: bool) -> Option<usize> {
+    if expand {
+        return None;
+    }
+    let total = segments
+        .iter()
+        .filter(|segment| matches!(segment, TurnSegment::Tool(_)))
+        .count();
+    let hidden = total.saturating_sub(TOOL_COLLAPSE_VISIBLE);
+    (hidden > 0).then_some(hidden)
+}
+
+/// The kind of transcript block, used to space different kinds apart while
+/// keeping consecutive items of the same kind grouped (e.g. tool calls).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Tool,
+    Thinking,
+    Text,
+    Plan,
+}
+
+/// Insert a blank line between blocks unless they are consecutive items of the
+/// same *non-text* kind. Consecutive body texts are always separated (a model
+/// that pauses to think between two paragraphs should still show a gap), while
+/// tool calls and thinking lines stay grouped until a different kind arrives.
+fn push_block_gap(
+    lines: &mut Vec<Line<'static>>,
+    prev: Option<BlockKind>,
+    next: BlockKind,
+) -> Option<BlockKind> {
+    match prev {
+        // Different kinds always get breathing room.
+        Some(prev) if prev != next => lines.push(Line::from("")),
+        // Two body texts never merge into one block.
+        Some(BlockKind::Text) if next == BlockKind::Text => lines.push(Line::from("")),
+        _ => {}
+    }
+    Some(next)
+}
+
+/// Render a completed plan as a transcript message in the style of the Plan
+/// panel: a title line, a blank spacer, then the step lines.
+fn push_plan_block(lines: &mut Vec<Line<'static>>, plan: &PlanDisplay) {
+    let completed = plan
+        .steps
+        .iter()
+        .filter(|step| step.status == "completed")
+        .count();
+    lines.push(Line::from(Span::styled(
+        format!(" Plan {completed}/{} ", plan.steps.len()),
+        style::muted(),
+    )));
+    lines.push(Line::from(""));
+    for step in &plan.steps {
+        lines.push(Line::from(plan_step_spans(step, &step.text)));
+    }
 }
 
 fn tool_icon(name: &str) -> &'static str {
@@ -578,7 +803,7 @@ fn tool_icon(name: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::agent::client::ChatLine;
-    use crate::ui::markdown::{MarkdownCache, StreamingMarkdown};
+    use crate::ui::markdown::MarkdownCache;
     use std::time::Instant;
 
     fn sample_line(role: &str, text: &str, queued: bool) -> ChatLine {
@@ -586,8 +811,9 @@ mod tests {
             role: role.to_string(),
             text: text.to_string(),
             sent_content: None,
-            thinking: String::new(),
-            tools: Vec::new(),
+            segments: Vec::new(),
+            pending_thinking: String::new(),
+            pending_text: String::new(),
             duration_ms: None,
             queued,
         }
@@ -630,7 +856,7 @@ mod tests {
         };
         let mut markdown = MarkdownCache::new();
         let (rendered, links) =
-            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+            build_transcript_lines(&content, &mut markdown);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://example.com/docs");
         let text: String = rendered[links[0].line as usize]
@@ -694,8 +920,7 @@ mod tests {
             width: 80,
         };
         let mut markdown = MarkdownCache::new();
-        let streaming_md = StreamingMarkdown::new();
-        let (rendered, _) = build_transcript_lines(&content, &mut markdown, &streaming_md);
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
         let joined: String = rendered
             .iter()
             .map(|line| {
@@ -742,7 +967,7 @@ mod tests {
         };
         let mut markdown = MarkdownCache::new();
         let (rendered, _) =
-            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+            build_transcript_lines(&content, &mut markdown);
         let joined = rendered
             .iter()
             .map(|line| {
@@ -786,7 +1011,7 @@ mod tests {
         };
         let mut markdown = MarkdownCache::new();
         let (rendered, _) =
-            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+            build_transcript_lines(&content, &mut markdown);
         let joined = rendered
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -818,7 +1043,7 @@ mod tests {
         };
         let mut markdown = MarkdownCache::new();
         let (rendered, _) =
-            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+            build_transcript_lines(&content, &mut markdown);
         rendered
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -829,17 +1054,17 @@ mod tests {
     #[test]
     fn tools_render_completion_status() {
         let mut line = sample_line("assistant", "done", false);
-        line.tools = vec![
-            ToolCallDisplay {
+        line.segments = vec![
+            TurnSegment::Tool(ToolCallDisplay {
                 name: "bash".into(),
                 label: "ls -la".into(),
                 status: ToolStatus::Done,
-            },
-            ToolCallDisplay {
+            }),
+            TurnSegment::Tool(ToolCallDisplay {
                 name: "read".into(),
                 label: "README.md".into(),
                 status: ToolStatus::Failed,
-            },
+            }),
         ];
         let joined = render_single(line);
         assert!(joined.contains("✓"), "done tool should show a check");
@@ -853,10 +1078,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let mut line = sample_line("assistant", "answer", false);
-        line.thinking = thinking;
+        line.segments = vec![TurnSegment::Thinking(thinking)];
 
         let collapsed = render_single(line.clone());
-        assert!(collapsed.contains("more thinking lines"), "collapsed hint");
+        assert!(collapsed.contains("more lines · Ctrl+T"), "collapsed hint");
         assert!(
             !collapsed.contains("line 19"),
             "tail is hidden when collapsed"
@@ -880,7 +1105,7 @@ mod tests {
         };
         let mut markdown = MarkdownCache::new();
         let (rendered, _) =
-            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+            build_transcript_lines(&content, &mut markdown);
         let expanded = rendered
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -907,6 +1132,18 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_question_renders_with_brand_prefix_not_info() {
+        let ask = render_single(
+            sample_line("ask", "Which stack should I use?", false),
+        );
+        assert!(ask.contains("Which stack should I use?"));
+        assert!(
+            ask.contains("? ") && !ask.contains("ℹ ") && !ask.starts_with('●'),
+            "ask prompts use the brand question prefix, not the info/system one"
+        );
+    }
+
+    #[test]
     fn disconnected_shows_reconnect_banner() {
         let content = TranscriptContent {
             lines: &[],
@@ -926,7 +1163,7 @@ mod tests {
         };
         let mut markdown = MarkdownCache::new();
         let (rendered, _) =
-            build_transcript_lines(&content, &mut markdown, &StreamingMarkdown::new());
+            build_transcript_lines(&content, &mut markdown);
         let joined = rendered
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -934,4 +1171,413 @@ mod tests {
             .collect::<String>();
         assert!(joined.contains("Connection lost"));
     }
+
+    fn render_streaming(line: &ChatLine, waiting: bool) -> String {
+        let content = TranscriptContent {
+            lines: &[],
+            streaming: Some(line),
+            waiting,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: false,
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) =
+            build_transcript_lines(&content, &mut markdown);
+        rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn segments_render_in_emitted_order() {
+        let mut line = sample_line("assistant", "final answer", false);
+        line.segments = vec![
+            TurnSegment::Thinking("first reasoning".into()),
+            TurnSegment::Tool(ToolCallDisplay {
+                name: "bash".into(),
+                label: "ls -la".into(),
+                status: ToolStatus::Done,
+            }),
+            TurnSegment::Thinking("second reasoning".into()),
+            TurnSegment::Tool(ToolCallDisplay {
+                name: "read".into(),
+                label: "README.md".into(),
+                status: ToolStatus::Running,
+            }),
+        ];
+        let joined = render_streaming(&line, false);
+        let first = joined.find("first reasoning").unwrap();
+        let ls = joined.find("ls -la").unwrap();
+        let second = joined.find("second reasoning").unwrap();
+        let read = joined.find("README.md").unwrap();
+        let answer = joined.find("final answer").unwrap();
+        assert!(
+            first < ls && ls < second && second < read && read < answer,
+            "thinking/tools/text must render in emitted order"
+        );
+    }
+
+    #[test]
+    fn thinking_renders_before_its_tool_in_committed_lines() {
+        let mut line = sample_line("assistant", "answer", false);
+        line.segments = vec![
+            TurnSegment::Thinking("reasoning first".into()),
+            TurnSegment::Tool(ToolCallDisplay {
+                name: "bash".into(),
+                label: "git status".into(),
+                status: ToolStatus::Done,
+            }),
+        ];
+        let joined = render_single(line);
+        assert!(
+            joined.find("reasoning first").unwrap() < joined.find("git status").unwrap(),
+            "thinking must precede the tool it motivated"
+        );
+    }
+
+    #[test]
+    fn spinner_persists_while_tools_run_and_hides_once_text_streams() {
+        let tool = TurnSegment::Tool(ToolCallDisplay {
+            name: "bash".into(),
+            label: "sleep 30".into(),
+            status: ToolStatus::Running,
+        });
+        let mut running = sample_line("assistant", "", false);
+        running.segments = vec![tool.clone()];
+        let busy = render_streaming(&running, true);
+        assert!(
+            busy.contains("Working…"),
+            "loading indicator stays visible while a tool runs"
+        );
+
+        // Some text may have streamed earlier, but a tool still executing keeps
+        // the loading indicator visible.
+        let mut with_text = sample_line("assistant", "checked the files", false);
+        with_text.segments = vec![tool];
+        let mixed = render_streaming(&with_text, true);
+        assert!(
+            mixed.contains("Working…"),
+            "loading indicator stays visible while a tool still runs"
+        );
+
+        // Once the final answer streams and no tool is running, the answer text
+        // replaces the spinner.
+        let mut typing = sample_line("assistant", "the answer…", false);
+        typing.segments = vec![TurnSegment::Tool(ToolCallDisplay {
+            name: "read".into(),
+            label: "index.ts".into(),
+            status: ToolStatus::Done,
+        })];
+        let streaming = render_streaming(&typing, true);
+        assert!(
+            !streaming.contains("Working…"),
+            "the streaming answer replaces the spinner"
+        );
+    }
+
+    #[test]
+    fn text_renders_in_model_order_between_tools() {
+        let mut line = sample_line("assistant", "", false);
+        line.text = "checked the docs; calling a tool next".to_string();
+        line.segments = vec![
+            TurnSegment::Thinking("need to inspect".into()),
+            TurnSegment::Text("let me look at the files".into()),
+            TurnSegment::Tool(ToolCallDisplay {
+                name: "read".into(),
+                label: "index.ts".into(),
+                status: ToolStatus::Running,
+            }),
+            TurnSegment::Text("here is the answer".into()),
+        ];
+        let joined = render_streaming(&line, false);
+        let thinking = joined.find("need to inspect").unwrap();
+        let text1 = joined.find("let me look at the files").unwrap();
+        let tool = joined.find("index.ts").unwrap();
+        let text2 = joined.find("here is the answer").unwrap();
+        assert!(
+            thinking < text1 && text1 < tool && tool < text2,
+            "text and tools must render exactly in the order the model emitted them"
+        );
+    }
+
+    #[test]
+    fn completed_plan_renders_like_panel_with_spacer_above_body() {
+        let mut line = sample_line("assistant", "", false);
+        line.text = "Plan · 2/2\n  ✓ Inspect UI\n  ✓ Build panel".to_string();
+        line.segments = vec![TurnSegment::Plan(PlanDisplay {
+            steps: vec![
+                PlanStep {
+                    text: "Inspect UI".into(),
+                    status: "completed".into(),
+                },
+                PlanStep {
+                    text: "Build panel".into(),
+                    status: "completed".into(),
+                },
+            ],
+        })];
+
+        let content = TranscriptContent {
+            lines: &[line],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: false,
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
+        let joined: Vec<String> = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let header = joined
+            .iter()
+            .position(|l| l.contains("Plan 2/2"))
+            .expect("plan header");
+        assert!(
+            joined.get(header + 1).is_some_and(|l| l.is_empty()),
+            "a blank spacer line should separate the header from the body"
+        );
+        let body = joined
+            .iter()
+            .position(|l| l.contains("Inspect UI"))
+            .expect("plan step");
+        assert_eq!(body, header + 2, "the body starts after the spacer");
+        assert!(joined[body].contains("✓"), "steps use the panel check style");
+        assert!(joined[body + 1].contains("✓ Build panel"));
+    }
+
+    #[test]
+    fn tool_calls_collapse_to_most_recent_two_until_expanded() {
+        let mut line = sample_line("assistant", "done", false);
+        line.segments = (0..5)
+            .map(|i| {
+                TurnSegment::Tool(ToolCallDisplay {
+                    name: "bash".into(),
+                    label: format!("tool call {i}"),
+                    status: ToolStatus::Done,
+                })
+            })
+            .collect();
+
+        let collapsed = render_single(line.clone());
+        assert!(!collapsed.contains("tool call 0"), "oldest calls hidden");
+        assert!(!collapsed.contains("tool call 1"));
+        assert!(!collapsed.contains("tool call 2"));
+        assert!(
+            collapsed.contains("tool call 3") && collapsed.contains("tool call 4"),
+            "the most recent two calls stay visible"
+        );
+        assert!(
+            collapsed.contains("+3 more calls · Ctrl+T"),
+            "the first visible call carries the collapse hint"
+        );
+
+        let content = TranscriptContent {
+            lines: &[line],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: true,
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
+        let expanded = rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(expanded.contains("tool call 0"), "expansion shows everything");
+        assert!(!expanded.contains("Ctrl+T to expand"));
+    }
+
+    #[test]
+    fn different_block_kinds_are_separated_by_blank_lines() {
+        let mut line = sample_line("assistant", "the answer", false);
+        line.segments = vec![
+            TurnSegment::Thinking("reason one".into()),
+            TurnSegment::Tool(ToolCallDisplay {
+                name: "bash".into(),
+                label: "ls".into(),
+                status: ToolStatus::Done,
+            }),
+            TurnSegment::Tool(ToolCallDisplay {
+                name: "read".into(),
+                label: "README.md".into(),
+                status: ToolStatus::Done,
+            }),
+            TurnSegment::Thinking("reason two".into()),
+            TurnSegment::Text("the answer".into()),
+        ];
+        let content = TranscriptContent {
+            lines: &[line],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: false,
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
+        let joined: Vec<String> = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        let first = joined.iter().position(|l| l.contains("reason one")).unwrap();
+        let tool1 = joined.iter().position(|l| l.contains("ls")).unwrap();
+        let tool2 = joined.iter().position(|l| l.contains("README.md")).unwrap();
+        let second = joined.iter().position(|l| l.contains("reason two")).unwrap();
+        let answer = joined.iter().position(|l| l.contains("the answer")).unwrap();
+
+        // Consecutive tool calls stay grouped…
+        assert_eq!(tool2, tool1 + 1, "same-kind items stay together");
+        // …but different kinds get a blank line between them.
+        assert_eq!(tool1, first + 2, "blank line between thinking and tools");
+        assert_eq!(second, tool2 + 2, "blank line between tools and thinking");
+        assert_eq!(answer, second + 2, "blank line between thinking and reply");
+    }
+
+    #[test]
+    fn consecutive_text_segments_are_separated_by_a_blank_line() {
+        let mut line = sample_line("assistant", "the answer", false);
+        line.segments = vec![
+            TurnSegment::Text("First body text".into()),
+            TurnSegment::Text("Second body text".into()),
+        ];
+        let content = TranscriptContent {
+            lines: &[line],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: false,
+            width: 100,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
+        let joined: Vec<String> = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let first = joined
+            .iter()
+            .position(|l| l.contains("First body text"))
+            .expect("first body");
+        let second = joined
+            .iter()
+            .position(|l| l.contains("Second body text"))
+            .expect("second body");
+        assert_eq!(
+            second,
+            first + 2,
+            "two body texts must be separated by a blank line"
+        );
+    }
+
+    #[test]
+    fn collapsed_thinking_hint_rides_on_the_last_line() {
+        let thinking = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut line = sample_line("assistant", "answer", false);
+        line.segments = vec![TurnSegment::Thinking(thinking)];
+        let content = TranscriptContent {
+            lines: &[line],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: false,
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
+        let joined: Vec<String> = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let hint_line = joined
+            .iter()
+            .find(|l| l.contains("more lines"))
+            .expect("collapse hint");
+        assert!(
+            hint_line.contains("line 3") && hint_line.starts_with("  line"),
+            "the ellipsis hint is appended to the last shown thinking line"
+        );
+    }
 }
+
+

@@ -30,21 +30,14 @@ impl App {
             .skip(start)
             .take(visible)
             .map(|step| {
-                let (icon, step_style) = match step.status.as_str() {
-                    "completed" => ("✓", style::success()),
-                    "in_progress" => ("●", style::brand_bold()),
-                    _ => ("○", style::muted()),
-                };
                 let text = truncate_to_width(&step.text, width.saturating_sub(3) as usize);
-                let mut spans = vec![Span::styled(format!(" {icon} "), step_style)];
-                spans.extend(render_inline_markdown(&text, step_style));
-                Line::from(spans)
+                Line::from(plan_step_spans(step, &text))
             })
             .collect()
     }
 
     pub(super) fn agent_task_lines(&self, width: u16, scroll: u16) -> Vec<Line<'static>> {
-        self.agent_tasks
+        self.visible_agent_tasks()
             .iter()
             .skip(scroll as usize)
             .take(3)
@@ -110,6 +103,19 @@ impl App {
             .iter()
             .filter(|task| task.last_status != "cancelled")
             .collect()
+    }
+
+    /// Sub-agent sessions shown in the panel: everything except the one
+    /// currently being viewed, which is hidden while it has the transcript.
+    pub(super) fn visible_agent_tasks(&self) -> Vec<&crate::protocol::AgentTaskInfo> {
+        match self.active_child {
+            Some(active) => self
+                .agent_tasks
+                .iter()
+                .filter(|task| task.slot != active)
+                .collect(),
+            None => self.agent_tasks.iter().collect(),
+        }
     }
 
     /// Resolve a panel argument (1-based number or raw id) to (id, label).
@@ -215,11 +221,10 @@ impl App {
     }
 
     pub(super) fn clamp_history_scroll(&mut self, width: u16, height: u16) {
-        self.sync_streaming_markdown(width);
         let content = TranscriptContent {
             lines: &self.static_lines,
             streaming: self.streaming.as_ref(),
-            waiting: self.waiting_for_reply(),
+            waiting: self.turn_active(),
             banner: &self.banner,
             show_welcome: self.is_welcome_screen(),
             connecting: matches!(self.connection, ConnectionState::Connecting),
@@ -232,12 +237,20 @@ impl App {
             expand_thinking: self.expand_thinking,
             width,
         };
-        let max = max_history_scroll(
-            &content,
-            &mut self.markdown_cache,
-            &self.streaming_md,
-            height,
-        );
+        let max = max_history_scroll(&content, &mut self.markdown_cache, height);
+        if let Some(anchor) = self.scroll_anchor_y {
+            // Keep the viewport top pinned while the user is reading history:
+            // new content appended at the bottom grows the distance below but
+            // must not shift (or yank to) the bottom.
+            match anchored_offset(max, anchor) {
+                Some(offset) => self.history_scroll = offset,
+                None => {
+                    self.history_scroll = 0;
+                    self.scroll_anchor_y = None;
+                }
+            }
+            return;
+        }
         if self.history_scroll > max {
             self.history_scroll = max;
         }
@@ -246,11 +259,10 @@ impl App {
     pub(super) fn scroll_history(&mut self, delta: i16, transcript_area: Rect) {
         let width = transcript_area.width;
         let height = transcript_area.height;
-        self.sync_streaming_markdown(width);
         let content = TranscriptContent {
             lines: &self.static_lines,
             streaming: self.streaming.as_ref(),
-            waiting: self.waiting_for_reply(),
+            waiting: self.turn_active(),
             banner: &self.banner,
             show_welcome: self.is_welcome_screen(),
             connecting: matches!(self.connection, ConnectionState::Connecting),
@@ -263,18 +275,21 @@ impl App {
             expand_thinking: self.expand_thinking,
             width,
         };
-        let max = max_history_scroll(
-            &content,
-            &mut self.markdown_cache,
-            &self.streaming_md,
-            height,
-        );
+        let max = max_history_scroll(&content, &mut self.markdown_cache, height);
         if max == 0 {
             self.history_scroll = 0;
+            self.scroll_anchor_y = None;
             return;
         }
         self.history_scroll =
             ((self.history_scroll as i32 + delta as i32).clamp(0, max as i32)) as u16;
+        // Anchor the viewport top to the row just shown so content streaming in
+        // below keeps this position instead of pushing the view.
+        self.scroll_anchor_y = if self.history_scroll > 0 {
+            Some(max.saturating_sub(self.history_scroll))
+        } else {
+            None
+        };
     }
 
     pub(super) fn copy_last_reply(&mut self) {
@@ -304,7 +319,7 @@ impl App {
     pub(super) fn focused_panel_max_scroll(&self) -> u16 {
         match self.panel_focus {
             PanelFocus::Scheduled => self.visible_scheduled_tasks().len().saturating_sub(3) as u16,
-            PanelFocus::Tasks => self.agent_tasks.len().saturating_sub(3) as u16,
+            PanelFocus::Tasks => self.visible_agent_tasks().len().saturating_sub(3) as u16,
             PanelFocus::Transcript => 0,
         }
     }
@@ -327,7 +342,7 @@ impl App {
                 PanelFocus::Scheduled,
                 !self.visible_scheduled_tasks().is_empty(),
             ),
-            (PanelFocus::Tasks, !self.agent_tasks.is_empty()),
+            (PanelFocus::Tasks, !self.visible_agent_tasks().is_empty()),
         ];
         let start = match self.panel_focus {
             PanelFocus::Transcript => 0,
@@ -352,5 +367,42 @@ impl App {
         self.panel_focus = PanelFocus::Transcript;
         self.scheduled_scroll = 0;
         self.task_scroll = 0;
+    }
+}
+
+/// The offset-from-bottom that keeps the viewport top pinned at `anchor` for
+/// the current total scroll range `max`. `None` when content shrank past the
+/// anchor — then the transcript should follow the bottom again.
+fn anchored_offset(max: u16, anchor: u16) -> Option<u16> {
+    let offset = max.saturating_sub(anchor.min(max));
+    (offset > 0).then_some(offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::anchored_offset;
+
+    #[test]
+    fn new_content_grows_the_offset_below_without_moving_the_view() {
+        // Viewport pinned 10 rows from the bottom of a 100-row range.
+        let anchor = 90;
+        assert_eq!(anchored_offset(100, anchor), Some(10));
+        // Streaming adds 30 rows: the pinned top keeps showing the same
+        // content; only the "rows below" count grows.
+        assert_eq!(anchored_offset(130, anchor), Some(40));
+        assert_eq!(anchored_offset(160, anchor), Some(70));
+    }
+
+    #[test]
+    fn pinned_at_the_top_stays_at_the_top() {
+        // User scrolled to the very top: viewport top is row 0.
+        assert_eq!(anchored_offset(100, 0), Some(100));
+        assert_eq!(anchored_offset(200, 0), Some(200));
+    }
+
+    #[test]
+    fn content_shrinking_past_the_anchor_returns_to_following() {
+        // Content got shorter than the pinned position — drop the pin.
+        assert_eq!(anchored_offset(50, 90), None);
     }
 }

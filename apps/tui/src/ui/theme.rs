@@ -63,6 +63,17 @@ pub mod style {
         Style::default().fg(palette::WARNING)
     }
 
+    /// A blocking `ask_user` question shown to the user (brand accent so it
+    /// stands out from ordinary system feedback).
+    pub fn ask() -> Style {
+        brand_bold()
+    }
+
+    /// Placeholder / hint inside the composer while answering an ask_user prompt.
+    pub fn ask_hint() -> Style {
+        Style::default().fg(palette::MUTED)
+    }
+
     /// System feedback / command results rendered in the transcript
     /// (distinct from assistant replies).
     pub fn system() -> Style {

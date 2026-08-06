@@ -41,6 +41,7 @@
 - Slash Command 的执行结果与用法提示。
 - 开关状态反馈、复制/导出结果、重载与重连反馈。
 - 面向用户的警告、失败原因和错误信息。
+- `ask_user` 的阻塞提问与用户的回答。
 
 本地反馈应使用区别于 `user` / `assistant` 的消息角色，避免写入发送给模型的会话历史，但渲染顺序必须与普通消息一致。
 
@@ -74,6 +75,7 @@
 | 工具调用 | `style::tool_call()` | 灰色单行标签 |
 | 耗时 | `style::muted()` | 如 `· 1.2s` |
 | 等待 spinner | `spinner_line(...)` | 见下方 Spinner |
+| ask_user 提问 | `style::ask()` | 品牌色 `? ` 前缀，区别于系统反馈，等待用户回答 |
 
 助手正文中的 Markdown（代码块、链接等）目前由 `markdown_ratatui` 默认主题渲染，后续可对齐本规范。
 
@@ -83,6 +85,7 @@
 | --- | --- | --- |
 | 输入框（可用） | `style::composer_active()` | 品牌色 |
 | 输入框（禁用） | `style::composer_disabled()` | 灰色 |
+| ask_user 回答提示 | `style::ask_hint()` | 灰色，显示在输入框首行，如 `Answer: <截断的问题>` |
 | 命令菜单选中项 | `style::menu_selected()` | 品牌色加粗 |
 | 命令菜单描述 | `style::menu_description()` | 灰色 |
 | 菜单提示行 | `style::muted()` | 如 `Commands · ↑↓ select ...` |

@@ -26,19 +26,18 @@ impl App {
             history
                 .into_iter()
                 .map(|turn| ChatLine {
-                    role: turn.role,
+                    role: turn.role.clone(),
                     text: turn.content.clone(),
-                    sent_content: Some(turn.content),
-                    thinking: turn.thinking,
-                    tools: turn
-                        .tools
-                        .into_iter()
-                        .map(|tool| ToolCallDisplay {
-                            label: format_tool_call(&tool.name, &tool.args),
-                            name: tool.name,
-                            status: ToolStatus::Done,
-                        })
-                        .collect(),
+                    sent_content: Some(turn.content.clone()),
+                    segments: restored_segments(
+                        &turn.role,
+                        &turn.content,
+                        &turn.thinking,
+                        &turn.tools,
+                        ToolStatus::Done,
+                    ),
+                    pending_thinking: String::new(),
+                    pending_text: String::new(),
                     duration_ms: turn.duration_ms,
                     queued: false,
                 })
@@ -46,18 +45,17 @@ impl App {
         };
         self.streaming = active_turn.map(|turn| ChatLine {
             role: "assistant".to_string(),
-            text: turn.content,
+            text: turn.content.clone(),
             sent_content: None,
-            thinking: turn.thinking,
-            tools: turn
-                .tools
-                .into_iter()
-                .map(|tool| ToolCallDisplay {
-                    label: format_tool_call(&tool.name, &tool.args),
-                    name: tool.name,
-                    status: ToolStatus::Running,
-                })
-                .collect(),
+            segments: restored_segments(
+                "assistant",
+                &turn.content,
+                &turn.thinking,
+                &turn.tools,
+                ToolStatus::Running,
+            ),
+            pending_thinking: String::new(),
+            pending_text: String::new(),
             duration_ms: None,
             queued: false,
         });
@@ -67,9 +65,9 @@ impl App {
         self.tool_start = None;
         self.in_flight = None;
         self.send_queue.clear();
-        self.streaming_md.reset();
-        self.markdown_cache.clear();
+                self.markdown_cache.clear();
         self.history_scroll = 0;
+        self.scroll_anchor_y = None;
         self.reset_panel_scroll();
         self.restore_active_child_progress();
         self.rebuild_commands();
@@ -109,8 +107,9 @@ impl App {
                     role: "assistant".to_string(),
                     text: String::new(),
                     sent_content: None,
-                    thinking: String::new(),
-                    tools: Vec::new(),
+                    segments: Vec::new(),
+                    pending_thinking: String::new(),
+                    pending_text: String::new(),
                     duration_ms: None,
                     queued: false,
                 });
@@ -129,8 +128,9 @@ impl App {
                 role: turn.role,
                 text: turn.content.clone(),
                 sent_content: Some(turn.content),
-                thinking: String::new(),
-                tools: Vec::new(),
+                segments: Vec::new(),
+                pending_thinking: String::new(),
+                pending_text: String::new(),
                 duration_ms: None,
                 queued: false,
             })
@@ -138,8 +138,7 @@ impl App {
         self.streaming = None;
         self.pending = false;
         self.streaming_flag = false;
-        self.streaming_md.reset();
-        self.markdown_cache.clear();
+                self.markdown_cache.clear();
     }
 
     pub(super) fn persist_session(&mut self) {
@@ -185,5 +184,69 @@ impl App {
         let _ = save_session(&session);
         self.saved_sessions = list_sessions().unwrap_or_default();
         self.rebuild_commands();
+    }
+}
+
+/// Reconstruct ordered segments for a restored turn. The server stores
+/// reasoning, body text and tools in separate fields (no interleaving
+/// information), so the body text is placed between the reasoning and the tool
+/// calls — the shape agents actually run (reason first, then announce work in
+/// text, then call tools). This keeps the reply from being dumped after every
+/// tool call.
+pub(crate) fn restored_segments(
+    role: &str,
+    content: &str,
+    thinking: &str,
+    tools: &[crate::protocol::AgentTurnTool],
+    status: ToolStatus,
+) -> Vec<TurnSegment> {
+    let mut segments = Vec::new();
+    if !thinking.trim().is_empty() {
+        segments.push(TurnSegment::Thinking(thinking.to_string()));
+    }
+    if role == "assistant" && !content.trim().is_empty() {
+        segments.push(TurnSegment::Text(content.to_string()));
+    }
+    for tool in tools {
+        segments.push(TurnSegment::Tool(ToolCallDisplay {
+            name: tool.name.clone(),
+            label: format_tool_call(&tool.name, &tool.args),
+            status,
+        }));
+    }
+    segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restored_segments_place_text_before_tools() {
+        let segments = restored_segments(
+            "assistant",
+            "Here is the reply",
+            "Some reasoning",
+            &[crate::protocol::AgentTurnTool {
+                name: "read".into(),
+                args: "{\"path\":\"README.md\"}".into(),
+            }],
+            ToolStatus::Done,
+        );
+        assert!(matches!(segments[0], TurnSegment::Thinking(_)));
+        assert!(matches!(&segments[1], TurnSegment::Text(t) if t == "Here is the reply"));
+        assert!(matches!(segments[2], TurnSegment::Tool(_)));
+    }
+
+    #[test]
+    fn restored_user_turn_omits_text_segment() {
+        let segments = restored_segments(
+            "user",
+            "hello",
+            "",
+            &[],
+            ToolStatus::Done,
+        );
+        assert!(segments.is_empty(), "user turns carry no display segments");
     }
 }

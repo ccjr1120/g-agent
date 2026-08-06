@@ -40,6 +40,10 @@ pub enum ClientMessage {
     },
     Cancel,
     Reset,
+    #[serde(rename = "ask_user_reply")]
+    AskUserReply {
+        reply: String,
+    },
     Agent {
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
@@ -62,6 +66,10 @@ pub enum ClientMessage {
     AgentTasks,
     #[serde(rename = "agent_back")]
     AgentBack,
+    #[serde(rename = "agent_task_close")]
+    AgentTaskClose {
+        slot: u64,
+    },
     Resume {
         agent: String,
         history: Vec<ConversationTurn>,
@@ -123,6 +131,10 @@ pub enum ServerMessage {
     ToolResult {
         name: String,
         output: String,
+    },
+    #[serde(rename = "ask_user")]
+    AskUser {
+        question: String,
     },
     Done,
     Error {
@@ -333,6 +345,13 @@ mod tests {
     }
 
     #[test]
+    fn serializes_agent_task_close_command() {
+        let raw = serde_json::to_string(&ClientMessage::AgentTaskClose { slot: 2 })
+            .expect("serialize agent task close command");
+        assert_eq!(raw, r#"{"type":"agent_task_close","slot":2}"#);
+    }
+
+    #[test]
     fn parses_agent_sub_session() {
         let message = parse_server_message(
             r#"{"type":"agent_session","slot":2,"agent":"reviewer","model":"openai/test","history":[{"role":"user","content":"check this"}],"activeTurn":{"content":"working","thinking":"inspect","tools":[{"name":"read","args":"{\"path\":\"README.md\"}"}]}}"#,
@@ -429,5 +448,26 @@ mod tests {
             Some(ServerMessage::ScheduledTasks { tasks })
                 if tasks[0].auth_required && tasks[0].last_status == "error"
         ));
+    }
+
+    #[test]
+    fn parses_ask_user_question_from_server() {
+        let message = parse_server_message(
+            r#"{"type":"ask_user","question":"Which tech stack should I use?"}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::AskUser { question })
+                if question == "Which tech stack should I use?"
+        ));
+    }
+
+    #[test]
+    fn serializes_ask_user_reply_command() {
+        let raw = serde_json::to_string(&ClientMessage::AskUserReply {
+            reply: "Rust".into(),
+        })
+        .expect("serialize ask user reply");
+        assert_eq!(raw, r#"{"type":"ask_user_reply","reply":"Rust"}"#);
     }
 }

@@ -28,8 +28,8 @@ use tokio::sync::mpsc;
 pub(super) use ratatui::text::{Line, Span};
 
 pub(super) use crate::agent::client::{
-    format_tool_call, AgentClient, AgentEvent, ChatLine, ConnectionState, ContextUsage,
-    ToolCallDisplay, ToolStatus,
+    format_tool_call, AgentClient, AgentEvent, ChatLine, ConnectionState, ContextUsage, PlanDisplay,
+    ToolCallDisplay, ToolStatus, TurnSegment,
 };
 pub(super) use crate::protocol::{
     ActiveAgentTurn, AgentInfo, AgentTaskInfo, ClientMessage, ConversationTurn, McpServerInfo,
@@ -42,15 +42,14 @@ pub(super) use crate::session::{
 pub(super) use crate::ui::composer::{
     command_group_id, menu_height, Composer, ComposerWidget, InputHistory, MenuWidget, SlashCommand,
 };
-pub(super) use crate::ui::markdown::{render_inline_markdown, MarkdownCache, StreamingMarkdown};
+pub(super) use crate::ui::markdown::{render_inline_markdown, MarkdownCache};
 pub(super) use crate::ui::status::{StatusBar, STATUS_HEIGHT};
 pub(super) use crate::ui::theme::style;
 pub(super) use crate::ui::transcript::{
-    assistant_markdown_width, build_transcript_lines, link_regions_to_screen, max_history_scroll,
+    build_transcript_lines, link_regions_to_screen, max_history_scroll, plan_step_spans,
     transcript_content_area, ScreenLinkRegion, TranscriptContent, TranscriptWidget,
 };
-pub(super) use model::{PanelFocus, PlanDisplay};
-
+pub(super) use model::PanelFocus;
 pub struct App {
     banner: Vec<String>,
     client: Arc<AgentClient>,
@@ -101,6 +100,9 @@ pub struct App {
     link_regions: Vec<ScreenLinkRegion>,
 
     history_scroll: u16,
+    /// When the user scrolls up through history, the viewport top line to keep
+    /// pinned so incoming content does not shift (or yank back to) the bottom.
+    scroll_anchor_y: Option<u16>,
     should_quit: bool,
     session_id: Option<String>,
     session_started_at: i64,
@@ -114,8 +116,10 @@ pub struct App {
     has_connected_once: bool,
     started_at: Instant,
     markdown_cache: MarkdownCache,
-    streaming_md: StreamingMarkdown,
     last_transcript_width: u16,
+    /// A blocking `ask_user` question awaiting a reply. While set, the
+    /// composer submits an `ask_user_reply` instead of a chat message.
+    pending_ask: Option<String>,
 }
 
 impl App {
@@ -161,6 +165,7 @@ impl App {
             notified_task_slots: HashSet::new(),
             link_regions: Vec::new(),
             history_scroll: 0,
+            scroll_anchor_y: None,
             should_quit: false,
             session_id: None,
             session_started_at: chrono::Utc::now().timestamp(),
@@ -174,8 +179,8 @@ impl App {
             has_connected_once: false,
             started_at: Instant::now(),
             markdown_cache: MarkdownCache::new(),
-            streaming_md: StreamingMarkdown::new(),
             last_transcript_width: 80,
+            pending_ask: None,
         }
     }
 
@@ -211,12 +216,11 @@ impl App {
             if dirty || self.has_live_animation() {
                 let width = transcript_area.width;
                 self.last_transcript_width = width;
-                self.sync_streaming_markdown(width);
                 let show_welcome = self.is_welcome_screen();
                 let content = TranscriptContent {
                     lines: &self.static_lines,
                     streaming: self.streaming.as_ref(),
-                    waiting: self.waiting_for_reply(),
+                    waiting: self.turn_active(),
                     banner: &self.banner,
                     show_welcome,
                     connecting: matches!(self.connection, ConnectionState::Connecting),
@@ -230,7 +234,7 @@ impl App {
                     width,
                 };
                 let (transcript_lines, link_regions) =
-                    build_transcript_lines(&content, &mut self.markdown_cache, &self.streaming_md);
+                    build_transcript_lines(&content, &mut self.markdown_cache);
                 let content_area = transcript_content_area(transcript_area);
                 self.link_regions = link_regions_to_screen(
                     &transcript_lines,
@@ -270,7 +274,7 @@ impl App {
     /// True while anything on screen is animating and needs periodic repaints.
     fn has_live_animation(&self) -> bool {
         matches!(self.connection, ConnectionState::Connecting)
-            || self.waiting_for_reply()
+            || self.turn_active()
             || self.tool_start.is_some()
             || self.scheduled_tasks.iter().any(|task| task.running)
             || self
@@ -324,11 +328,18 @@ impl App {
             !matches!(self.connection, ConnectionState::Connected),
         )
         .render(inner, buf);
+        if let Some(question) = &self.pending_ask {
+            let hint = truncate_ask_hint(question, chunks[5].width);
+            let line = Line::from(Span::styled(hint, style::ask_hint()));
+            if inner.height > 0 {
+                buf.set_line(inner.x, inner.y, &line, inner.width);
+            }
+        }
     }
 
-    /// Render the Plan / Scheduled Tasks / Sub Agents stack. A 1-row spacer
-    /// above every visible panel keeps it from touching the transcript or the
-    /// panel above it.
+    /// Render the Plan / Scheduled Tasks / Sub Agents stack. A single 1-row
+    /// spacer sits above the first visible panel to separate it from the
+    /// transcript; panels stack directly on each other.
     fn render_panels(&self, region: Rect, buf: &mut ratatui::buffer::Buffer) {
         if region.height == 0 {
             return;
@@ -355,7 +366,7 @@ impl App {
                         .border_style(style::border()),
                 )
                 .render(rect, buf);
-            y = y.saturating_add(height).saturating_add(1);
+            y = y.saturating_add(height);
         }
 
         if !self.visible_scheduled_tasks().is_empty() {
@@ -390,10 +401,10 @@ impl App {
                     .border_style(border),
             )
             .render(rect, buf);
-            y = y.saturating_add(height).saturating_add(1);
+            y = y.saturating_add(height);
         }
 
-        if !self.agent_tasks.is_empty() {
+        if !self.visible_agent_tasks().is_empty() {
             let height = self.task_height();
             let rect = Rect {
                 x: region.x,
@@ -406,9 +417,9 @@ impl App {
             } else {
                 style::border()
             };
-            let visible = self.agent_tasks.len().min(3);
-            let title = if visible < self.agent_tasks.len() {
-                format!(" Sub Agents ({visible}/{}) ", self.agent_tasks.len())
+            let visible = self.visible_agent_tasks().len().min(3);
+            let title = if visible < self.visible_agent_tasks().len() {
+                format!(" Sub Agents ({visible}/{}) ", self.visible_agent_tasks().len())
             } else {
                 " Sub Agents ".into()
             };
@@ -443,10 +454,15 @@ impl App {
     }
 
     fn is_welcome_screen(&self) -> bool {
-        self.static_lines.is_empty() && self.streaming.is_none() && !self.waiting_for_reply()
+        self.static_lines.is_empty() && self.streaming.is_none() && !self.turn_active()
     }
 
-    fn waiting_for_reply(&self) -> bool {
+    /// True while a turn is in progress: a reply is pending, streaming, or the
+    /// viewed background agent is still running. Unlike the old "waiting for
+    /// the first token" check this stays true for the whole turn, so the
+    /// loading indicator and repaint loop keep running while the model reasons
+    /// or executes tools.
+    fn turn_active(&self) -> bool {
         let server_reports_running = self
             .active_child
             .and_then(|slot| {
@@ -457,21 +473,7 @@ impl App {
             })
             .unwrap_or(false);
 
-        (self.pending || self.streaming_flag || server_reports_running)
-            && self.streaming.as_ref().is_none_or(|line| {
-                line.text.trim().is_empty()
-                    && line.thinking.trim().is_empty()
-                    && line.tools.is_empty()
-            })
-    }
-
-    fn sync_streaming_markdown(&mut self, width: u16) {
-        if let Some(line) = self.streaming.as_ref() {
-            if line.role == "assistant" {
-                self.streaming_md
-                    .sync(&line.text, assistant_markdown_width(width));
-            }
-        }
+        self.pending || self.streaming_flag || server_reports_running
     }
 
     fn transcript_area(&self, area: Rect) -> Rect {
@@ -511,18 +513,18 @@ impl App {
     }
 
     fn task_height(&self) -> u16 {
-        if self.agent_tasks.is_empty() {
+        if self.visible_agent_tasks().is_empty() {
             0
         } else {
-            (self.agent_tasks.len().min(3) as u16)
+            (self.visible_agent_tasks().len().min(3) as u16)
                 .saturating_mul(2)
                 .saturating_add(2)
         }
     }
 
-    /// Combined height of the Plan / Scheduled Tasks / Sub Agents panels,
-    /// including a 1-row spacer above each visible panel so panels never touch
-    /// the transcript or each other.
+    /// Combined height of the Plan / Scheduled Tasks / Sub Agents panels. A
+    /// single 1-row spacer sits above the first visible panel; panels then
+    /// stack directly on each other.
     fn panel_region_height(&self) -> u16 {
         let mut height = 0u16;
         for panel_height in [
@@ -531,9 +533,27 @@ impl App {
             self.task_height(),
         ] {
             if panel_height > 0 {
-                height = height.saturating_add(panel_height).saturating_add(1);
+                if height == 0 {
+                    height = panel_height.saturating_add(1);
+                } else {
+                    height = height.saturating_add(panel_height);
+                }
             }
         }
         height
     }
+}
+
+/// Compose the "answering" hint shown inside the composer while an ask_user
+/// question awaits a reply, truncated to the composer width.
+fn truncate_ask_hint(question: &str, width: u16) -> String {
+    let prefix = "Answer: ";
+    let max = width.saturating_sub(2) as usize;
+    let text = question.replace('\n', " ");
+    if prefix.chars().count() + text.chars().count() <= max || max == 0 {
+        return format!("{prefix}{text}");
+    }
+    let budget = max.saturating_sub(prefix.chars().count() + 1);
+    let truncated = text.chars().take(budget).collect::<String>();
+    format!("{prefix}{truncated}…")
 }

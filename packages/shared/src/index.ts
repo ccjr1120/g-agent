@@ -44,6 +44,7 @@ export type ClientMessage =
   | { type: "chat"; message: string }
   | { type: "cancel" }
   | { type: "reset" }
+  | { type: "ask_user_reply"; reply: string }
   | { type: "agent"; name?: string; message?: string }
   | { type: "skill"; name: string }
   | { type: "mcp" }
@@ -52,6 +53,7 @@ export type ClientMessage =
   | { type: "agent_task"; slot: number }
   | { type: "agent_tasks" }
   | { type: "agent_back" }
+  | { type: "agent_task_close"; slot: number }
   | { type: "resume"; agent: string; history: ConversationTurn[] }
   | { type: "scheduled_tasks" }
   | { type: "scheduled_task_cancel"; id: string }
@@ -104,6 +106,7 @@ export type ServerMessage =
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "tool_result"; name: string; output: string }
+  | { type: "ask_user"; question: string }
   | { type: "done" }
   | { type: "error"; message: string }
   | { type: "resumed"; agent: string; turns: number }
@@ -140,6 +143,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
   try {
     const data = JSON.parse(raw) as ClientMessage;
     if (data.type === "chat" && typeof data.message === "string") {
+      return data;
+    }
+    if (data.type === "ask_user_reply" && typeof data.reply === "string") {
       return data;
     }
     if (data.type === "reset") {
@@ -179,6 +185,14 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       return data;
     }
     if (data.type === "agent_back") {
+      return data;
+    }
+    if (
+      data.type === "agent_task_close" &&
+      typeof data.slot === "number" &&
+      Number.isInteger(data.slot) &&
+      data.slot > 0
+    ) {
       return data;
     }
     if (data.type === "resume") {

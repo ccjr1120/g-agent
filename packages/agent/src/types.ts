@@ -13,6 +13,13 @@ export type AgentRunOptions = {
    * correct agent's data instead of the global default.
    */
   agentName?: string;
+  /**
+   * Optional handler that shows a blocking question to the user and resolves
+   * with their reply. Used by the `ask_user` tool so the agent can clarify
+   * requirements before committing to a plan instead of derailing mid-plan.
+   * When absent, `ask_user` reports that user input is unavailable.
+   */
+  askUser?: (question: string) => Promise<string>;
 };
 
 export type AgentStreamEvent =
