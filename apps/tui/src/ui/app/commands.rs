@@ -18,7 +18,7 @@ impl App {
             },
             SlashCommand {
                 value: "/mcp".into(),
-                description: "Select an MCP server".into(),
+                description: "Select an MCP server and view its tools".into(),
             },
             SlashCommand {
                 value: "/tasks".into(),
@@ -234,6 +234,7 @@ impl App {
             "  Ctrl+C cancel the running/queued turn · Esc undo last send / cancel\n",
             "  Ctrl+T expand or collapse long thinking blocks\n",
             "  Tab cycles focus through Scheduled Tasks / Sub Agents panels (↑↓/PgUp/PgDn scroll, Esc returns)\n",
+            "  While an Ask question is pending: ←/→ switch · ↑/↓ pick option · Enter answer · Esc skip\n",
             "  Click a link in the transcript to open it in the browser\n",
             "  Cmd+0 or Alt+0 return to the main agent\n",
             "  Ctrl+Y or Cmd+C copy last reply\n",

@@ -121,7 +121,7 @@ impl Renderer {
     fn new(theme: Theme, width: usize) -> Self {
         Renderer {
             theme,
-            width: width.max(20),
+            width: width.max(1),
             prefixes: Vec::new(),
             list_stack: Vec::new(),
             segments: Vec::new(),
@@ -347,7 +347,7 @@ impl Renderer {
         self.gap();
         let segments = std::mem::take(&mut self.segments);
         let (cont_spans, cont_w) = self.indent_cont_spans();
-        let avail = self.width.saturating_sub(cont_w).max(20);
+        let avail = self.width.saturating_sub(cont_w).max(1);
         let (first_spans, _) = self.indent_first_spans();
         self.cur.extend(first_spans);
 
@@ -711,6 +711,18 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn narrow_width_does_not_force_min_20_columns() {
+        // A sub-20-column viewport must wrap to the given width instead of
+        // clamping to 20 and overflowing the terminal.
+        let ls = lines("alpha beta gamma delta epsilon\n", 12);
+        assert!(
+            ls.iter().all(|l| l.width() <= 12),
+            "every line must fit the requested width: {ls:?}"
+        );
+        assert!(ls.len() > 1, "content should wrap: {ls:?}");
     }
 
     #[test]

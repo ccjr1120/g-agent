@@ -42,6 +42,7 @@ pub enum ClientMessage {
     Reset,
     #[serde(rename = "ask_user_reply")]
     AskUserReply {
+        id: String,
         reply: String,
     },
     Agent {
@@ -134,7 +135,10 @@ pub enum ServerMessage {
     },
     #[serde(rename = "ask_user")]
     AskUser {
+        id: String,
         question: String,
+        #[serde(default)]
+        options: Vec<String>,
     },
     Done,
     Error {
@@ -453,21 +457,40 @@ mod tests {
     #[test]
     fn parses_ask_user_question_from_server() {
         let message = parse_server_message(
-            r#"{"type":"ask_user","question":"Which tech stack should I use?"}"#,
+            r#"{"type":"ask_user","id":"a1","question":"Which tech stack should I use?"}"#,
         );
         assert!(matches!(
             message,
-            Some(ServerMessage::AskUser { question })
-                if question == "Which tech stack should I use?"
+            Some(ServerMessage::AskUser {
+                id,
+                question,
+                options
+            }) if id == "a1" && question == "Which tech stack should I use?" && options.is_empty()
+        ));
+    }
+
+    #[test]
+    fn parses_ask_user_options_from_server() {
+        let message = parse_server_message(
+            r#"{"type":"ask_user","id":"a2","question":"Which DB?","options":["postgres","sqlite"]}"#,
+        );
+        assert!(matches!(
+            message,
+            Some(ServerMessage::AskUser {
+                id,
+                question,
+                options
+            }) if id == "a2" && question == "Which DB?" && options == vec!["postgres", "sqlite"]
         ));
     }
 
     #[test]
     fn serializes_ask_user_reply_command() {
         let raw = serde_json::to_string(&ClientMessage::AskUserReply {
+            id: "a1".into(),
             reply: "Rust".into(),
         })
         .expect("serialize ask user reply");
-        assert_eq!(raw, r#"{"type":"ask_user_reply","reply":"Rust"}"#);
+        assert_eq!(raw, r#"{"type":"ask_user_reply","id":"a1","reply":"Rust"}"#);
     }
 }

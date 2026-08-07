@@ -135,7 +135,7 @@ export const builtinTools: ToolDefinition[] = [
   {
     name: "ask_user",
     description:
-      "Ask the user a blocking question and wait for their reply. Use to clarify requirements, constraints, or ambiguous choices before starting work or committing to a plan — a few targeted questions up front prevent derailing mid-task. Also use when execution depends on a decision only the user can make.",
+      "Ask the user a blocking question and wait for their reply. ALWAYS ask the user through this tool — never end your reply with a plain-text question. Use it to clarify requirements, constraints, or ambiguous choices before starting work or committing to a plan — a few targeted questions up front prevent derailing mid-task. Also use when execution depends on a decision only the user can make. When the answer is a choice among discrete alternatives, list them in `options` so the user can pick directly; otherwise use `hint` for free-form guidance.",
     parameters: {
       type: "object",
       properties: {
@@ -143,10 +143,16 @@ export const builtinTools: ToolDefinition[] = [
           type: "string",
           description: "The question to ask the user, phrased so it can be answered briefly",
         },
+        options: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional discrete choices the user can select directly, e.g. [\"postgres\", \"sqlite\"]. Provide when the answer is one of a few known alternatives.",
+        },
         hint: {
           type: "string",
           description:
-            "Optional guidance on expected answers, e.g. valid options or the default you will use if the user says 'up to you'",
+            "Optional free-form guidance on expected answers, used when there are no discrete `options`",
         },
       },
       required: ["question"],
@@ -548,11 +554,35 @@ export async function executeTool(
   }
 }
 
+/** Stringify a single `ask_user` field (question / hint / option). Models
+ *  occasionally pass objects like `{name: "..."}` instead of plain strings;
+ *  pick a readable field so `String(obj)` never leaks "[object Object]" to
+ *  the terminal. */
+function askUserText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["name", "label", "value", "title", "text"]) {
+      const field = record[key];
+      if (typeof field === "string" && field.trim()) return field;
+    }
+    try {
+      const json = JSON.stringify(value);
+      if (json) return json;
+    } catch {
+      // fall through to the stable fallback
+    }
+    return "[unreadable option]";
+  }
+  return String(value);
+}
+
 function runAskUser(
   args: Record<string, unknown>,
-  askUser?: (question: string) => Promise<string>,
+  askUser?: (question: string, options?: string[]) => Promise<string>,
 ): Promise<string> {
-  const question = String(args.question ?? "").trim();
+  const question = askUserText(args.question ?? "").trim();
   if (!question) {
     return Promise.resolve("Error: question is required");
   }
@@ -561,6 +591,13 @@ function runAskUser(
       "Error: user input is not available in this runtime. State what you need and continue with the most reasonable assumption, noting the assumption clearly.",
     );
   }
-  const hint = String(args.hint ?? "").trim();
+  const options = Array.isArray(args.options)
+    ? args.options.map((option) => askUserText(option).trim()).filter(Boolean)
+    : [];
+  if (options.length > 0) {
+    // Structured choices are rendered as selectable options by the client.
+    return askUser(question, options);
+  }
+  const hint = askUserText(args.hint ?? "").trim();
   return askUser(hint ? `${question}\n(hint: ${hint})` : question);
 }

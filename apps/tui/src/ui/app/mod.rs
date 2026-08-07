@@ -1,3 +1,4 @@
+mod asks;
 mod commands;
 mod events;
 mod input;
@@ -28,8 +29,8 @@ use tokio::sync::mpsc;
 pub(super) use ratatui::text::{Line, Span};
 
 pub(super) use crate::agent::client::{
-    format_tool_call, AgentClient, AgentEvent, ChatLine, ConnectionState, ContextUsage, PlanDisplay,
-    ToolCallDisplay, ToolStatus, TurnSegment,
+    format_tool_call, AgentClient, AgentEvent, AskDisplay, ChatLine, ConnectionState, ContextUsage,
+    PlanDisplay, ToolCallDisplay, ToolStatus, TurnSegment,
 };
 pub(super) use crate::protocol::{
     ActiveAgentTurn, AgentInfo, AgentTaskInfo, ClientMessage, ConversationTurn, McpServerInfo,
@@ -49,7 +50,7 @@ pub(super) use crate::ui::transcript::{
     build_transcript_lines, link_regions_to_screen, max_history_scroll, plan_step_spans,
     transcript_content_area, ScreenLinkRegion, TranscriptContent, TranscriptWidget,
 };
-pub(super) use model::PanelFocus;
+pub(super) use model::{PanelFocus, PendingAsk};
 pub struct App {
     banner: Vec<String>,
     client: Arc<AgentClient>,
@@ -117,9 +118,13 @@ pub struct App {
     started_at: Instant,
     markdown_cache: MarkdownCache,
     last_transcript_width: u16,
-    /// A blocking `ask_user` question awaiting a reply. While set, the
-    /// composer submits an `ask_user_reply` instead of a chat message.
-    pending_ask: Option<String>,
+    /// Blocking `ask_user` questions awaiting a reply. Several can be pending
+    /// at once (a model may ask multiple questions in one round); `active_ask`
+    /// is the question currently focused for answering, switchable with ←/→.
+    /// While any question is pending, the composer submits an `ask_user_reply`
+    /// instead of a chat message.
+    pending_asks: Vec<model::PendingAsk>,
+    active_ask: usize,
 }
 
 impl App {
@@ -180,7 +185,8 @@ impl App {
             started_at: Instant::now(),
             markdown_cache: MarkdownCache::new(),
             last_transcript_width: 80,
-            pending_ask: None,
+            pending_asks: Vec::new(),
+            active_ask: 0,
         }
     }
 
@@ -231,6 +237,7 @@ impl App {
                     turn_start: self.turn_start,
                     tool_elapsed: self.tool_start,
                     expand_thinking: self.expand_thinking,
+                    ask: self.pending_asks.get(self.active_ask),
                     width,
                 };
                 let (transcript_lines, link_regions) =
@@ -320,7 +327,11 @@ impl App {
 
         let composer_area = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(style::border());
+            .border_style(if self.active_ask().is_some() {
+                style::ask()
+            } else {
+                style::border()
+            });
         let inner = composer_area.inner(chunks[5]);
         composer_area.render(chunks[5], buf);
         ComposerWidget::new(
@@ -328,10 +339,17 @@ impl App {
             !matches!(self.connection, ConnectionState::Connected),
         )
         .render(inner, buf);
-        if let Some(question) = &self.pending_ask {
-            let hint = truncate_ask_hint(question, chunks[5].width);
-            let line = Line::from(Span::styled(hint, style::ask_hint()));
-            if inner.height > 0 {
+        if let Some(ask) = self.active_ask() {
+            // Placeholder only while the composer is empty, so typed answers
+            // are never visually overwritten by the hint.
+            if inner.height > 0 && self.composer.textarea.text().is_empty() {
+                let hint = asks::truncate_ask_hint(
+                    &ask.question,
+                    self.pending_asks.len(),
+                    self.active_ask,
+                    chunks[5].width,
+                );
+                let line = Line::from(Span::styled(hint, style::ask_hint()));
                 buf.set_line(inner.x, inner.y, &line, inner.width);
             }
         }
@@ -345,6 +363,30 @@ impl App {
             return;
         }
         let mut y = region.y.saturating_add(1);
+        if self.active_ask().is_some() {
+            let height = self.ask_panel_height(region.width);
+            let rect = Rect {
+                x: region.x,
+                y,
+                width: region.width,
+                height,
+            };
+            let total = self.pending_asks.len();
+            let title = if total > 1 {
+                format!(" Ask ({}/{}) ", self.active_ask + 1, total)
+            } else {
+                " Ask ".into()
+            };
+            Paragraph::new(self.ask_panel_lines(rect.width.saturating_sub(2)))
+                .block(
+                    Block::default()
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(style::ask()),
+                )
+                .render(rect, buf);
+            y = y.saturating_add(height);
+        }
         if let Some(plan) = self.active_plan() {
             let height = self.plan_height();
             let rect = Rect {
@@ -487,7 +529,7 @@ impl App {
             .constraints([
                 Constraint::Min(3),
                 Constraint::Length(if self.history_scroll > 0 { 1 } else { 0 }),
-                Constraint::Length(self.panel_region_height()),
+                Constraint::Length(self.panel_region_height(area.width)),
                 Constraint::Length(menu_height(&self.composer, &menu_items)),
                 Constraint::Length(STATUS_HEIGHT),
                 Constraint::Length(self.input_height(area.width)),
@@ -522,12 +564,13 @@ impl App {
         }
     }
 
-    /// Combined height of the Plan / Scheduled Tasks / Sub Agents panels. A
-    /// single 1-row spacer sits above the first visible panel; panels then
-    /// stack directly on each other.
-    fn panel_region_height(&self) -> u16 {
+    /// Combined height of the Ask / Plan / Scheduled Tasks / Sub Agents
+    /// panels. A single 1-row spacer sits above the first visible panel;
+    /// panels then stack directly on each other.
+    fn panel_region_height(&self, width: u16) -> u16 {
         let mut height = 0u16;
         for panel_height in [
+            self.ask_panel_height(width),
             self.plan_height(),
             self.scheduled_height(),
             self.task_height(),
@@ -542,18 +585,4 @@ impl App {
         }
         height
     }
-}
-
-/// Compose the "answering" hint shown inside the composer while an ask_user
-/// question awaits a reply, truncated to the composer width.
-fn truncate_ask_hint(question: &str, width: u16) -> String {
-    let prefix = "Answer: ";
-    let max = width.saturating_sub(2) as usize;
-    let text = question.replace('\n', " ");
-    if prefix.chars().count() + text.chars().count() <= max || max == 0 {
-        return format!("{prefix}{text}");
-    }
-    let budget = max.saturating_sub(prefix.chars().count() + 1);
-    let truncated = text.chars().take(budget).collect::<String>();
-    format!("{prefix}{truncated}…")
 }

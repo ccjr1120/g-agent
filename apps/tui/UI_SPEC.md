@@ -35,6 +35,13 @@
 - 主会话与各子会话独立保存 Plan，切换会话时同步切换展示。
 - 区域最多展示 5 个步骤；步骤更多时以当前步骤为中心显示相邻内容，避免过度压缩 Transcript。
 
+### Ask 区域
+
+- 有 `ask_user` 阻塞提问待回答时，顶部显示独立的 Ask 面板（标题为 `" Ask (i/n) "`，多个问题待答时显示计数），展示当前问题的换行正文、可选项和操作提示；其交互解答面用 `style::ask()` / `style::ask_hint()` 渲染。
+- `←`/`→` 切换待回答问题（`(i/n)` 计数随之更新）；带选项的问题用 `↑`/`↓` 高亮当前项、`Enter` 直接选择该选项发送；无选项时提示 `Type your answer and press Enter (Esc to skip)`，直接在输入框输入回答。
+- `Esc` 跳过当前问题，向 Agent 发送 `skip` 让其按最佳假设继续。
+- Transcript 仍保留问题与回答作为历史记录（问题用品牌色 `? ` 前缀），但**交互解答的面板始终固定在屏幕顶部**，不会因滚动而脱离可视区域。
+
 以下内容必须进入 Transcript：
 
 - Agent 回复和子 Agent主动选择后展示的结果。
@@ -70,12 +77,15 @@
 | 欢迎/引导文案 | `style::welcome()` | 灰色说明文字 |
 | Agent 回退警告 | `style::warning()` | 配置的 agent 不存在时的提示 |
 | 用户消息 | `style::user_message()` | `> ` 前缀与正文均为品牌色 |
-| 助手 bullet | `style::assistant_bullet()` | `●` 加粗，正文使用终端默认色 |
+| 助手 bullet | `style::assistant_bullet()` | `●` 加粗，正文使用终端默认色；同一轮回复只出现一次，后续正文块使用 `  ` 续行缩进对齐 |
 | 思考过程 | `style::thinking()` | 灰色斜体，显示在正式回复之前 |
-| 工具调用 | `style::tool_call()` | 灰色单行标签 |
+| 工具调用 | `style::tool_call()` | 灰色单行标签，`▸ ` 前缀（不使用 emoji 图标），与正文同一列对齐 |
 | 耗时 | `style::muted()` | 如 `· 1.2s` |
-| 等待 spinner | `spinner_line(...)` | 见下方 Spinner |
+| 等待 spinner | `spinner_line(...)` | 见下方 Spinner；整轮进行中持续显示，直到回合结束 |
 | ask_user 提问 | `style::ask()` | 品牌色 `? ` 前缀，区别于系统反馈，等待用户回答 |
+| ask_user 选项 | `style::ask()` / `style::ask_hint()` | 提问带离散选项时，选项直接渲染在问题下方（Transcript 内，`❯` 高亮当前项）；交互选择在顶部 Ask 面板进行 |
+| ask_user 回答模式 | `style::ask()` | 当前问题固定显示在顶部 Ask 面板（见 Ask 区域）；**Esc** 跳过该问题让 Agent 继续 |
+| 多问题切换 | — | 一轮中出现多个待回答问题时（Agent 并行 `ask_user`），各问题带独立 `id` 全部保留，`←` `→` 在问题间切换（Ask 面板标题显示 `(i/n)` 计数），每个问题可独立回答或跳过 |
 
 助手正文中的 Markdown（代码块、链接等）目前由 `markdown_ratatui` 默认主题渲染，后续可对齐本规范。
 
@@ -85,7 +95,7 @@
 | --- | --- | --- |
 | 输入框（可用） | `style::composer_active()` | 品牌色 |
 | 输入框（禁用） | `style::composer_disabled()` | 灰色 |
-| ask_user 回答提示 | `style::ask_hint()` | 灰色，显示在输入框首行，如 `Answer: <截断的问题>` |
+| ask_user 回答提示 | `style::ask_hint()` | 灰色提示，仅出现在顶部 Ask 面板内（如选择无选项问题时的 `<Type your answer and press Enter (Esc to skip)>`，或导航按键 `←/→ question · ↑/↓ select · Enter answer · Esc skip`），不再占用输入框首行 |
 | 命令菜单选中项 | `style::menu_selected()` | 品牌色加粗 |
 | 命令菜单描述 | `style::menu_description()` | 灰色 |
 | 菜单提示行 | `style::muted()` | 如 `Commands · ↑↓ select ...` |
@@ -116,6 +126,8 @@
 | 动画帧 | `style::spinner_frame()` | 黄色 |
 | 标签文字 | `style::spinner_label()` | 灰色 |
 | 仅计时（dim 模式） | `style::muted()` | 整行灰色 |
+
+`Thinking…` / `Working…` 加载指示在整轮对话进行期间（推理、跑工具、正文流式输出或两次输出之间的停顿）持续显示，仅在回合结束（`waiting` 清空）后消失，避免画面看起来卡住。
 
 ## 使用示例
 

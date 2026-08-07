@@ -134,6 +134,79 @@ describe("ask_user tool", () => {
     expect(output).toBe("Go");
   });
 
+  test("passes discrete options through to the handler", async () => {
+    let seenQuestion = "";
+    let seenOptions: string[] | undefined;
+    const output = await executeTool(
+      "ask_user",
+      { question: "Which DB?", options: ["postgres", " sqlite ", ""] },
+      undefined,
+      undefined,
+      async (question, options) => {
+        seenQuestion = question;
+        seenOptions = options;
+        return "postgres";
+      },
+    );
+    expect(seenQuestion).toBe("Which DB?");
+    expect(seenOptions).toEqual(["postgres", "sqlite"]);
+    expect(output).toBe("postgres");
+  });
+
+  test("ignores options when the field is not an array", async () => {
+    let seenOptions: string[] | undefined = undefined;
+    const output = await executeTool(
+      "ask_user",
+      { question: "Which DB?", options: "postgres" },
+      undefined,
+      undefined,
+      async (_question, options) => {
+        seenOptions = options;
+        return "postgres";
+      },
+    );
+    expect(seenOptions).toBeUndefined();
+    expect(output).toBe("postgres");
+  });
+
+  test("extracts readable labels from object options instead of [object Object]", async () => {
+    let seenQuestion = "";
+    let seenOptions: string[] | undefined;
+    const output = await executeTool(
+      "ask_user",
+      {
+        question: "Which DB?",
+        options: [{ name: "postgres" }, { label: "sqlite" }, 42],
+      },
+      undefined,
+      undefined,
+      async (question, options) => {
+        seenQuestion = question;
+        seenOptions = options;
+        return "postgres";
+      },
+    );
+    expect(seenQuestion).toBe("Which DB?");
+    expect(seenOptions).toEqual(["postgres", "sqlite", "42"]);
+    expect(output).toBe("postgres");
+  });
+
+  test("extracts a readable label from an object question", async () => {
+    let seenQuestion = "";
+    const output = await executeTool(
+      "ask_user",
+      { question: { value: "Which stack?" } },
+      undefined,
+      undefined,
+      async (question) => {
+        seenQuestion = question;
+        return "Rust";
+      },
+    );
+    expect(seenQuestion).toBe("Which stack?");
+    expect(output).toBe("Rust");
+  });
+
   test("reports missing question as an error", async () => {
     const output = await executeTool(
       "ask_user",

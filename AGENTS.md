@@ -16,7 +16,7 @@ Goals: **small diffs, readable, testable, reversible** — never "improvise" bli
 
 - **Blank lines between body blocks**, including between consecutive body paragraphs (`push_block_gap` must insert a gap for Text→Text too). Different block types (thinking/tool/body/plan) are separated by blank lines; tool calls stay compact among themselves, thinking lines stay compact among themselves.
 - Long thinking blocks and more than 2 tool calls are **collapsed by default**; `Ctrl+T` expands. The collapse hint follows on the last visible line, not on its own line.
-- Running tools show an `mm:ss` timer and `✓/✗` state; the loading indicator (Thinking…/Working…) stays visible as long as any tool is running, and disappears only after the body actually starts streaming.
+- Running tools show an `mm:ss` timer and `✓/✗` state; the loading indicator (Thinking…/Working…) stays visible for the whole turn — while the model reasons, runs tools, or pauses between bursts of streamed output — and disappears only when the turn finishes, so the screen never looks frozen mid-turn.
 - Queued messages get a `⏳` prefix and render **after the live reply and before the next user message**. Errors/status/local feedback are inserted at their occurrence position, never sunk to the bottom.
 
 ## 3. State UI vs. Messages

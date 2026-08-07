@@ -121,7 +121,11 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(ws_url: String) -> Result<()> {
-    ensure_server_running(&ws_url)?;
+    // `ensure_server_running` uses a blocking HTTP client (and sleeps while
+    // polling), so it must run off the async runtime thread — dropping the
+    // client's internal runtime inside the runtime panics.
+    let ws_url_for_check = ws_url.clone();
+    tokio::task::spawn_blocking(move || ensure_server_running(&ws_url_for_check)).await??;
     let banner = load_banner_lines();
     // Connect to the same URL we just ensured is up (env / port overrides
     // take precedence over a stale config.json `serverUrl`).

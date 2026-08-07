@@ -17,6 +17,7 @@ import {
   modelLabel,
   refreshClient,
   reloadAgentsCatalog,
+  sendMcpCatalog,
 } from "./catalog.js";
 import { scheduleManager, sendScheduledTasksToAll } from "./scheduled-runtime.js";
 import { persistAgentTasks } from "./agent-tasks.js";
@@ -50,6 +51,17 @@ export async function applyAgentSwitch(
 }
 
 /**
+ * Abort any in-flight main-session turn. `/new` must cancel the running
+ * request before history is cleared: otherwise the turn finishing later would
+ * re-push its old user/assistant pair into the cleared history and leak stale
+ * context into the first message after the reset.
+ */
+export function cancelMainTurn(ws: ServerWebSocket<WsData>): void {
+  ws.data.abortController?.abort();
+  ws.data.cancelRequested = false;
+}
+
+/**
  * Start a clean session without restarting the server process.
  *
  * A session boundary is also a resource reload boundary: config, agents and
@@ -62,6 +74,7 @@ export async function applyAgentSwitch(
  * from the freshly loaded catalog, and stay selectable via `/<slot>`.
  */
 export async function restartSession(ws: ServerWebSocket<WsData>): Promise<void> {
+  cancelMainTurn(ws);
   const currentAgentName = ws.data.activeAgent.name;
   await reloadAgentsCatalog();
 
@@ -129,6 +142,7 @@ export function createAgentSession(
   sendAgentTasks(ws);
   if (activate) {
     sendAgentSession(ws, task);
+    sendMcpCatalog(ws);
   }
   return task;
 }
@@ -145,17 +159,20 @@ export async function runAgentSessionPrompt(
   if (!task.title) {
     task.title = prompt;
   }
+  const isVisible = () => ws.data.activeAgentTaskSlot === task.slot;
   if (!task.mcpManager) {
     task.status = "starting";
     task.activity = "Starting";
     sendAgentTasks(ws);
     task.mcpManager = await connectMcpForAgent(task.agent);
+    if (isVisible()) {
+      sendMcpCatalog(ws);
+    }
   }
 
   task.status = "thinking";
   task.activity = "Analyzing";
   task.unread = false;
-  const isVisible = () => ws.data.activeAgentTaskSlot === task.slot;
   const priorHistory = [...task.history];
   task.history.push({ role: "user", content: prompt });
   task.transcript.push({ role: "user", content: prompt });

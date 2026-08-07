@@ -12,6 +12,11 @@ struct WrappedLine {
     end: usize,
 }
 
+/// Maximum wrapped rows the input area may occupy. Beyond this the text
+/// scrolls inside the fixed-height box so a long draft or paste never grows
+/// taller than the terminal and pushes the typing position off-screen.
+pub const MAX_INPUT_LINES: usize = 8;
+
 pub struct TextArea {
     text: String,
     cursor: usize,
@@ -142,7 +147,9 @@ impl TextArea {
     }
 
     pub fn desired_height(&self, width: u16) -> u16 {
-        self.wrapped_lines(width.max(1)).len().max(1) as u16
+        self.wrapped_lines(width.max(1))
+            .len()
+            .clamp(1, MAX_INPUT_LINES) as u16
     }
 
     pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
@@ -150,8 +157,16 @@ impl TextArea {
         let lines = self.wrapped_lines(width);
         let line_index = line_index_for_offset(&lines, self.cursor)?;
         let line = &lines[line_index];
-        let col = self.text[line.start..self.cursor].width() as u16;
-        Some((area.x + col, area.y + line_index as u16))
+        let col = (self.text[line.start..self.cursor].width() as u16).min(width - 1);
+        let visible = line_index.saturating_sub(self.scroll_offset(&lines, area.height));
+        Some((area.x + col, area.y + visible as u16))
+    }
+
+    /// How many wrapped lines to skip so the cursor line stays on screen when
+    /// the draft is taller than the allocated area.
+    fn scroll_offset(&self, lines: &[WrappedLine], height: u16) -> usize {
+        let cursor_line = line_index_for_offset(lines, self.cursor).unwrap_or(0);
+        (cursor_line + 1).saturating_sub(height.max(1) as usize)
     }
 
     fn wrapped_lines(&self, width: u16) -> Vec<WrappedLine> {
@@ -357,17 +372,32 @@ impl<'a> TextAreaWidget<'a> {
 
 impl Widget for TextAreaWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Each rendered row carries a 2-column prefix ("> " on row 0, "  " on
+        // wrapped rows), so the text must wrap at `width - prefix_width`.
+        // Wrapping at the full width would push the prefix over the right edge
+        // and `set_line` truncates the trailing characters — making the last
+        // two characters of every full line invisible and the cursor land on a
+        // different row than the text is actually drawn at.
+        let prefix_width = self.prefix.width() as u16;
         let width = area.width.max(1);
-        let lines = self.textarea.wrapped_lines(width);
-        let cursor_line = line_index_for_offset(&lines, self.textarea.cursor);
-        let cursor_col = cursor_line
+        let wrap_width = width.saturating_sub(prefix_width).max(1);
+        let lines = self.textarea.wrapped_lines(wrap_width);
+        let cursor_index = line_index_for_offset(&lines, self.textarea.cursor);
+        let scroll = self.textarea.scroll_offset(&lines, area.height);
+        let cursor_line = cursor_index.map(|index| index.saturating_sub(scroll));
+        let cursor_col = cursor_index
             .map(|index| {
                 let line = &lines[index];
                 self.textarea.text[line.start..self.textarea.cursor].width()
             })
             .unwrap_or(0);
 
-        for (row, wrapped) in lines.iter().enumerate().take(area.height as usize) {
+        for (row, wrapped) in lines
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(area.height as usize)
+        {
             let y = area.y + row as u16;
             if y >= area.bottom() {
                 break;
@@ -428,6 +458,78 @@ mod tests {
         textarea.move_right();
         let col = textarea.text[..textarea.cursor].width();
         assert_eq!(col, 2);
+    }
+
+    #[test]
+    fn cursor_tracks_wrap_width_used_by_render() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("x".repeat(30).into());
+        textarea.move_end();
+        // The render wraps at `width - prefix_width` (2), so cursor_pos is
+        // called with the reduced width: 30 chars over 8 → 8/8/8/6 lines.
+        assert_eq!(textarea.cursor_pos(Rect::new(0, 0, 8, 5)), Some((6, 3)));
+        textarea.move_home();
+        assert_eq!(textarea.cursor_pos(Rect::new(0, 0, 8, 5)), Some((0, 0)));
+    }
+
+    #[test]
+    fn cursor_clamps_to_last_visible_column() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("x".repeat(8).into());
+        textarea.move_end();
+        // Cursor at the very end of a full wrapped line must not sit past the
+        // right edge of the area.
+        assert_eq!(textarea.cursor_pos(Rect::new(0, 0, 8, 3)), Some((7, 0)));
+    }
+
+    #[test]
+    fn full_lines_do_not_truncate_right_edge_chars() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("x".repeat(12).into());
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 3));
+        TextAreaWidget::new(&textarea, "> ", Style::default(), false)
+            .render(Rect::new(0, 0, 12, 3), &mut buf);
+        // Row 0 is "> " + the first 10 x's; the trailing "xx" must wrap to row
+        // 1 (indented by the 2-column prefix) instead of being truncated.
+        assert_eq!(buf[(11, 0)].symbol(), "x");
+        assert_eq!(buf[(2, 1)].symbol(), "x");
+        assert_eq!(buf[(3, 1)].symbol(), "x");
+        assert_eq!(buf[(0, 1)].symbol(), " ");
+    }
+
+    #[test]
+    fn desired_height_is_capped_at_max_input_lines() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("x".repeat(1000).into());
+        assert_eq!(textarea.desired_height(40), MAX_INPUT_LINES as u16);
+        // Short drafts still size to their own height.
+        textarea.set_text("hi".into());
+        assert_eq!(textarea.desired_height(40), 1);
+    }
+
+    #[test]
+    fn cursor_scrolls_into_view_when_draft_taller_than_area() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("x".repeat(200).into());
+        textarea.move_end();
+        // 200 chars at width 40 → 5 wrapped lines; a 3-row area must scroll so
+        // the cursor row (4) stays visible: scroll = (4+1)-3 = 2 → visible row 2.
+        assert_eq!(textarea.cursor_pos(Rect::new(0, 0, 40, 3)), Some((39, 2)));
+    }
+
+    #[test]
+    fn render_scrolls_to_keep_cursor_line_visible() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("x".repeat(200).into());
+        textarea.move_end();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 42, 3));
+        TextAreaWidget::new(&textarea, "> ", Style::default(), true)
+            .render(Rect::new(0, 0, 42, 3), &mut buf);
+        // wrap width = 42 - 2 = 40; the last visible row (2) shows wrapped line
+        // 4 (the cursor line) indented by the 2-column continuation prefix.
+        assert_eq!(buf[(0, 2)].symbol(), " ");
+        assert_eq!(buf[(2, 2)].symbol(), "x");
+        assert_eq!(buf[(41, 2)].symbol(), "x");
     }
 
     #[test]

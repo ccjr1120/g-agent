@@ -1,11 +1,15 @@
 use super::model::{should_remember_prompt, PendingSessionOpen};
 use super::*;
 
+/// Reply sent to the agent when the user skips a blocking `ask_user` question
+/// with Esc, so the agent proceeds instead of the whole turn being aborted.
+const SKIP_ASK_REPLY: &str = "skip";
+
 impl App {
     pub(super) fn submit(&mut self, display: String, full: String) {
-        // While an ask_user question is awaiting a reply, the composer answers
+        // While an ask_user question awaits a reply, the composer answers
         // that question instead of starting a new chat turn.
-        if self.pending_ask.take().is_some() {
+        if !self.pending_asks.is_empty() {
             self.submit_ask_reply(display, full);
             return;
         }
@@ -82,33 +86,15 @@ impl App {
         }
         if let Some(name) = text.strip_prefix("/mcp ") {
             let server_name = name.trim();
-            let details = self
+            if let Some(server) = self
                 .mcp_servers
                 .iter()
                 .find(|server| server.name == server_name)
-                .map(|server| {
-                    let status = if server.connected {
-                        format!("connected, {} tools", server.tool_count)
-                    } else if server.auth_required {
-                        "auth required".into()
-                    } else {
-                        format!(
-                            "not connected{}",
-                            server
-                                .error
-                                .as_deref()
-                                .map(|error| format!(": {error}"))
-                                .unwrap_or_default()
-                        )
-                    };
-                    format!(
-                        "[{}] {} ({}) — {}",
-                        server.source, server.name, server.transport, status
-                    )
-                });
-            self.add_local(
-                details.unwrap_or_else(|| format!("MCP server not found: {server_name}")),
-            );
+            {
+                self.add_local(model::format_mcp_server_detail(server));
+            } else {
+                self.add_local(format!("MCP server not found: {server_name}"));
+            }
             return;
         }
         if let Some(arguments) = text.strip_prefix("/agent ") {
@@ -287,18 +273,59 @@ impl App {
     }
 
     /// Answer a blocking `ask_user` question. The reply is sent to the server
-    /// as `ask_user_reply` (not a chat turn) and rendered locally as a user
-    /// line so the exchange reads naturally in the transcript.
+    /// as `ask_user_reply` (not a chat turn) and rendered as a `Reply` segment
+    /// right after the question inside the live turn, so the exchange reads
+    /// question → answer → continue in the transcript.
     fn submit_ask_reply(&mut self, display: String, full: String) {
-        self.static_lines.push(Self::user_line(
-            display.clone(),
-            Some(full.clone()),
-            false,
-        ));
-        self.client.send(ClientMessage::AskUserReply { reply: full });
+        let Some(id) = self.pending_asks.get(self.active_ask).map(|ask| ask.id.clone()) else {
+            return;
+        };
+        if let Some(line) = &mut self.streaming {
+            line.segments.push(TurnSegment::Reply(display.clone()));
+        } else {
+            self.static_lines.push(Self::user_line(
+                display.clone(),
+                Some(full.clone()),
+                false,
+            ));
+        }
+        self.client
+            .send(ClientMessage::AskUserReply { id: id.clone(), reply: full });
         self.input_history.reset_browse();
         self.history_scroll = 0;
         self.scroll_anchor_y = None;
+        self.remove_pending_ask(&id);
+    }
+
+    /// Skip the active `ask_user` question (Esc): tell the agent to proceed
+    /// with its best assumption instead of aborting the whole turn. The skip is
+    /// shown as the question's answer so the exchange reads in order.
+    pub(super) fn skip_pending_ask(&mut self) {
+        let Some(id) = self.pending_asks.get(self.active_ask).map(|ask| ask.id.clone()) else {
+            return;
+        };
+        self.composer.clear();
+        self.input_history.reset_browse();
+        if let Some(line) = &mut self.streaming {
+            line.segments.push(TurnSegment::Reply("(skipped)".into()));
+        }
+        self.client.send(ClientMessage::AskUserReply {
+            id: id.clone(),
+            reply: SKIP_ASK_REPLY.into(),
+        });
+        self.remove_pending_ask(&id);
+    }
+
+    /// Submit the currently highlighted `ask_user` option (Enter with an empty
+    /// composer). Sends the option text as the reply.
+    pub(super) fn select_ask_option(&mut self) {
+        let Some(ask) = self.pending_asks.get(self.active_ask).cloned() else {
+            return;
+        };
+        let Some(option) = ask.options.get(ask.selected).cloned() else {
+            return;
+        };
+        self.submit_ask_reply(option.clone(), option);
     }
 
     pub(super) fn is_turn_busy(&self) -> bool {
@@ -453,7 +480,7 @@ impl App {
         self.send_queue.clear();
         self.in_flight = None;
         self.cancel_turn = false;
-        self.pending_ask = None;
+        self.clear_pending_asks();
         self.pending_session_open = None;
         self.agent_tasks.clear();
         self.scheduled_tasks.clear();

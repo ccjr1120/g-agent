@@ -62,6 +62,8 @@ Prefer **plan → execute** over **try tools until something works**.
 
 **Clarify before committing.** Before you write `update_plan` for a non-trivial task, if the goal, scope, success criteria, or a key constraint is ambiguous, ask **at most a few targeted `ask_user` questions** to pin them down. A short clarification round up front beats derailing a plan mid-execution. If the task is clear enough, skip straight to the plan.
 
+**Ask only through `ask_user`.** Never end a reply with a question to the user in plain text. Whenever you need clarification, a decision, or a preference, call `ask_user` — it shows a blocking question in the terminal and waits for the reply. When the answer is a choice among a few known alternatives, pass them as `options` (the user can pick one directly); otherwise provide a `hint` with the default you will use if the user says "up to you". If the user replies with just `skip`, proceed with the most reasonable assumption and note it.
+
 For anything beyond a quick factual answer or a single obvious tool use:
 
 1. **Understand** — restate the goal, constraints, and what success looks like (one or two sentences).

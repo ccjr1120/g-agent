@@ -20,6 +20,40 @@ export const TOOL_EFFICIENCY_PROMPT = `## Tool efficiency
 
 Use tools economically. Batch related reads and queries, request independent tool calls in the same response, and prefer one well-scoped shell command over many tiny shell calls. For research, gather a broad candidate set in bulk, shortlist it, then inspect only the strongest candidates in depth. Stop gathering evidence once you can answer reliably.`;
 
+const CLARIFY_BEFORE_EXECUTE_PROMPT = `You just created a new multi-step plan. Before running any further steps, re-read the task. If the goal, scope, success criteria, or a key constraint is still ambiguous and only the user can decide it, ask once via ask_user to resolve it first — do not run steps and then stop to ask. If nothing is ambiguous, skip clarifying and execute the plan straight through to completion.`;
+
+const PLAIN_TEXT_QUESTION_NUDGE = `You ended your reply with a question in plain text instead of using the ask_user tool. Re-emit any answer you already have as normal text, then ask the question in a single ask_user call (provide a hint listing concrete options or a sensible default). Never include the question itself in your reply text — all questions to the user must go through ask_user.`;
+
+function lateAskMessage(reply: string): string {
+  return `You asked a blocking question only after creating a plan and starting to execute; it should have been asked before you committed to the plan. The user answered: "${reply}". Fold this answer into the plan, update it if needed, and keep executing every remaining step to completion without pausing to ask again.`;
+}
+
+/// Detect a reply that is really a question asked in plain text instead of
+/// the `ask_user` tool. The model is expected to ask via `ask_user`, so such
+/// replies are treated as an attempt to bypass the tool and nudged back onto
+/// it. Three shapes are caught: a short single-line question, a reply that is
+/// entirely a list of question lines, and a final short question line tagging
+/// onto an otherwise-finished reply. Long reports that merely end in a short
+/// confirm-question also trigger the nudge, which is the intended behaviour.
+function isBareQuestion(reply: string): boolean {
+  const text = reply.trim();
+  if (text.length === 0) {
+    return false;
+  }
+  if (!text.includes("\n")) {
+    return text.length <= 200 && /[?？]$/.test(text);
+  }
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length > 0 && lines.every((line) => /[?？]$/.test(line))) {
+    return true;
+  }
+  const last = lines[lines.length - 1] ?? "";
+  return last.length <= 80 && /[?？]$/.test(last);
+}
+
 export async function runOpenAI(
   provider: ResolvedProvider,
   prompt: string,
@@ -45,8 +79,23 @@ export async function runOpenAI(
   // with a plain-text "any questions?" turn that derails execution.
   let activePlan: { steps: Array<{ status: string }> } | null = null;
   let planBlocks = 0;
+  // Ask-up-front enforcement: whether a clarifying question was posed before the
+  // current plan existed, whether a freshly created plan should be checked for
+  // ambiguity before executing, and whether ask_user fired too late.
+  let askedBeforePlan = false;
+  let awaitingClarify = false;
+  let lateAskReply: string | null = null;
+  let nudgedPlainTextQuestion = false;
 
   for (let round = 0; round < maxToolRounds; round++) {
+    if (awaitingClarify) {
+      messages.push({ role: "system", content: CLARIFY_BEFORE_EXECUTE_PROMPT });
+      awaitingClarify = false;
+    }
+    if (lateAskReply !== null) {
+      messages.push({ role: "system", content: lateAskMessage(lateAskReply) });
+      lateAskReply = null;
+    }
     const mustAnswer = round === maxToolRounds - 1;
     if (mustAnswer) {
       messages.push({
@@ -133,24 +182,36 @@ export async function runOpenAI(
       for (const { call, name, output } of results) {
         onEvent({ type: "tool_result", name, output });
         messages.push({ role: "tool", tool_call_id: call.id, content: output });
-      }
 
-      // Track plan state from update_plan calls so a plain-text end can be
-      // blocked while steps remain.
-      for (const call of result.toolCalls) {
-        if (call.function.name !== "update_plan") {
+        // Track plan state from update_plan calls: a fresh plan must be checked
+        // for ambiguity (ask up front) before any step executes, and a plain-text
+        // end is blocked while steps remain.
+        if (name === "update_plan") {
+          const prevActive = activePlan !== null;
+          try {
+            const args = JSON.parse(call.function.arguments) as {
+              steps?: Array<{ status?: string }>;
+            };
+            if (Array.isArray(args.steps) && args.steps.length > 0) {
+              activePlan = { steps: args.steps };
+              planBlocks = 0;
+            }
+          } catch {
+            // Malformed args are already reported as a tool error; skip tracking.
+          }
+          if (!prevActive && activePlan !== null) {
+            awaitingClarify = true;
+          }
           continue;
         }
-        try {
-          const args = JSON.parse(call.function.arguments) as {
-            steps?: Array<{ status?: string }>;
-          };
-          if (Array.isArray(args.steps) && args.steps.length > 0) {
-            activePlan = { steps: args.steps };
-            planBlocks = 0;
+        if (name === "ask_user") {
+          if (activePlan === null) {
+            askedBeforePlan = true;
+          } else if (!askedBeforePlan) {
+            // The plan already exists, so the question should have been asked
+            // up front. Mark it as late so the next round nudges the model.
+            lateAskReply = output;
           }
-        } catch {
-          // Malformed args are already reported as a tool error; skip tracking.
         }
       }
 
@@ -171,6 +232,18 @@ export async function runOpenAI(
         content:
           "Your plan still has unfinished steps. Do not end the turn or ask the user to continue — keep executing. If a step is blocked or needs user input, call `ask_user` to resolve it, then continue. Update the plan as you make progress.",
       });
+      continue;
+    }
+
+    // A short plain-text question instead of `ask_user`: nudge once to
+    // reformulate it through the tool before the turn is allowed to end.
+    if (!planIncomplete && !mustAnswer && !nudgedPlainTextQuestion && isBareQuestion(result.text)) {
+      nudgedPlainTextQuestion = true;
+      messages.push({
+        role: "assistant",
+        content: result.text.trim() || null,
+      });
+      messages.push({ role: "system", content: PLAIN_TEXT_QUESTION_NUDGE });
       continue;
     }
 

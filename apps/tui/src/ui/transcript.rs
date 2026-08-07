@@ -7,8 +7,9 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::agent::client::{
-    ChatLine, PlanDisplay, PlanStep, ToolCallDisplay, ToolStatus, TurnSegment,
+    AskDisplay, ChatLine, PlanDisplay, PlanStep, ToolCallDisplay, ToolStatus, TurnSegment,
 };
+use crate::ui::app::PendingAsk;
 use crate::ui::markdown::{render_inline_markdown, LinkRegion, MarkdownCache};
 use crate::ui::spinner::spinner_line;
 use crate::ui::theme::style;
@@ -71,6 +72,10 @@ pub struct TranscriptContent<'a> {
     pub tool_elapsed: Option<Instant>,
     /// Show full thinking blocks instead of collapsing long ones.
     pub expand_thinking: bool,
+    /// The in-flight `ask_user` question awaiting a reply. Its discrete options
+    /// render under the question in the transcript so the user can pick one
+    /// with ↑/↓ + Enter; `None` when no question is pending.
+    pub ask: Option<&'a PendingAsk>,
     pub width: u16,
 }
 
@@ -140,6 +145,7 @@ pub fn build_transcript_lines(
             width,
             markdown,
             content.expand_thinking,
+            content.ask,
         );
     }
 
@@ -153,26 +159,27 @@ pub fn build_transcript_lines(
                 markdown,
                 content.tool_elapsed,
                 content.expand_thinking,
+                content.ask,
             );
         }
         // Keep a loading indicator visible for the whole turn — while the
-        // model reasons and runs tools. It is replaced by the streaming answer
-        // text only once no tool is still executing.
-        let text_streaming = content
-            .streaming
-            .is_some_and(|line| !line.text.trim().is_empty());
+        // model reasons, runs tools, or pauses between bursts of streamed
+        // output. A turn is only "done" when `waiting` clears, so the screen
+        // should never look frozen with no animation while it is still active.
         let tool_running = content.streaming.is_some_and(|line| {
             line.segments.iter().any(|segment| {
                 matches!(segment, TurnSegment::Tool(tool) if tool.status == ToolStatus::Running)
             })
         });
-        if !text_streaming || tool_running {
-            let has_content = content.streaming.is_some_and(|line| {
-                !line.segments.is_empty() || !line.pending_thinking.trim().is_empty()
-            });
-            let label = if has_content { "Working…" } else { "Thinking…" };
-            rendered.push(spinner_line(label, content.clock, content.turn_start, false));
-        }
+        let has_content = content.streaming.is_some_and(|line| {
+            !line.segments.is_empty() || !line.pending_thinking.trim().is_empty()
+        });
+        let label = if tool_running || has_content {
+            "Working…"
+        } else {
+            "Thinking…"
+        };
+        rendered.push(spinner_line(label, content.clock, content.turn_start, false));
     } else if let Some(line) = content.streaming {
         push_streaming_line(
             &mut rendered,
@@ -182,6 +189,7 @@ pub fn build_transcript_lines(
             markdown,
             content.tool_elapsed,
             content.expand_thinking,
+            content.ask,
         );
     }
 
@@ -193,6 +201,7 @@ pub fn build_transcript_lines(
             width,
             markdown,
             content.expand_thinking,
+            content.ask,
         );
     }
 
@@ -208,9 +217,10 @@ fn push_streaming_line(
     markdown: &mut MarkdownCache,
     tool_elapsed: Option<Instant>,
     expand_thinking: bool,
+    ask: Option<&PendingAsk>,
 ) {
     if line.role == "user" {
-        push_chat_line(lines, links, line, width, markdown, expand_thinking);
+        push_chat_line(lines, links, line, width, markdown, expand_thinking, None);
         return;
     }
 
@@ -222,6 +232,7 @@ fn push_streaming_line(
     let mut tools_seen = 0usize;
     let mut tool_hint_rendered = false;
     let mut text_rendered = false;
+    let mut bullet_emitted = false;
     let mut prev: Option<BlockKind> = None;
     for (index, segment) in line.segments.iter().enumerate() {
         match segment {
@@ -261,13 +272,25 @@ fn push_streaming_line(
                     continue;
                 }
                 prev = push_block_gap(lines, prev, BlockKind::Text);
-                push_assistant_body(lines, links, text, width, markdown);
+                push_assistant_body(lines, links, text, width, markdown, !bullet_emitted);
+                bullet_emitted = true;
                 text_rendered = true;
             }
             TurnSegment::Plan(plan) => {
                 prev = push_block_gap(lines, prev, BlockKind::Plan);
                 push_plan_block(lines, plan);
                 text_rendered = true;
+            }
+            TurnSegment::Ask(ask_display) => {
+                prev = push_block_gap(lines, prev, BlockKind::Ask);
+                push_ask_message(lines, ask_display, ask);
+            }
+            TurnSegment::Reply(text) => {
+                prev = push_block_gap(lines, prev, BlockKind::Reply);
+                lines.push(Line::from(vec![
+                    Span::styled(USER_PREFIX, style::user_message()),
+                    Span::styled(text.clone(), style::user_message()),
+                ]));
             }
         }
     }
@@ -277,14 +300,15 @@ fn push_streaming_line(
     }
     if !line.pending_text.trim().is_empty() {
         prev = push_block_gap(lines, prev, BlockKind::Text);
-        push_assistant_body(lines, links, &line.pending_text, width, markdown);
+        push_assistant_body(lines, links, &line.pending_text, width, markdown, !bullet_emitted);
+        bullet_emitted = true;
         text_rendered = true;
     }
     // Guard for streaming lines restored before the timeline existed (and for
     // lines that only carried plain text): render the accumulated text last.
     if !text_rendered && !line.text.trim().is_empty() {
         push_block_gap(lines, prev, BlockKind::Text);
-        push_assistant_body(lines, links, &line.text, width, markdown);
+        push_assistant_body(lines, links, &line.text, width, markdown, !bullet_emitted);
     }
     if !line.segments.is_empty()
         || !line.pending_thinking.trim().is_empty()
@@ -380,6 +404,7 @@ fn push_chat_line(
     width: u16,
     markdown: &mut MarkdownCache,
     expand_thinking: bool,
+    ask: Option<&PendingAsk>,
 ) {
     match line.role.as_str() {
         "user" => push_user_text(lines, &line.text, line.queued),
@@ -402,8 +427,9 @@ fn push_chat_line(
                 ]));
             }
         }
-        // A blocking ask_user question awaiting a reply — brand accent so it
-        // stands apart from system feedback and ordinary assistant text.
+        // A blocking ask_user question (fallback path when no live turn). Live
+        // questions render as `Ask` segments of the turn; this keeps the "? "
+        // brand styling for the rare static case.
         "ask" => {
             for chunk in line.text.lines() {
                 lines.push(Line::from(vec![
@@ -416,6 +442,7 @@ fn push_chat_line(
             let tool_hidden = collapsed_tool_count(&line.segments, expand_thinking);
             let mut tools_seen = 0usize;
             let mut tool_hint_rendered = false;
+            let mut bullet_emitted = false;
             let mut prev: Option<BlockKind> = None;
             for segment in &line.segments {
                 match segment {
@@ -450,11 +477,23 @@ fn push_chat_line(
                             continue;
                         }
                         prev = push_block_gap(lines, prev, BlockKind::Text);
-                        push_assistant_body(lines, links, text, width, markdown);
+                        push_assistant_body(lines, links, text, width, markdown, !bullet_emitted);
+                        bullet_emitted = true;
                     }
                     TurnSegment::Plan(plan) => {
                         prev = push_block_gap(lines, prev, BlockKind::Plan);
                         push_plan_block(lines, plan);
+                    }
+                    TurnSegment::Ask(ask_display) => {
+                        prev = push_block_gap(lines, prev, BlockKind::Ask);
+                        push_ask_message(lines, ask_display, ask);
+                    }
+                    TurnSegment::Reply(text) => {
+                        prev = push_block_gap(lines, prev, BlockKind::Reply);
+                        lines.push(Line::from(vec![
+                            Span::styled(USER_PREFIX, style::user_message()),
+                            Span::styled(text.clone(), style::user_message()),
+                        ]));
                     }
                 }
             }
@@ -465,7 +504,7 @@ fn push_chat_line(
             });
             if !text_in_segments && !line.text.trim().is_empty() {
                 push_block_gap(lines, prev, BlockKind::Text);
-                push_assistant_body(lines, links, &line.text, width, markdown);
+                push_assistant_body(lines, links, &line.text, width, markdown, !bullet_emitted);
             }
         }
     }
@@ -550,13 +589,43 @@ fn user_line_spans(
     ]
 }
 
-fn push_assistant_plain(lines: &mut Vec<Line<'static>>, text: &str) {
+/// Render an `ask_user` question with its discrete options directly under it,
+/// so the user can pick one where the question lives. While the question is
+/// pending the currently selected option is highlighted (`❯`); committed
+/// questions keep their options as a plain historical record.
+fn push_ask_message(lines: &mut Vec<Line<'static>>, ask_display: &AskDisplay, ask: Option<&PendingAsk>) {
+    for chunk in ask_display.question.lines() {
+        lines.push(Line::from(vec![
+            Span::styled("? ", style::ask()),
+            Span::styled(chunk.to_string(), style::ask()),
+        ]));
+    }
+    if ask_display.options.is_empty() {
+        return;
+    }
+    let pending = ask.filter(|pending| pending.id == ask_display.id);
+    for (index, option) in ask_display.options.iter().enumerate() {
+        let is_selected = pending.is_some_and(|pending| index == pending.selected);
+        let style = if is_selected { style::ask() } else { style::ask_hint() };
+        let prefix = if is_selected { "❯ " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), style),
+            Span::styled(option.clone(), style),
+        ]));
+    }
+}
+
+fn push_assistant_plain(lines: &mut Vec<Line<'static>>, text: &str, bullet: bool) {
     if text.trim().is_empty() {
         return;
     }
     for (index, chunk) in text.lines().enumerate() {
         if index == 0 {
-            let mut spans = assistant_leading_spans();
+            let mut spans = if bullet {
+                assistant_leading_spans()
+            } else {
+                vec![Span::raw(ASSISTANT_CONTINUATION)]
+            };
             spans.push(Span::raw(chunk.to_string()));
             lines.push(Line::from(spans));
         } else {
@@ -568,11 +637,15 @@ fn push_assistant_plain(lines: &mut Vec<Line<'static>>, text: &str) {
     }
 }
 
-fn prefix_assistant_lines(body: &[Line<'static>]) -> Vec<Line<'static>> {
+/// Prefix a rendered markdown body: the first line carries the assistant
+/// bullet when this is the reply's first body block; every other line (and
+/// any later body block of the same reply) uses the plain continuation indent
+/// so one assistant reply shows a single `●`.
+fn prefix_assistant_lines(body: &[Line<'static>], bullet: bool) -> Vec<Line<'static>> {
     body.iter()
         .enumerate()
         .map(|(index, line)| {
-            let mut spans = if index == 0 {
+            let mut spans = if index == 0 && bullet {
                 assistant_leading_spans()
             } else {
                 vec![Span::raw(ASSISTANT_CONTINUATION)]
@@ -586,7 +659,7 @@ fn prefix_assistant_lines(body: &[Line<'static>]) -> Vec<Line<'static>> {
 fn assistant_body_width(viewport_width: u16) -> u16 {
     content_width(viewport_width)
         .saturating_sub(ASSISTANT_PREFIX.width() as u16)
-        .max(20)
+        .max(1)
 }
 
 fn push_assistant_body(
@@ -595,6 +668,7 @@ fn push_assistant_body(
     text: &str,
     width: u16,
     markdown: &mut MarkdownCache,
+    bullet: bool,
 ) {
     if text.trim().is_empty() {
         return;
@@ -602,11 +676,11 @@ fn push_assistant_body(
     let body_width = assistant_body_width(width);
     let (rendered, rendered_links) = markdown.render_static_with_links(text, body_width);
     if rendered.is_empty() {
-        push_assistant_plain(lines, text);
+        push_assistant_plain(lines, text, bullet);
         return;
     }
     let base = lines.len() as u16;
-    lines.extend(prefix_assistant_lines(rendered));
+    lines.extend(prefix_assistant_lines(rendered, bullet));
     for region in rendered_links {
         links.push(offset_link_region(region, base, 2));
     }
@@ -685,7 +759,7 @@ fn tool_line(
     collapse_hint: Option<String>,
 ) -> Line<'static> {
     let mut spans = vec![Span::styled(
-        format!("{} {}", tool_icon(&tool.name), tool.label),
+        format!("▸ {}", tool.label),
         style::tool_call(),
     )];
     if elapsed.is_some() && tool.status == ToolStatus::Running {
@@ -746,6 +820,8 @@ enum BlockKind {
     Thinking,
     Text,
     Plan,
+    Ask,
+    Reply,
 }
 
 /// Insert a blank line between blocks unless they are consecutive items of the
@@ -782,20 +858,6 @@ fn push_plan_block(lines: &mut Vec<Line<'static>>, plan: &PlanDisplay) {
     lines.push(Line::from(""));
     for step in &plan.steps {
         lines.push(Line::from(plan_step_spans(step, &step.text)));
-    }
-}
-
-fn tool_icon(name: &str) -> &'static str {
-    if name.starts_with("mcp__") {
-        return "🔌";
-    }
-    match name {
-        "bash" => "🐚",
-        "read" => "📖",
-        "write" => "📝",
-        "glob" => "📁",
-        "grep" => "🔍",
-        _ => "🔧",
     }
 }
 
@@ -852,6 +914,7 @@ mod tests {
             disconnected: false,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 120,
         };
         let mut markdown = MarkdownCache::new();
@@ -917,6 +980,7 @@ mod tests {
             disconnected: false,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 80,
         };
         let mut markdown = MarkdownCache::new();
@@ -963,6 +1027,7 @@ mod tests {
             disconnected: false,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 80,
         };
         let mut markdown = MarkdownCache::new();
@@ -1007,6 +1072,7 @@ mod tests {
             disconnected: false,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 80,
         };
         let mut markdown = MarkdownCache::new();
@@ -1039,6 +1105,7 @@ mod tests {
             turn_start: None,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 120,
         };
         let mut markdown = MarkdownCache::new();
@@ -1072,6 +1139,129 @@ mod tests {
     }
 
     #[test]
+    fn tool_lines_use_a_clean_marker_not_emoji() {
+        let mut line = sample_line("assistant", "done", false);
+        line.segments = vec![
+            TurnSegment::Tool(ToolCallDisplay {
+                name: "bash".into(),
+                label: "ls -la".into(),
+                status: ToolStatus::Done,
+            }),
+            TurnSegment::Tool(ToolCallDisplay {
+                name: "mcp__git__commit".into(),
+                label: "git/commit".into(),
+                status: ToolStatus::Running,
+            }),
+        ];
+        let joined = render_single(line);
+        for emoji in ["🐚", "🔌", "📖", "📝", "📁", "🔍", "🔧"] {
+            assert!(!joined.contains(emoji), "tool line must not use {emoji}");
+        }
+        assert!(
+            joined.contains("▸ ls -la") && joined.contains("▸ git/commit"),
+            "tool lines open with a single-width marker"
+        );
+    }
+
+    #[test]
+    fn one_assistant_bullet_per_reply_regardless_of_text_blocks() {
+        let mut line = sample_line("assistant", "", false);
+        line.segments = vec![
+            TurnSegment::Text("First body paragraph".into()),
+            TurnSegment::Tool(ToolCallDisplay {
+                name: "read".into(),
+                label: "index.ts".into(),
+                status: ToolStatus::Done,
+            }),
+            TurnSegment::Text("Second body paragraph".into()),
+        ];
+        let content = TranscriptContent {
+            lines: &[line],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: true,
+            ask: None,
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
+        let joined: Vec<String> = rendered
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let bullets = joined
+            .iter()
+            .filter(|l| l.starts_with("●"))
+            .count();
+        assert_eq!(bullets, 1, "one reply carries exactly one bullet: {joined:?}");
+        let first = joined.iter().position(|l| l.contains("First body")).unwrap();
+        let second = joined.iter().position(|l| l.contains("Second body")).unwrap();
+        assert!(
+            joined[second].starts_with("  ") && !joined[second].starts_with("●"),
+            "later body blocks use the continuation indent, not a fresh bullet"
+        );
+        assert!(first < second);
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_content_aligned_under_the_bullet() {
+        let mut line = sample_line("assistant", "", false);
+        line.segments = vec![TurnSegment::Text(
+            "This sentence is long enough to wrap more than once even on a narrow terminal"
+                .into(),
+        )];
+        let content = TranscriptContent {
+            lines: &[line],
+            streaming: None,
+            waiting: false,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: true,
+            ask: None,
+            width: 18,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
+        let joined: Vec<String> = rendered
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(joined.len() > 2, "the body must wrap on a narrow terminal");
+        for l in &joined {
+            assert!(
+                l.is_empty() || l.starts_with("● ") || l.starts_with("  "),
+                "every body line keeps the 2-column gutter aligned: {l:?}"
+            );
+        }
+    }
+
+    #[test]
     fn long_thinking_collapses_until_expanded() {
         let thinking = (0..20)
             .map(|i| format!("line {i}"))
@@ -1101,6 +1291,7 @@ mod tests {
             turn_start: None,
             tool_elapsed: None,
             expand_thinking: true,
+            ask: None,
             width: 120,
         };
         let mut markdown = MarkdownCache::new();
@@ -1144,6 +1335,121 @@ mod tests {
     }
 
     #[test]
+    fn ask_options_render_inline_under_the_question() {
+        let mut line = sample_line("assistant", "Which DB?", false);
+        line.segments = vec![TurnSegment::Ask(AskDisplay {
+            id: "a1".into(),
+            question: "Which DB?".into(),
+            options: vec!["postgres".into(), "sqlite".into()],
+        })];
+        let ask = PendingAsk {
+            id: "a1".into(),
+            question: "Which DB?".into(),
+            options: vec!["postgres".into(), "sqlite".into()],
+            selected: 1,
+        };
+        let content = TranscriptContent {
+            lines: &[line.clone()],
+            streaming: Some(&line),
+            waiting: true,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: false,
+            ask: Some(&ask),
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
+        let joined: String = rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(joined.contains("Which DB?"));
+        assert!(joined.contains("❯ sqlite"), "selected option is highlighted");
+        assert!(joined.contains("postgres"));
+        let question_pos = joined.find("Which DB?").unwrap();
+        let selected_pos = joined.find('❯').unwrap();
+        assert!(selected_pos > question_pos, "options render under the question");
+    }
+
+    #[test]
+    fn multiple_asks_render_in_turn_order_with_replies_between() {
+        let mut line = sample_line("assistant", "before", false);
+        line.segments = vec![
+            TurnSegment::Text("Let me check with you.".into()),
+            TurnSegment::Ask(AskDisplay {
+                id: "a1".into(),
+                question: "Which DB?".into(),
+                options: vec!["postgres".into(), "sqlite".into()],
+            }),
+            TurnSegment::Reply("postgres".into()),
+            TurnSegment::Text("Thanks, continuing…".into()),
+            TurnSegment::Ask(AskDisplay {
+                id: "a2".into(),
+                question: "Port number?".into(),
+                options: vec!["5432".into(), "5433".into()],
+            }),
+        ];
+        let ask = PendingAsk {
+            id: "a2".into(),
+            question: "Port number?".into(),
+            options: vec!["5432".into(), "5433".into()],
+            selected: 0,
+        };
+        let content = TranscriptContent {
+            lines: &[line.clone()],
+            streaming: Some(&line),
+            waiting: true,
+            banner: &[],
+            show_welcome: false,
+            connecting: false,
+            disconnected: false,
+            active_agent: "default",
+            fallback: None,
+            clock: Instant::now(),
+            turn_start: None,
+            tool_elapsed: None,
+            expand_thinking: false,
+            ask: Some(&ask),
+            width: 120,
+        };
+        let mut markdown = MarkdownCache::new();
+        let (rendered, _) = build_transcript_lines(&content, &mut markdown);
+        let joined: String = rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        for needle in [
+            "Let me check with you.",
+            "Which DB?",
+            "postgres",
+            "Thanks, continuing…",
+            "Port number?",
+        ] {
+            assert!(joined.contains(needle), "missing: {needle}");
+        }
+        // Strict turn order: first question → first reply → continuation →
+        // second question (which carries the live ❯ selection).
+        assert!(joined.find("Which DB?").unwrap() < joined.find("postgres").unwrap());
+        assert!(joined.find("postgres").unwrap() < joined.find("Thanks, continuing…").unwrap());
+        assert!(
+            joined.find("Thanks, continuing…").unwrap() < joined.find("Port number?").unwrap()
+        );
+        let first_question_end = joined.find("Which DB?").unwrap() + "Which DB?".len();
+        assert!(!joined[..first_question_end].contains('❯'));
+        assert!(joined[joined.find("Port number?").unwrap()..].contains("❯ 5432"));
+    }
+
+    #[test]
     fn disconnected_shows_reconnect_banner() {
         let content = TranscriptContent {
             lines: &[],
@@ -1159,6 +1465,7 @@ mod tests {
             turn_start: None,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 80,
         };
         let mut markdown = MarkdownCache::new();
@@ -1187,6 +1494,7 @@ mod tests {
             turn_start: None,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 120,
         };
         let mut markdown = MarkdownCache::new();
@@ -1247,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn spinner_persists_while_tools_run_and_hides_once_text_streams() {
+    fn spinner_stays_visible_for_the_whole_turn() {
         let tool = TurnSegment::Tool(ToolCallDisplay {
             name: "bash".into(),
             label: "sleep 30".into(),
@@ -1271,8 +1579,9 @@ mod tests {
             "loading indicator stays visible while a tool still runs"
         );
 
-        // Once the final answer streams and no tool is running, the answer text
-        // replaces the spinner.
+        // Even while the final answer streams, the turn is not done yet, so the
+        // loading indicator must not vanish (the screen would otherwise look
+        // frozen during pauses between bursts of output).
         let mut typing = sample_line("assistant", "the answer…", false);
         typing.segments = vec![TurnSegment::Tool(ToolCallDisplay {
             name: "read".into(),
@@ -1281,8 +1590,15 @@ mod tests {
         })];
         let streaming = render_streaming(&typing, true);
         assert!(
-            !streaming.contains("Working…"),
-            "the streaming answer replaces the spinner"
+            streaming.contains("Working…"),
+            "the loading indicator stays until the turn finishes"
+        );
+
+        // Once the turn is over the spinner is gone.
+        let done = render_streaming(&typing, false);
+        assert!(
+            !done.contains("Working…") && !done.contains("Thinking…"),
+            "no loading indicator after the turn completes"
         );
     }
 
@@ -1342,6 +1658,7 @@ mod tests {
             turn_start: None,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 120,
         };
         let mut markdown = MarkdownCache::new();
@@ -1412,6 +1729,7 @@ mod tests {
             turn_start: None,
             tool_elapsed: None,
             expand_thinking: true,
+            ask: None,
             width: 120,
         };
         let mut markdown = MarkdownCache::new();
@@ -1457,6 +1775,7 @@ mod tests {
             turn_start: None,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 120,
         };
         let mut markdown = MarkdownCache::new();
@@ -1506,6 +1825,7 @@ mod tests {
             turn_start: None,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 100,
         };
         let mut markdown = MarkdownCache::new();
@@ -1556,6 +1876,7 @@ mod tests {
             turn_start: None,
             tool_elapsed: None,
             expand_thinking: false,
+            ask: None,
             width: 120,
         };
         let mut markdown = MarkdownCache::new();
@@ -1579,5 +1900,3 @@ mod tests {
         );
     }
 }
-
-

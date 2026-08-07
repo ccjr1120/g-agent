@@ -20,6 +20,7 @@ import {
 } from "./state.js";
 import { loadPersistedAgentTasks, persistAgentTasks } from "./agent-tasks.js";
 import {
+  activeMcpContext,
   ensureReloadWatches,
   refreshClient,
   reloadAgentsCatalog,
@@ -68,6 +69,7 @@ Bun.serve<WsData>({
           effectiveProvider: resolveProvider(initialAgent),
           mcpManager: new McpManager(),
           agentTasks: [],
+          pendingAsks: new Map(),
         } satisfies WsData,
       })
     ) {
@@ -100,8 +102,10 @@ Bun.serve<WsData>({
     },
     close(ws) {
       clients.delete(ws);
-      ws.data.pendingAsk?.reject(new Error("disconnected"));
-      ws.data.pendingAsk = undefined;
+      for (const { reject } of ws.data.pendingAsks.values()) {
+        reject(new Error("disconnected"));
+      }
+      ws.data.pendingAsks.clear();
       void ws.data.mcpManager.close();
       for (const task of ws.data.agentTasks) {
         void task.mcpManager?.close();
@@ -211,12 +215,14 @@ Bun.serve<WsData>({
         void persistAgentTasks(ws.data.agentTasks);
         sendAgentSession(ws, task);
         sendAgentTasks(ws);
+        sendMcpCatalog(ws);
         return;
       }
 
       if (message.type === "agent_back") {
         ws.data.activeAgentTaskSlot = undefined;
         sendAgentSession(ws);
+        sendMcpCatalog(ws);
         return;
       }
 
@@ -261,11 +267,11 @@ Bun.serve<WsData>({
       }
 
       if (message.type === "ask_user_reply") {
-        const pending = ws.data.pendingAsk;
+        const pending = ws.data.pendingAsks.get(message.id);
         if (!pending) {
           return;
         }
-        ws.data.pendingAsk = undefined;
+        ws.data.pendingAsks.delete(message.id);
         pending.resolve(message.reply);
         return;
       }
@@ -320,6 +326,7 @@ Bun.serve<WsData>({
           if (target.name === loadedAgents.defaultName) {
             ws.data.activeAgentTaskSlot = undefined;
             sendAgentSession(ws);
+            sendMcpCatalog(ws);
             return;
           }
 
@@ -380,7 +387,15 @@ Bun.serve<WsData>({
             return;
           }
 
-          const merged = mergedMcpServers(ws.data.activeAgent);
+          const { agent, manager } = activeMcpContext(ws);
+          if (!manager) {
+            send(ws, {
+              type: "error",
+              message: "MCP server is not connected yet",
+            });
+            return;
+          }
+          const merged = mergedMcpServers(agent);
           if (!(serverName in merged)) {
             send(ws, {
               type: "error",
@@ -394,14 +409,14 @@ Bun.serve<WsData>({
           });
 
           try {
-            const result = await ws.data.mcpManager.authenticate(serverName);
+            const result = await manager.authenticate(serverName);
             if (result.ok) {
               console.log(
-                `MCP OAuth complete for agent=${ws.data.activeAgent.name} server=${serverName} tools=${result.toolCount ?? 0}`,
+                `MCP OAuth complete for agent=${agent.name} server=${serverName} tools=${result.toolCount ?? 0}`,
               );
             } else {
               console.warn(
-                `MCP OAuth failed for agent=${ws.data.activeAgent.name} server=${serverName}: ${result.error}`,
+                `MCP OAuth failed for agent=${agent.name} server=${serverName}: ${result.error}`,
               );
               send(ws, {
                 type: "error",

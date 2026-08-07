@@ -97,6 +97,11 @@ impl App {
                         return;
                     }
                 }
+                if name == "ask_user" {
+                    // The question is rendered as a branded Ask segment when the
+                    // AskUser event arrives; skip the generic tool line for it.
+                    return;
+                }
                 let label = format_tool_call(&name, &args);
                 if let Some(line) = &mut self.streaming {
                     flush_pending_text(line);
@@ -115,11 +120,15 @@ impl App {
                 }
                 self.mark_tool_result(&name, &output);
             }
-            AgentEvent::AskUser(question) => {
+            AgentEvent::AskUser {
+                id,
+                question,
+                options,
+            } => {
                 if self.cancel_turn {
                     return;
                 }
-                self.begin_ask(&question);
+                self.begin_ask(&id, &question, options);
             }
             AgentEvent::TurnDone => self.finish_turn(),
             AgentEvent::Error(message) => self.finish_turn_with_error(message),
@@ -179,25 +188,45 @@ impl App {
     }
 
     /// Enter "answer the agent" mode for a blocking `ask_user` question. The
-    /// question is placed in the transcript as a distinct ask message right
-    /// after the in-flight turn so the user sees what the agent is asking;
+    /// question is appended as an ordered segment of the live turn (right
+    /// where the model asked it, after any preceding reasoning/text), so the
+    /// transcript keeps turn order even across several sequential questions;
     /// the composer then submits an `ask_user_reply` instead of a chat turn.
-    fn begin_ask(&mut self, question: &str) {
-        if self.pending_ask.is_some() {
-            return;
+    ///
+    /// The server keeps every pending question answerable (each carries its
+    /// own id), so when the model emits several `ask_user` calls in one round
+    /// all of them stay pending and the newest becomes the focused one; the
+    /// user switches between them with ←/→ and answers each.
+    fn begin_ask(&mut self, id: &str, question: &str, options: Vec<String>) {
+        self.pending_asks.push(model::PendingAsk {
+            id: id.to_string(),
+            question: question.to_string(),
+            options: options.clone(),
+            selected: 0,
+        });
+        self.active_ask = self.pending_asks.len() - 1;
+        if let Some(line) = &mut self.streaming {
+            flush_pending_text(line);
+            flush_pending_thinking(line);
+            line.segments.push(TurnSegment::Ask(AskDisplay {
+                id: id.to_string(),
+                question: question.to_string(),
+                options,
+            }));
+        } else {
+            // No live turn (defensive): fall back to a static ask message.
+            let line = ChatLine {
+                role: "ask".to_string(),
+                text: question.to_string(),
+                sent_content: None,
+                segments: Vec::new(),
+                pending_thinking: String::new(),
+                pending_text: String::new(),
+                duration_ms: None,
+                queued: false,
+            };
+            self.static_lines.push(line);
         }
-        self.pending_ask = Some(question.to_string());
-        let line = ChatLine {
-            role: "ask".to_string(),
-            text: question.to_string(),
-            sent_content: None,
-            segments: Vec::new(),
-            pending_thinking: String::new(),
-            pending_text: String::new(),
-            duration_ms: None,
-            queued: false,
-        };
-        self.static_lines.push(line);
     }
 
     fn finish_turn(&mut self) {
@@ -209,7 +238,7 @@ impl App {
             self.tool_start = None;
             self.in_flight = None;
             self.cancel_turn = false;
-            self.pending_ask = None;
+            self.clear_pending_asks();
             if self.open_pending_session() {
                 return;
             }
@@ -223,7 +252,7 @@ impl App {
         self.turn_start = None;
         self.tool_start = None;
         self.in_flight = None;
-        self.pending_ask = None;
+        self.clear_pending_asks();
         self.persist_session();
         if self.open_pending_session() {
             return;
@@ -270,7 +299,7 @@ impl App {
         self.turn_start = None;
         self.tool_start = None;
         self.in_flight = None;
-        self.pending_ask = None;
+        self.clear_pending_asks();
         self.persist_session();
         if self.open_pending_session() {
             return;
@@ -287,7 +316,11 @@ impl App {
         mark_tool_in_line(line, name, output);
         if line.segments.iter().all(|segment| match segment {
             TurnSegment::Tool(tool) => tool.status != ToolStatus::Running,
-            TurnSegment::Thinking(_) | TurnSegment::Text(_) | TurnSegment::Plan(_) => true,
+            TurnSegment::Thinking(_)
+            | TurnSegment::Text(_)
+            | TurnSegment::Plan(_)
+            | TurnSegment::Ask(_)
+            | TurnSegment::Reply(_) => true,
         }) {
             self.tool_start = None;
         }
@@ -363,7 +396,7 @@ impl App {
         self.turn_start = None;
         self.tool_start = None;
         self.in_flight = None;
-        self.pending_ask = None;
+        self.clear_pending_asks();
         self.persist_session();
     }
 
@@ -536,7 +569,11 @@ mod tests {
     fn tool_status(line: &ChatLine, index: usize) -> ToolStatus {
         match &line.segments[index] {
             TurnSegment::Tool(tool) => tool.status,
-            TurnSegment::Thinking(_) | TurnSegment::Text(_) | TurnSegment::Plan(_) => {
+            TurnSegment::Thinking(_)
+            | TurnSegment::Text(_)
+            | TurnSegment::Plan(_)
+            | TurnSegment::Ask(_)
+            | TurnSegment::Reply(_) => {
                 panic!("expected a tool segment")
             }
         }

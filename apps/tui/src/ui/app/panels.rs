@@ -4,8 +4,29 @@ use super::model::{
 use super::*;
 use crate::protocol::ScheduledTaskInfo;
 use ratatui::style::Style;
+use unicode_width::UnicodeWidthStr;
 
 impl App {
+    /// Render the pending `ask_user` question as a dedicated panel: the
+    /// question (wrapped), its selectable options (highlighted), and a
+    /// navigation hint. The panel is the interactive surface for answering —
+    /// the transcript keeps the question as a historical record.
+    pub(super) fn ask_panel_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let Some(ask) = self.active_ask() else {
+            return Vec::new();
+        };
+        ask_panel_lines(ask, width)
+    }
+
+    /// Height of the Ask panel: wrapped question + options (or type hint) +
+    /// navigation hint + 2 border rows, capped so it never dominates.
+    pub(super) fn ask_panel_height(&self, width: u16) -> u16 {
+        let Some(ask) = self.active_ask() else {
+            return 0;
+        };
+        ask_panel_height(ask, width)
+    }
+
     pub(super) fn active_plan_key(&self) -> u64 {
         self.active_child.unwrap_or(0)
     }
@@ -235,6 +256,7 @@ impl App {
             turn_start: self.turn_start,
             tool_elapsed: self.tool_start,
             expand_thinking: self.expand_thinking,
+            ask: self.pending_asks.get(self.active_ask),
             width,
         };
         let max = max_history_scroll(&content, &mut self.markdown_cache, height);
@@ -273,6 +295,7 @@ impl App {
             turn_start: self.turn_start,
             tool_elapsed: self.tool_start,
             expand_thinking: self.expand_thinking,
+            ask: self.pending_asks.get(self.active_ask),
             width,
         };
         let max = max_history_scroll(&content, &mut self.markdown_cache, height);
@@ -378,9 +401,147 @@ fn anchored_offset(max: u16, anchor: u16) -> Option<u16> {
     (offset > 0).then_some(offset)
 }
 
+/// Render the pending `ask_user` question as a dedicated panel: the
+/// question (wrapped), its selectable options (highlighted), and a
+/// navigation hint. The panel is the interactive surface for answering —
+/// the transcript keeps the question as a historical record.
+fn ask_panel_lines(ask: &PendingAsk, width: u16) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(2) as usize;
+    let mut lines = Vec::new();
+    for chunk in wrap_text_rows(&ask.question, inner) {
+        lines.push(Line::from(vec![
+            Span::styled("? ", style::ask()),
+            Span::styled(chunk.to_string(), style::ask()),
+        ]));
+    }
+    if ask.options.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Type your answer and press Enter (Esc to skip)",
+            style::ask_hint(),
+        )));
+    } else {
+        for (index, option) in ask.options.iter().enumerate() {
+            let selected = index == ask.selected;
+            let style = if selected { style::ask() } else { style::ask_hint() };
+            let marker = if selected { "❯ " } else { "  " };
+            lines.push(Line::from(vec![
+                Span::styled(marker.to_string(), style),
+                Span::styled(
+                    truncate_to_width(option, inner.saturating_sub(2) as usize),
+                    style,
+                ),
+            ]));
+        }
+        lines.push(Line::from(Span::styled(
+            "←/→ question · ↑/↓ select · Enter answer · Esc skip",
+            style::ask_hint(),
+        )));
+    }
+    lines
+}
+
+/// Height of the Ask panel: wrapped question + options (or type hint) +
+/// navigation hint + 2 border rows, capped so it never dominates.
+fn ask_panel_height(ask: &PendingAsk, width: u16) -> u16 {
+    let inner = width.saturating_sub(2) as usize;
+    let question_rows = wrap_text_rows(&ask.question, inner).len();
+    let option_rows = if ask.options.is_empty() { 1 } else { ask.options.len() };
+    (question_rows + option_rows + 1).min(8) as u16 + 2
+}
+
+/// Split `text` into rows that each fit within `max_width` cells, breaking at
+/// character boundaries (used for the Ask panel so a long question wraps
+/// instead of overflowing the bordered box).
+fn wrap_text_rows(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![String::new()];
+    }
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let piece = if ch == '\t' { "    " } else { &ch.to_string() };
+        let piece_width = piece.width();
+        if used + piece_width > max_width && used > 0 {
+            rows.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        current.push_str(piece);
+        used += piece_width;
+    }
+    if !current.is_empty() || rows.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
-    use super::anchored_offset;
+    use super::super::model::PendingAsk;
+    use super::{anchored_offset, ask_panel_height, ask_panel_lines, wrap_text_rows};
+    use super::super::Line;
+
+    #[test]
+    fn wrap_text_rows_folds_long_questions_without_losing_chars() {
+        let text = "Which database engine should we use for the knowledge base?";
+        let rows = wrap_text_rows(text, 20);
+        assert!(rows.len() > 1, "long text should wrap into several rows");
+        assert_eq!(
+            rows.iter().map(|row| row.chars().count()).max().unwrap() <= 20,
+            true
+        );
+        assert_eq!(rows.join(""), text, "wrapping must not drop or add characters");
+    }
+
+    #[test]
+    fn wrap_text_handles_zero_width_as_single_row() {
+        assert_eq!(wrap_text_rows("anything", 0), vec!["".to_string()]);
+        assert_eq!(wrap_text_rows("", 10), vec!["".to_string()]);
+    }
+
+    fn ask(id: &str, question: &str, options: Vec<&str>, selected: usize) -> PendingAsk {
+        PendingAsk {
+            id: id.into(),
+            question: question.into(),
+            options: options.into_iter().map(str::to_string).collect(),
+            selected,
+        }
+    }
+
+    fn render_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn ask_panel_highlights_the_selected_option() {
+        let lines = ask_panel_lines(&ask("q1", "Which DB?", vec!["postgres", "sqlite"], 1), 60);
+        let text = render_text(&lines);
+        assert!(text.contains("Which DB?"));
+        assert!(text.contains("❯ sqlite"), "selected option is highlighted");
+        assert!(text.contains("postgres"));
+        let selected_pos = text.find('❯').unwrap();
+        assert!(selected_pos > text.find("Which DB?").unwrap());
+    }
+
+    #[test]
+    fn ask_panel_without_options_asks_the_user_to_type() {
+        let lines = ask_panel_lines(&ask("q1", "Tell me more", vec![], 0), 60);
+        assert!(render_text(&lines).contains("Type your answer"));
+    }
+
+    #[test]
+    fn ask_panel_height_scales_with_option_count() {
+        let open = ask("q1", "Explain", vec![], 0);
+        let with_two = ask("q1", "Explain", vec!["a", "b"], 0);
+        assert!(
+            ask_panel_height(&with_two, 60) > ask_panel_height(&open, 60),
+            "options make the panel taller than a plain open question"
+        );
+    }
 
     #[test]
     fn new_content_grows_the_offset_below_without_moving_the_view() {

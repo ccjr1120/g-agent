@@ -83,27 +83,39 @@ export function buildSkillPrompt(skill: Skill): string {
 
 /**
  * Create an `askUser` handler for a connection. Sends the question to the
- * client as an `ask_user` event and resolves when `ask_user_reply` arrives.
- * Rejects (and resolves the pending slot) if the connection drops or the turn
+ * client as an `ask_user` event (with a per-question `id` and discrete
+ * `options` when provided) and resolves when the matching `ask_user_reply`
+ * arrives. Rejects (and removes its slot) if the connection drops or the turn
  * is aborted, so an in-flight ask never hangs a turn forever.
+ *
+ * Every question gets its own id and stays answerable until explicitly
+ * replied to, so a model that emits several `ask_user` calls in one round (a
+ * concurrent `Promise.all` tool round) can be answered question by question
+ * instead of the later calls rejecting the earlier ones.
  */
 export function makeAskUserHandler(
   ws: ServerWebSocket<WsData>,
   signal?: AbortSignal,
-): (question: string) => Promise<string> {
-  return (question) =>
+): (question: string, options?: string[]) => Promise<string> {
+  return (question, options) =>
     new Promise<string>((resolve, reject) => {
       if (signal?.aborted) {
         reject(new Error("cancelled"));
         return;
       }
-      ws.data.pendingAsk = { resolve, reject };
-      send(ws, { type: "ask_user", question });
+      const id = crypto.randomUUID();
+      ws.data.pendingAsks ??= new Map();
+      ws.data.pendingAsks.set(id, { resolve, reject });
+      send(ws, {
+        type: "ask_user",
+        id,
+        question,
+        ...(options && options.length > 0 ? { options } : {}),
+      });
       const onAbort = () => {
-        if (ws.data.pendingAsk?.reject === reject) {
-          ws.data.pendingAsk = undefined;
+        if (ws.data.pendingAsks?.delete(id)) {
+          reject(new Error("cancelled"));
         }
-        reject(new Error("cancelled"));
       };
       signal?.addEventListener("abort", onAbort, { once: true });
     });

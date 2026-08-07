@@ -44,7 +44,7 @@ export type ClientMessage =
   | { type: "chat"; message: string }
   | { type: "cancel" }
   | { type: "reset" }
-  | { type: "ask_user_reply"; reply: string }
+  | { type: "ask_user_reply"; id: string; reply: string }
   | { type: "agent"; name?: string; message?: string }
   | { type: "skill"; name: string }
   | { type: "mcp" }
@@ -106,7 +106,7 @@ export type ServerMessage =
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "tool_result"; name: string; output: string }
-  | { type: "ask_user"; question: string }
+  | { type: "ask_user"; id: string; question: string; options?: string[] }
   | { type: "done" }
   | { type: "error"; message: string }
   | { type: "resumed"; agent: string; turns: number }
@@ -145,7 +145,11 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     if (data.type === "chat" && typeof data.message === "string") {
       return data;
     }
-    if (data.type === "ask_user_reply" && typeof data.reply === "string") {
+    if (
+      data.type === "ask_user_reply" &&
+      typeof data.id === "string" &&
+      typeof data.reply === "string"
+    ) {
       return data;
     }
     if (data.type === "reset") {

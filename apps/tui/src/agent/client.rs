@@ -63,6 +63,20 @@ pub enum TurnSegment {
     Thinking(String),
     Text(String),
     Plan(PlanDisplay),
+    /// A blocking `ask_user` question. While the question is pending its
+    /// options are selectable (highlighted from the current selection); once
+    /// committed the options are kept as a historical record.
+    Ask(AskDisplay),
+    /// The user's own answer to an `ask_user` question, placed in the turn
+    /// right after the question so order reads question → answer → continue.
+    Reply(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct AskDisplay {
+    pub id: String,
+    pub question: String,
+    pub options: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,7 +122,11 @@ pub enum AgentEvent {
         name: String,
         output: String,
     },
-    AskUser(String),
+    AskUser {
+        id: String,
+        question: String,
+        options: Vec<String>,
+    },
     TurnDone,
     Error(String),
     Resumed,
@@ -273,8 +291,16 @@ fn dispatch_server_message(events: &mpsc::UnboundedSender<AgentEvent>, raw: &str
         ServerMessage::ToolResult { name, output } => {
             let _ = events.send(AgentEvent::ToolResult { name, output });
         }
-        ServerMessage::AskUser { question } => {
-            let _ = events.send(AgentEvent::AskUser(question));
+        ServerMessage::AskUser {
+            id,
+            question,
+            options,
+        } => {
+            let _ = events.send(AgentEvent::AskUser {
+                id,
+                question,
+                options,
+            });
         }
         ServerMessage::Done => {
             let _ = events.send(AgentEvent::TurnDone);

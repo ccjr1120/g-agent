@@ -1,5 +1,6 @@
 use unicode_width::UnicodeWidthChar;
 
+use crate::protocol::McpServerInfo;
 use crate::ui::composer::SlashCommand;
 
 pub(super) use crate::agent::client::{PlanDisplay, PlanStep};
@@ -16,6 +17,36 @@ pub enum PanelFocus {
     Transcript,
     Scheduled,
     Tasks,
+}
+
+/// A blocking `ask_user` question awaiting a reply, with the discrete choices
+/// the agent offered (empty when it asked an open question). `selected` tracks
+/// the highlighted option so the user can pick with ↑/↓ + Enter instead of
+/// typing, while still being able to type a custom answer.
+#[derive(Debug, Clone)]
+pub struct PendingAsk {
+    /// Server-assigned id echoed back in `ask_user_reply` so several pending
+    /// questions can be answered independently.
+    pub id: String,
+    pub question: String,
+    pub options: Vec<String>,
+    pub selected: usize,
+}
+
+impl PendingAsk {
+    pub fn has_options(&self) -> bool {
+        !self.options.is_empty()
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = self.options.len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected =
+            (self.selected as isize + delta).rem_euclid(len as isize) as usize;
+    }
 }
 
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
@@ -69,6 +100,46 @@ pub(super) fn format_plan_message(plan: &PlanDisplay) -> String {
         lines.push(format!("  ✓ {}", step.text));
     }
     lines.join("\n")
+}
+
+/// Describe one MCP server for `/mcp <name>`: a header line with source,
+/// transport and connection status, followed by the tools it exposes so the
+/// user sees what a server can actually do after picking it.
+pub(super) fn format_mcp_server_detail(server: &McpServerInfo) -> String {
+    let status = if server.connected {
+        format!("connected, {} tools", server.tool_count)
+    } else if server.auth_required {
+        "auth required".into()
+    } else {
+        format!(
+            "not connected{}",
+            server
+                .error
+                .as_deref()
+                .map(|error| format!(": {error}"))
+                .unwrap_or_default()
+        )
+    };
+    let mut out = format!(
+        "[{}] {} ({}) — {}\n",
+        server.source, server.name, server.transport, status
+    );
+    if !server.connected || server.tools.is_empty() {
+        return out;
+    }
+    for tool in &server.tools {
+        let description = tool.description.split_whitespace().collect::<Vec<_>>().join(" ");
+        if description.is_empty() {
+            out.push_str(&format!("  · {}\n", tool.name));
+        } else {
+            out.push_str(&format!(
+                "  · {} — {}\n",
+                tool.name,
+                truncate_to_width(&description, 80)
+            ));
+        }
+    }
+    out
 }
 
 pub(super) fn truncate_to_width(text: &str, max_width: usize) -> String {
@@ -128,7 +199,57 @@ pub(super) fn filter_argument_items(
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_task_is_busy, format_plan_message, parse_plan, truncate_to_width};
+    use super::{
+        agent_task_is_busy, format_mcp_server_detail, format_plan_message, parse_plan, PendingAsk,
+        truncate_to_width,
+    };
+    use crate::protocol::{McpServerInfo, McpToolInfo};
+
+    fn server(name: &str, connected: bool, tools: Vec<McpToolInfo>) -> McpServerInfo {
+        McpServerInfo {
+            name: name.to_string(),
+            source: "global".into(),
+            transport: "url".into(),
+            target: "http://localhost:7077/mcp".into(),
+            connected,
+            error: None,
+            tool_count: tools.len() as u64,
+            tools,
+            oauth: false,
+            auth_required: false,
+        }
+    }
+
+    #[test]
+    fn mcp_detail_lists_the_servers_tools() {
+        let detail = format_mcp_server_detail(&server(
+            "knowledge-mcp",
+            true,
+            vec![
+                McpToolInfo {
+                    name: "search_code".into(),
+                    description: "Search the code knowledge base".into(),
+                },
+                McpToolInfo {
+                    name: "list_projects".into(),
+                    description: String::new(),
+                },
+            ],
+        ));
+        assert!(detail.contains("connected, 2 tools"));
+        assert!(detail.contains("· search_code — Search the code knowledge base"));
+        assert!(detail.contains("· list_projects"), "tools without a description still appear");
+    }
+
+    #[test]
+    fn mcp_detail_does_not_list_tools_when_disconnected() {
+        let detail = format_mcp_server_detail(&server("offline-mcp", false, vec![McpToolInfo {
+            name: "do_thing".into(),
+            description: "never reachable".into(),
+        }]));
+        assert!(detail.contains("not connected"));
+        assert!(!detail.contains("do_thing"), "disconnected servers expose no tools");
+    }
 
     #[test]
     fn truncates_wide_agent_titles_with_ellipsis() {
@@ -178,5 +299,32 @@ mod tests {
             format_plan_message(&plan),
             "Plan · 2/2\n  ✓ Inspect UI\n  ✓ Build panel"
         );
+    }
+
+    #[test]
+    fn ask_selection_wraps_around_and_ignores_movement_without_options() {
+        let mut ask = PendingAsk {
+            id: "a1".into(),
+            question: "Which DB?".into(),
+            options: vec!["postgres".into(), "sqlite".into(), "mysql".into()],
+            selected: 0,
+        };
+        assert!(ask.has_options());
+        ask.move_selection(1);
+        assert_eq!(ask.selected, 1);
+        ask.move_selection(-2);
+        assert_eq!(ask.selected, 2, "selection wraps backwards");
+        ask.move_selection(1);
+        assert_eq!(ask.selected, 0, "selection wraps forward");
+
+        let mut open = PendingAsk {
+            id: "a2".into(),
+            question: "Anything else?".into(),
+            options: Vec::new(),
+            selected: 0,
+        };
+        assert!(!open.has_options());
+        open.move_selection(5);
+        assert_eq!(open.selected, 0, "no options means no selection to move");
     }
 }

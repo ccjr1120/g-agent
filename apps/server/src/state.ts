@@ -30,14 +30,13 @@ export type WsData = {
   agentTasks: BackgroundAgentTask[];
   activeAgentTaskSlot?: number;
   /**
-   * Resolver for an in-flight `ask_user` question awaiting a reply from the
-   * client. One question at a time per connection; a second ask while one is
-   * pending rejects the earlier one.
+   * In-flight `ask_user` questions awaiting a reply, keyed by a per-question
+   * id. Several questions can be pending at once (a model's `Promise.all` tool
+   * round may emit more than one `ask_user` call), and each resolves
+   * independently when its own `ask_user_reply` arrives. No question is
+   * superseded: only explicit replies / disconnect / abort settle each one.
    */
-  pendingAsk?: {
-    resolve: (reply: string) => void;
-    reject: (error: Error) => void;
-  };
+  pendingAsks: Map<string, { resolve: (reply: string) => void; reject: (error: Error) => void }>;
 };
 
 export type BackgroundAgentTask = {

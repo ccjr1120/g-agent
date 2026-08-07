@@ -236,6 +236,261 @@ describe("runAgent", () => {
     expect(events.at(-1)).toEqual({ type: "done" });
   });
 
+  test("nudges a freshly created plan to clarify before executing", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const round = requestBodies.length;
+      if (round === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: "call-plan",
+                type: "function",
+                function: {
+                  name: "update_plan",
+                  arguments: JSON.stringify({
+                    steps: [
+                      { step: "Plan", status: "in_progress" },
+                      { step: "Build", status: "pending" },
+                    ],
+                  }),
+                },
+              }],
+            },
+          }],
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: "done" } }],
+      });
+    };
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("build the feature", (event) => events.push(event), provider);
+
+    const secondRound = requestBodies[1]!;
+    const systemMessages = (secondRound.messages as Array<Record<string, unknown>>)
+      .filter((message) => message.role === "system")
+      .map((message) => String(message.content));
+    expect(systemMessages.some((text) => text.includes("ask_user"))).toBe(true);
+    expect(systemMessages.some((text) => text.includes("only the user can decide"))).toBe(true);
+  });
+
+  test("corrects an ask_user that fired only after the plan was committed", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const answered: string[] = [];
+    globalThis.fetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const round = requestBodies.length;
+      if (round === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: "call-plan",
+                type: "function",
+                function: {
+                  name: "update_plan",
+                  arguments: JSON.stringify({
+                    steps: [
+                      { step: "Plan", status: "in_progress" },
+                      { step: "Build", status: "pending" },
+                    ],
+                  }),
+                },
+              }],
+            },
+          }],
+        });
+      }
+      if (round === 2) {
+        return Response.json({
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: "call-ask",
+                type: "function",
+                function: {
+                  name: "ask_user",
+                  arguments: JSON.stringify({ question: "Which target?" }),
+                },
+              }],
+            },
+          }],
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: "continuing" } }],
+      });
+    };
+    const events: AgentStreamEvent[] = [];
+    const options = {
+      askUser: async (question: string) => {
+        answered.push(question);
+        return "use fennel";
+      },
+    };
+
+    await runAgent("build the feature", (event) => events.push(event), provider, "", [], options);
+
+    expect(answered).toEqual(["Which target?"]);
+    const thirdRound = requestBodies[2]!;
+    const systemMessages = (thirdRound.messages as Array<Record<string, unknown>>)
+      .filter((message) => message.role === "system")
+      .map((message) => String(message.content));
+    expect(systemMessages.some((text) => text.includes("only after creating a plan"))).toBe(true);
+    expect(systemMessages.some((text) => text.includes("use fennel"))).toBe(true);
+  });
+
+  test("converts a plain-text question into ask_user", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const answered: string[] = [];
+    globalThis.fetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const round = requestBodies.length;
+      if (round === 1) {
+        return Response.json({
+          choices: [{ message: { content: "Which database should I use?" } }],
+        });
+      }
+      if (round === 2) {
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-ask",
+                    type: "function",
+                    function: {
+                      name: "ask_user",
+                      arguments: JSON.stringify({
+                        question: "Which database?",
+                        hint: "postgres or sqlite",
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Response.json({ choices: [{ message: { content: "done" } }] });
+    };
+    const events: AgentStreamEvent[] = [];
+    const options = {
+      askUser: async (question: string) => {
+        answered.push(question);
+        return "postgres";
+      },
+    };
+
+    await runAgent("build a db", (event) => events.push(event), provider, "", [], options);
+
+    expect(answered).toEqual(["Which database?\n(hint: postgres or sqlite)"]);
+    const secondRound = requestBodies[1]!;
+    const systemMessages = (secondRound.messages as Array<Record<string, unknown>>)
+      .filter((message) => message.role === "system")
+      .map((message) => String(message.content));
+    expect(systemMessages.some((text) => text.includes("ask_user"))).toBe(true);
+    // The plain-text question must never be surfaced to the user.
+    expect(
+      events.some(
+        (event) => event.type === "delta" && event.text.includes("Which database"),
+      ),
+    ).toBe(false);
+  });
+
+  test("does not nudge answers that are not questions", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ choices: [{ message: { content: "All done." } }] });
+    };
+    const events: AgentStreamEvent[] = [];
+
+    await runAgent("hi", (event) => events.push(event), provider);
+    expect(requestBodies.length).toBe(1);
+    expect(
+      events.some((event) => event.type === "delta" && event.text === "All done."),
+    ).toBe(true);
+  });
+
+  test("converts a multi-line plain-text question into ask_user", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const answered: string[] = [];
+    globalThis.fetch = async (_input, init) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const round = requestBodies.length;
+      if (round === 1) {
+        // A long multi-line reply that ends its final line with a question —
+        // the sort of plain-text question that used to slip past the nudge
+        // because single-line detection ignored newlines.
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content:
+                  "这是个大改动，先确认方案。\n请回我：\n- 命名风格（1）\n- 原文件处理（2）\n你选哪种方案？",
+              },
+            },
+          ],
+        });
+      }
+      if (round === 2) {
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-ask",
+                    type: "function",
+                    function: {
+                      name: "ask_user",
+                      arguments: JSON.stringify({
+                        question: "命名风格和原文件处理你选哪种？",
+                        hint: "1 或 2",
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      return Response.json({ choices: [{ message: { content: "done" } }] });
+    };
+    const events: AgentStreamEvent[] = [];
+    const options = {
+      askUser: async (question: string) => {
+        answered.push(question);
+        return "1";
+      },
+    };
+
+    await runAgent("restructure", (event) => events.push(event), provider, "", [], options);
+
+    expect(answered).toHaveLength(1);
+    const second = requestBodies[1]!;
+    const systemMessages = (second.messages as Array<Record<string, unknown>>)
+      .filter((message) => message.role === "system")
+      .map((message) => String(message.content));
+    expect(systemMessages.some((text) => text.includes("using the ask_user tool"))).toBe(true);
+    expect(
+      events.some((event) => event.type === "delta" && event.text.includes("请回我")),
+    ).toBe(false);
+  });
+
   test("reports cancellation without surfacing it as an error", async () => {
     const controller = new AbortController();
     globalThis.fetch = (_input, init) =>

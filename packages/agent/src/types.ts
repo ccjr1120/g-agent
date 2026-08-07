@@ -17,9 +17,10 @@ export type AgentRunOptions = {
    * Optional handler that shows a blocking question to the user and resolves
    * with their reply. Used by the `ask_user` tool so the agent can clarify
    * requirements before committing to a plan instead of derailing mid-plan.
+   * `options` carries discrete choices the user can pick from directly.
    * When absent, `ask_user` reports that user input is unavailable.
    */
-  askUser?: (question: string) => Promise<string>;
+  askUser?: (question: string, options?: string[]) => Promise<string>;
 };
 
 export type AgentStreamEvent =

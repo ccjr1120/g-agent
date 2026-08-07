@@ -66,16 +66,16 @@ function formatMcpTarget(config: McpServerConfig): {
 
 function mcpCatalog(
   agent: AgentConfig,
-  manager: McpManager,
+  manager: McpManager | null,
 ): McpServerCatalogEntry[] {
   const agentServerNames = new Set(Object.keys(agent.mcpServers ?? {}));
   const merged = mergedMcpServers(agent);
 
   return Object.entries(merged)
     .map(([name, config]) => {
-      const result = manager.getConnectionResult(name);
+      const result = manager?.getConnectionResult(name);
       const { transport, target } = formatMcpTarget(config);
-      const tools = manager.getServerTools(name);
+      const tools = manager?.getServerTools(name) ?? [];
 
       return {
         name,
@@ -93,10 +93,31 @@ function mcpCatalog(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * Resolve the MCP context the client currently sees: the active sub-agent
+ * session (its agent config + its own McpManager) when one is open, otherwise
+ * the main session. Keeps `/mcp` and the panel in sync with whichever agent
+ * actually runs the next prompt, instead of always reporting the main agent.
+ */
+export function activeMcpContext(
+  ws: ServerWebSocket<WsData>,
+): { agent: AgentConfig; manager: McpManager | null } {
+  if (ws.data.activeAgentTaskSlot !== undefined) {
+    const task = ws.data.agentTasks.find(
+      (candidate) => candidate.slot === ws.data.activeAgentTaskSlot,
+    );
+    if (task) {
+      return { agent: task.agent, manager: task.mcpManager ?? null };
+    }
+  }
+  return { agent: ws.data.activeAgent, manager: ws.data.mcpManager };
+}
+
 export function sendMcpCatalog(ws: ServerWebSocket<WsData>): void {
+  const { agent, manager } = activeMcpContext(ws);
   send(ws, {
     type: "mcp",
-    servers: mcpCatalog(ws.data.activeAgent, ws.data.mcpManager),
+    servers: mcpCatalog(agent, manager),
   });
 }
 
@@ -166,6 +187,22 @@ export async function reloadAndRefreshClients(): Promise<void> {
       await ws.data.mcpManager.close();
       ws.data.mcpManager = await connectMcpForAgent(ws.data.activeAgent);
     }
+
+    // Re-resolve sub-agent sessions against the fresh catalog and reconnect
+    // their MCP when the merged server set changed, so config edits to a
+    // sub-agent take effect without a server restart.
+    for (const task of ws.data.agentTasks) {
+      const refreshed = loadedAgents.agents.get(task.agent.name);
+      if (!refreshed) continue;
+      const before = JSON.stringify(mergedMcpServers(task.agent));
+      task.agent = refreshed;
+      const afterTask = JSON.stringify(mergedMcpServers(task.agent));
+      if (before !== afterTask && task.mcpManager) {
+        await task.mcpManager.close();
+        task.mcpManager = await connectMcpForAgent(task.agent);
+      }
+    }
+
     refreshClient(ws);
   }
 }

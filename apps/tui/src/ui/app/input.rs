@@ -8,17 +8,26 @@ impl App {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 self.handle_key(key, transcript_area);
             }
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollUp => self.scroll_history(3, transcript_area),
-                MouseEventKind::ScrollDown => self.scroll_history(-3, transcript_area),
-                MouseEventKind::Down(MouseButton::Left) => {
-                    self.open_link_at(mouse.column, mouse.row);
-                }
-                _ => {}
-            },
+            Event::Mouse(mouse) => self.handle_mouse(mouse, transcript_area),
             Event::Paste(text) => {
                 self.input_history.reset_browse();
                 self.composer.insert_paste(&text);
+            }
+            _ => {}
+        }
+    }
+
+    /// True while an `ask_user` question with discrete options awaits a reply.
+    fn ask_has_options(&self) -> bool {
+        self.active_ask().is_some_and(|ask| ask.has_options())
+    }
+
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent, transcript_area: Rect) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_history(3, transcript_area),
+            MouseEventKind::ScrollDown => self.scroll_history(-3, transcript_area),
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.open_link_at(mouse.column, mouse.row);
             }
             _ => {}
         }
@@ -134,6 +143,29 @@ impl App {
         // to the transcript. The composer is only editable again after
         // pressing Esc/Tab/Enter to drop focus.
         if !self.composer.menu_open && !self.input_history.is_browsing() {
+            // While questions are pending, ←/→ switch the question being
+            // answered (the Ask panel), just like Tab; ↑/↓ move the option
+            // selection for the current question. With an open question the
+            // user may be typing a free-form answer, so ←/→ stay available
+            // for cursor movement there.
+            if !self.pending_asks.is_empty()
+                && matches!(
+                    key.code,
+                    KeyCode::Tab | KeyCode::Left | KeyCode::Right
+                )
+                && key.modifiers.is_empty()
+                && (self.ask_has_options() || self.composer.textarea.text().is_empty())
+            {
+                if self.panel_focus != PanelFocus::Transcript {
+                    self.reset_panel_scroll();
+                }
+                let delta = match key.code {
+                    KeyCode::Left => -1,
+                    _ => 1,
+                };
+                self.cycle_active_ask(delta);
+                return;
+            }
             if self.panel_focus != PanelFocus::Transcript {
                 if self.handle_panel_key(key) {
                     return;
@@ -159,6 +191,15 @@ impl App {
                 _ => {}
             }
         } else if matches!(key.code, KeyCode::Up | KeyCode::Down) && !self.composer.menu_open {
+            // While the agent's question offers discrete options, ↑/↓ move the
+            // highlighted option instead of recalling prompt history.
+            if self.ask_has_options() {
+                if let Some(ask) = self.pending_asks.get_mut(self.active_ask) {
+                    let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                    ask.move_selection(delta);
+                }
+                return;
+            }
             self.handle_input_history_key(key.code, transcript_area);
             return;
         }
@@ -169,6 +210,12 @@ impl App {
 
         match key.code {
             KeyCode::Esc if !self.composer.menu_open => {
+                // While an ask_user question awaits a reply, Esc skips just the
+                // question (the agent continues) instead of aborting the turn.
+                if !self.pending_asks.is_empty() {
+                    self.skip_pending_ask();
+                    return;
+                }
                 if self.revert_last_send() {
                     return;
                 }
@@ -201,7 +248,13 @@ impl App {
                 self.composer.on_text_changed();
             }
             KeyCode::Enter => {
-                self.submit_composer();
+                // With discrete ask_user options and an empty composer, Enter
+                // picks the highlighted option instead of starting a chat turn.
+                if self.ask_has_options() && self.composer.textarea.text().trim().is_empty() {
+                    self.select_ask_option();
+                } else {
+                    self.submit_composer();
+                }
             }
             // Cmd+Backspace deletes the whole logical line (macOS muscle memory).
             KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SUPER) => {

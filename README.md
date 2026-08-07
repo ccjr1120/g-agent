@@ -125,13 +125,15 @@ TUI 内：
 
 子会话**持久化**到磁盘（`$G_AGENT_HOME/agent-tasks.json`，默认 `~/.config/g-agent/agent-tasks.json`），server 重启后自动恢复（运行中的轮次会重置为空闲，MCP 连接在下次发消息时重建）。
 
+每个子会话使用**自己的 Agent 配置**（含 agent 级 `mcpServers`）。进入子会话或执行 `/mcp` 时，显示的是该子会话自己的 MCP 列表（agent 级覆盖 global 后合并）；`/reload` 会重新解析子会话的 agent 配置，仅在合并后的 MCP 变化时重建连接。执行 `/mcp <server>`（或在 `/mcp` 菜单中选中某个 server）会在 Transcript 中展示该 server 的连接状态与**暴露的工具列表**（含简介），便于判断该接入能力是否覆盖所需操作。
+
 #### 定时任务
 
 `default` 内置 `schedule_task` / `unschedule_task` / `list_scheduled_tasks` 工具。告诉 Agent「每 10 分钟拉取一次需求列表，有更新告诉我」即可注册一个后台定时任务：它在自己的调度上独立运行（复用当前 Agent 的工具与 MCP），**不会进入或打断主对话**。结果与更新显示在 **Scheduled Tasks** 面板（类似 Sub Agents 两行布局）；运行发现更新时面板标记「更新」并给出提示。任务**持久化**到磁盘（`$G_AGENT_HOME/scheduled-tasks.json`，默认 `~/.config/g-agent/scheduled-tasks.json`），server 重启后自动恢复（到期的任务顺延一个周期，避免重启瞬间全部执行）。`/scheduled` 刷新列表，`/scheduled run <序号|id>` 立即执行一次，`/scheduled cancel <序号|id>` 取消，`/scheduled history <序号|id>` 查看历次运行记录。若任务因外部服务（如 Meegle）登录过期而无法执行，面板会标记「需重新登录」。
 
 #### 计划执行与澄清
 
-`default` 内置 `update_plan` 与 `ask_user` 工具。对非平凡任务，Agent 会先用 `ask_user` 澄清目标、约束与成功标准（**至多几个针对性问题**），再创建 `update_plan` 计划并执行到底：计划未全部完成时不会以普通文字中途收尾或反问用户；执行中需要决策时会调用 `ask_user` 而非打断计划。`ask_user` 的问题以品牌色 `? ` 前缀显示在 Transcript 中，输入框进入「回答」模式，回车后回复直接返回给 Agent 继续执行（不当作新的一轮对话）。
+`default` 内置 `update_plan` 与 `ask_user` 工具。对非平凡任务，Agent 会先用 `ask_user` 澄清目标、约束与成功标准（**至多几个针对性问题**），再创建 `update_plan` 计划并执行到底：计划未全部完成时不会以普通文字中途收尾或反问用户；执行中需要决策时会调用 `ask_user` 而非打断计划。**所有需要用户回答的问题都通过 `ask_user` 提出**——如果模型以普通文字结尾提问，框架会将其改写成一次 `ask_user` 调用。`ask_user` 的问题以品牌色 `? ` 前缀显示在 Transcript 中，输入框进入「回答」模式（边框高亮提示）；当模型提供了离散**选项**（`options`）时，选项直接渲染在问题下方（Transcript 内，`❯` 高亮当前项），用 **↑/↓ + Enter** 直接选择，也可以直接输入自定义回答；回车后回复直接返回给 Agent 继续执行（不当作新的一轮对话）；按 **Esc** 跳过该问题并让 Agent 以最合理的假设继续。**一轮可同时出现多个待回答的问题**（模型并行 `ask_user` 时）：每个问题都独立保留、可来回切换（**Tab**，输入框提示带 `(i/n)` 计数），各自回答或跳过后，本轮 `ask_user` 全部完成 Agent 才会继续。
 
 ## 开发
 
@@ -149,7 +151,7 @@ cargo test -p g-agent-tui
 次。可通过 `G_AGENT_REQUEST_TIMEOUT_MS` 和 `G_AGENT_MAX_RETRIES` 调整；在
 TUI 中按 **Esc** 或 **Ctrl+C** 可立即取消当前回复并中止进行中的模型请求（输入会恢复到编辑器）。
 
-工具调用会实时显示状态：执行中的工具带运行计时（`🐚 ls · 00:32`），完成后标记 ✓ / ✗。长篇幅的
+工具调用会实时显示状态：执行中的工具带运行计时（`▸ ls · 00:32`），完成后标记 ✓ / ✗。长篇幅的
 thinking 自动折叠，按 **Ctrl+T** 展开/收起。状态栏会显示 token 用量（如 `12.3k/128k`）。
 
 后台 Agent 或定时任务完成/失败时，主会话会收到通知；**Tab** 可将焦点切换到
