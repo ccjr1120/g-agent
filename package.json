@@ -5,15 +5,15 @@
   "description": "A simple terminal agent monorepo",
   "packageManager": "pnpm@9.15.9",
   "scripts": {
-    "build": "cargo build --release -p g-agent-tui",
+    "build": "pnpm --filter @g-agent/tui exec tsc --noEmit",
     "dev": "bash scripts/dev.sh",
     "dev:server": "pnpm --filter @g-agent/server dev",
-    "dev:tui": "cargo run -p g-agent-tui",
-    "start": "cargo run --release -p g-agent-tui",
+    "dev:tui": "pnpm --filter @g-agent/tui dev",
+    "start": "pnpm --filter @g-agent/tui start",
     "test": "pnpm test:agent && pnpm test:server && pnpm test:tui",
     "test:agent": "pnpm --filter @g-agent/agent test",
     "test:server": "pnpm --filter @g-agent/server test",
-    "test:tui": "cargo test -p g-agent-tui"
+    "test:tui": "pnpm --filter @g-agent/tui test"
   },
   "engines": {
     "node": ">=18"

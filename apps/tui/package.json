@@ -1,0 +1,28 @@
+{
+  "name": "@g-agent/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "g-agent": "./bin/g-agent.ts"
+  },
+  "scripts": {
+    "dev": "bun --watch ./bin/g-agent.ts",
+    "start": "bun ./bin/g-agent.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@g-agent/config": "workspace:*",
+    "@g-agent/shared": "workspace:*",
+    "@opentui/core": "0.5.1",
+    "@opentui/keymap": "0.5.1",
+    "@opentui/solid": "0.5.1",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.7.2"
+  }
+}

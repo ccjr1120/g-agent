@@ -45,21 +45,6 @@ require_pnpm() {
   fi
 }
 
-require_rust() {
-  export PATH="${HOME}/.cargo/bin:${PATH}"
-
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "==> Installing Rust..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
-    export PATH="${HOME}/.cargo/bin:${PATH}"
-  fi
-
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "Error: Rust/cargo is required. Install from https://rustup.rs" >&2
-    exit 1
-  fi
-}
-
 remove_legacy_pnpm_cli() {
   if ! command -v pnpm >/dev/null 2>&1; then
     return 0
@@ -70,8 +55,18 @@ remove_legacy_pnpm_cli() {
     pnpm remove -g @g-agent/tui >/dev/null 2>&1 || true
   fi
 
+  # Remove any stale bare `g-agent` global link (old manual `pnpm link` name).
+  if pnpm list -g --depth 0 2>/dev/null | grep -q '^g-agent'; then
+    pnpm remove -g g-agent >/dev/null 2>&1 || true
+  fi
+
   local pnpm_bin="${PNPM_HOME:-$HOME/.local/share/pnpm}"
   rm -f "$pnpm_bin/g-agent"
+
+  # Remove the stale Rust-era binary that would otherwise shadow the pnpm CLI.
+  if [ -x "${HOME}/.cargo/bin/g-agent" ]; then
+    rm -f "${HOME}/.cargo/bin/g-agent"
+  fi
 }
 
 server_health_url() {
@@ -121,7 +116,6 @@ server_is_running() {
 
 restart_server_if_running() {
   local install_dir="$1"
-  export PATH="${HOME}/.cargo/bin:${PATH}"
 
   if ! command -v g-agent >/dev/null 2>&1; then
     return 0
@@ -159,7 +153,17 @@ install_from_dir() {
   remove_legacy_pnpm_cli
 
   echo "==> Installing g-agent CLI..."
-  cargo install --path "$dir/apps/tui" --locked --force
+  pushd "$dir/apps/tui" >/dev/null 2>&1
+  pnpm link --global
+  popd >/dev/null 2>&1
+  local bin_name="g-agent"
+  local pnpm_bin="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+  if [ -x "$pnpm_bin/$bin_name" ] || command -v g-agent >/dev/null 2>&1; then
+    : # linked successfully
+  else
+    echo "Error: failed to link the g-agent CLI with pnpm." >&2
+    echo "  Try: cd apps/tui && pnpm link --global ; then add \$PNPM_HOME to PATH." >&2
+  fi
 
   write_install_dir_marker "$dir"
 
@@ -168,14 +172,15 @@ install_from_dir() {
   echo ""
   echo "Done! Run 'g-agent' to start."
   if command -v g-agent >/dev/null 2>&1; then
-    if [ "$(command -v g-agent)" != "${HOME}/.cargo/bin/g-agent" ]; then
-      echo "Warning: another 'g-agent' appears earlier on PATH than ~/.cargo/bin."
-      echo "  Run: pnpm remove -g @g-agent/tui"
-      echo "  Or ensure ~/.cargo/bin is before pnpm in PATH."
+    local installed_bin
+    installed_bin="$(command -v g-agent)"
+    if [ "$installed_bin" != "$pnpm_bin/$bin_name" ]; then
+      echo "Note: 'g-agent' resolves to $installed_bin (expected $pnpm_bin/$bin_name)."
+      echo "  If it is an old ~/.cargo/bin/g-agent, remove it: rm -f \$HOME/.cargo/bin/g-agent"
     fi
   else
-    echo "If 'g-agent' is not found, add Cargo to PATH:"
-    echo "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
+    echo "If 'g-agent' is not found, add pnpm's global bin to PATH:"
+    echo "  export PATH=\"\$PNPM_HOME:\$PATH\""
   fi
 }
 
@@ -193,7 +198,6 @@ resolve_repo_root() {
 
 require_bun
 require_pnpm
-require_rust
 
 if repo_root="$(resolve_repo_root)"; then
   echo "==> Installing G-Agent from local checkout..."

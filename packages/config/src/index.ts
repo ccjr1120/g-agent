@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import type { GAgentConfig, LoadedConfig, RawGAgentConfig } from "./types.js";
+import type { LoadedConfig, RawGAgentConfig } from "./types.js";
 import { normalizeConfig } from "./normalize.js";
 import { resolveConfigPath } from "./paths.js";
 
@@ -42,5 +42,3 @@ export async function loadConfig(): Promise<LoadedConfig> {
   const config = normalizeConfig(JSON.parse(raw) as RawGAgentConfig);
   return { config, path };
 }
-
-export type { GAgentConfig, LoadedConfig };

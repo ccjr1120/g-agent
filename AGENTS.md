@@ -40,26 +40,23 @@ Per `apps/tui/UI_SPEC.md`:
 ## 5. Language & UI Theme
 
 - **Always English** for UI copy and documentation.
-- Colors and semantic styles **must** come from the `src/ui/theme.rs` tokens (`palette::*` / `style::*`). **Never hardcode `Color::Cyan`** etc. inside components.
-- When touching UI, update `apps/tui/UI_SPEC.md` first, then `theme.rs`, then migrate the components.
+- Colors and semantic styles **must** come from the `apps/tui/src/theme/index.ts` tokens (`Style` / `Theme`). **Never hardcode hex colors** inside components.
+- When touching UI, update `apps/tui/UI_SPEC.md` first, then `theme/index.ts`, then migrate the components.
 
 ## 6. Repository Overview & Boundaries
 
-**pnpm + cargo dual-stack monorepo.** Each directory has a fixed responsibility; do not cross boundaries:
+**pnpm + bun monorepo.** Each directory has a fixed responsibility; do not cross boundaries:
 
 | Directory | Stack | Responsibility | Runtime |
 |---|---|---|---|
-| `apps/tui/` | Rust (Ratatui + Crossterm) | Terminal UI | `cargo` |
+| `apps/tui/` | TypeScript (SolidJS + OpenTUI) | Terminal UI | `bun` |
 | `apps/server/` | TypeScript (NodeNext/ESM) | Background server | `bun` |
 | `packages/agent/` | TypeScript | Protocol, Agent logic, tools, skills | `bun` |
 | `packages/config/` | TypeScript | Config loading/normalization | `bun` |
 | `packages/shared/` | TypeScript | Shared types/constants | `bun` |
-| `crates/markdown-ratatui/` | Rust | Markdown rendering (TUI) | `cargo` |
 | `scripts/` | Bash/docs | Build & init scripts | **bash** |
 
 - Business logic goes into `packages/*`, UI goes into `apps/tui`. Do not leak into unrelated directories.
-- On the JS side always use `"type": "module"` + NodeNext, and **relative imports MUST carry the `.js` extension** (`import { x } from "./foo.js"`). Never write `.ts` or bare relative paths.
-- On the Rust side use the workspace convention; put new code in the proper module (`mod` file) of the crate. **Never add new features into a single big `lib.rs` / `mod.rs`.**
 
 ## 7. Code Editing Rules
 
@@ -67,7 +64,6 @@ Per `apps/tui/UI_SPEC.md`:
 
 - **No single file exceeds 600 lines** (target ≤ 500). Exceeding means it is a "big file" and must be split into modules.
 - Any new file that hits the limit is split immediately. When editing an **existing file over 600 lines**, put the change into a suitable submodule and split off the extracted lines rather than piling onto the old big file.
-  - Known big files to split on touch: `apps/tui/src/ui/transcript.rs` (~1500 lines), `crates/markdown-ratatui/src/lib.rs` (~840 lines) — push changes into a submodule and carve out an independent module when feasible.
   - Functions should ideally be **≤ 60 lines**; otherwise extract named helpers, avoid running with one long deeply-nested chain.
 
 ### 7.2 Small-Change Discipline
@@ -76,6 +72,7 @@ Per `apps/tui/UI_SPEC.md`:
 - Limit changes to the scope of the request. **No unrelated refactors** unless adjacent in responsibility and clearly lower risk.
 - Never delete code that merely "looks unused" without confirming there are no references.
 - Naming must be semantic: `isValid` over `flag1`, `MAX_OUTPUT` over `30000` (following existing style such as `MAX_OUTPUT` / `BASH_TIMEOUT_MS` in `tools/index.ts`).
+- **Write code only.** Finish the requested code/doc changes and stop. **Do not proactively run** tests, builds, typecheck, dev servers, or any `pnpm` / `bun` / `scripts/` command — unless the user explicitly asks (e.g. "run tests", "verify the build").
 
 ### 7.3 TypeScript Conventions
 
@@ -85,12 +82,6 @@ Per `apps/tui/UI_SPEC.md`:
 - Centralize public exports: `packages/*/src/index.ts` is the public surface; implementations live in `src/<dir>/`; `index.ts` only re-exports.
 - Define constants in one place with a name (`MAX_OUTPUT`, `BASH_TIMEOUT_MS` pattern). No magic numbers.
 
-### 7.4 Rust Conventions
-
-- Group `use` statements: std → third-party → crate-internal.
-- Errors use `Result<T, anyhow::Error>` (TUI side already uses anyhow). Avoid bare `unwrap`/`expect` that crash.
-- Colors & styles go through `theme.rs` tokens (see section 5).
-
 ### 7.5 Config & Conventions
 
 - `config.json` field naming, defaults follow `config.example.json` and `packages/config/src/normalize.ts`. Adding a config field means: add field → normalize → document (README / AGENTS) → update example.
@@ -98,17 +89,10 @@ Per `apps/tui/UI_SPEC.md`:
 
 ## 8. Testing Gate
 
-- TUI ordering/spacing logic **must have unit tests** (see existing cases in `apps/tui/src/ui/transcript.rs`, `events.rs`, `sessions.rs`). After any rendering change, run `cargo test` (`apps/tui`) and add regression tests for ordering/gaps.
+- TUI ordering/spacing logic **must have unit tests** (see existing cases in `apps/tui/src/transcript.test.ts`, `apps/tui/src/context/plan.test.ts`). Add regression tests for ordering/gaps when changing rendering logic.
 - TS uses `bun test`; test files sit next to sources (`*.test.ts`) under `packages/*/src/**` or `apps/server/src/`.
-- Any logic change **must have tests** (at least one happy path + one boundary/failure).
-- After modifying, run:
-
-  ```bash
-  pnpm test:agent
-  pnpm test:server
-  cargo test -p g-agent-tui   # = pnpm test:tui
-  pnpm test                   # all
-  ```
+- Any logic change **should include tests** when appropriate (at least one happy path + one boundary/failure). **Writing** tests is in scope; **running** them is not — see §7.2.
+- Verification commands (`pnpm test`, `pnpm test:tui`, `typecheck`, etc.) are for the user or CI to run when they choose; agents do not run them unless explicitly asked.
 
 ## 9. Commit Convention
 
@@ -131,10 +115,11 @@ Example: `✨ feat(tui): optimize interaction — tool status/background notify/
 
 - ❌ Mixing irrelevant refactors into the same change (noisy diff).
 - ❌ Adding useless comments to "look professional"; keep comments minimal, let naming carry meaning.
-- ❌ Introducing dependencies not declared in `package.json` / `Cargo.toml` (add dependencies only with consent).
-- ❌ Editing UI with hardcoded colors without syncing `theme.rs` / `UI_SPEC.md`.
-- ❌ Rewriting core protocol / message structures (`packages/agent/src/types.ts`, `protocol.rs`) without a design review.
+- ❌ Introducing dependencies not declared in `package.json` (add dependencies only with consent).
+- ❌ Editing UI with hardcoded colors without syncing `theme/index.ts` / `UI_SPEC.md`.
+- ❌ Rewriting core protocol / message structures (`packages/agent/src/types.ts`, `packages/shared/src/index.ts`) without a design review.
 - ❌ Committing tokens / secrets / personal data; never commit files covered by `.gitignore` (`memory.md`, `dist/`, `target/`, etc.).
+- ❌ Proactively running tests, builds, typecheck, or dev/install scripts after code changes (see §7.2).
 
 ## 12. Authority & Conflicts
 

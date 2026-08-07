@@ -2,11 +2,11 @@
 
 无论是 Hermes 还是 Openclaw，对我来说都太重太繁琐，我要的功能没那么复杂，也不太在乎安全，所以有了这个简单简洁版本的。
 
-Monorepo：**pnpm** 管理 JS 依赖，**bun** 运行 server；TUI 为 Rust（Ratatui + Crossterm），位于 `apps/tui`。共享协议与 agent 逻辑在 `packages/`。
+Monorepo：**pnpm** 管理 JS 依赖，**bun** 运行；TUI 为 TypeScript（SolidJS + OpenTUI），位于 `apps/tui`。共享协议与 agent 逻辑在 `packages/`。
 
 ## 安装
 
-一行命令（从 GitHub 拉取并安装，自动安装 bun / pnpm / Rust）：
+一行命令（从 GitHub 拉取并安装，自动安装 bun / pnpm）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ccjr1120/g-agent/main/install.sh | bash
@@ -137,14 +137,13 @@ TUI 内：
 
 ## 开发
 
-前置：安装 [bun](https://bun.sh)、[pnpm](https://pnpm.io) 与 [Rust](https://rustup.rs)（含 `cargo`）。
+前置：安装 [bun](https://bun.sh)、[pnpm](https://pnpm.io)。
 
 ```bash
 pnpm install
-pnpm dev          # 启动 server + Rust TUI
+pnpm dev          # 启动 server + TUI
 pnpm dev:tui      # 仅 TUI（server 需已运行或由 TUI 自动拉起）
-pnpm test         # Agent 单元测试 + TUI 测试
-cargo test -p g-agent-tui
+pnpm test         # Agent 单元测试 + Server + TUI 测试
 ```
 
 模型请求默认 120 秒超时，并对 408/409/429/5xx 等瞬时错误最多重试 2
@@ -178,9 +177,8 @@ Agent 默认最多运行 25 轮模型请求，可通过 `G_AGENT_MAX_TOOL_ROUNDS
 ## 卸载
 
 ```bash
-cargo uninstall g-agent
-pnpm remove -g @g-agent/tui   # 若曾用旧版 pnpm link 安装
+pnpm remove -g @g-agent/tui   # 若曾用 pnpm link 安装
 rm -rf ~/.local/share/g-agent   # 若通过 curl 安装
 ```
 
-若运行 `g-agent` 报 `dist/cli.js` 找不到，说明 PATH 里仍是旧的 pnpm 全局命令。执行 `pnpm remove -g @g-agent/tui`，或确认 `~/.cargo/bin` 在 `~/.local/share/pnpm` 之前。
+若运行 `g-agent` 报找不到命令，说明 PATH 里仍是旧的 pnpm 全局命令。执行 `pnpm remove -g @g-agent/tui`，或确认 `~/.local/share/pnpm` 已加入 PATH。
